@@ -655,6 +655,7 @@ dependencies = [
  "crossterm",
  "quick-xml",
  "ratatui",
+ "regex",
  "serde",
  "serde_json",
  "thiserror 2.0.20",

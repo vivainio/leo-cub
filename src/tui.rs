@@ -1,4 +1,9 @@
-use std::{collections::HashSet, io, path::PathBuf, time::Duration};
+use std::{
+    collections::HashSet,
+    fs, io,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use anyhow::Result;
 use crossterm::{
@@ -6,7 +11,7 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use leo::{LeoDocument, NodeId, Outline, Position, PositionId};
+use leo::{DerivedFile, LeoDocument, NodeId, Outline, Position, PositionId};
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
@@ -28,10 +33,11 @@ struct App {
     document: LeoDocument,
     expanded: HashSet<PositionId>,
     selected: usize,
+    status: String,
 }
 
 impl App {
-    fn new(document: LeoDocument) -> Self {
+    fn new(document: LeoDocument, status: String) -> Self {
         let expanded = document
             .outline
             .roots
@@ -43,6 +49,7 @@ impl App {
             document,
             expanded,
             selected: 0,
+            status,
         }
     }
 
@@ -106,9 +113,24 @@ impl App {
     }
 }
 
-pub fn run(path: PathBuf) -> Result<()> {
-    let document = LeoDocument::open(path)?;
-    let mut app = App::new(document);
+pub fn run(path: PathBuf, load_derived: bool) -> Result<()> {
+    let mut document = LeoDocument::open(&path)?;
+    let status = if load_derived {
+        let report = load_derived_files(&mut document.outline, &path);
+        if report.errors.is_empty() {
+            format!("loaded {} derived file(s)", report.loaded)
+        } else {
+            format!(
+                "loaded {}; {} error(s): {}",
+                report.loaded,
+                report.errors.len(),
+                report.errors.join(" | ")
+            )
+        }
+    } else {
+        "derived files disabled".to_owned()
+    };
+    let mut app = App::new(document, status);
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -221,10 +243,122 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &App) {
         columns[1],
     );
     frame.render_widget(
-        Paragraph::new("↑/k ↓/j select   →/l expand   ←/h collapse   q quit")
-            .style(Style::default().fg(Color::DarkGray)),
+        Paragraph::new(format!(
+            "↑/k ↓/j   →/l expand   ←/h collapse   q quit   [{}]",
+            app.status
+        ))
+        .style(Style::default().fg(Color::DarkGray)),
         areas[1],
     );
+}
+
+#[derive(Default)]
+struct LoadReport {
+    loaded: usize,
+    errors: Vec<String>,
+}
+
+struct DerivedJob {
+    position: PositionId,
+    path: PathBuf,
+}
+
+fn load_derived_files(outline: &mut Outline, outline_path: &Path) -> LoadReport {
+    let jobs = derived_jobs(outline, outline_path);
+    let mut report = LoadReport::default();
+    for job in jobs {
+        let label = job.path.display().to_string();
+        let result = fs::read_to_string(&job.path)
+            .map_err(|error| error.to_string())
+            .and_then(|source| DerivedFile::parse(&source).map_err(|error| error.to_string()))
+            .and_then(|derived| {
+                derived
+                    .merge_into(outline, &job.position)
+                    .map_err(|error| error.to_string())
+            });
+        match result {
+            Ok(()) => report.loaded += 1,
+            Err(error) => report.errors.push(format!("{label}: {error}")),
+        }
+    }
+    report
+}
+
+fn derived_jobs(outline: &Outline, outline_path: &Path) -> Vec<DerivedJob> {
+    fn visit(
+        outline: &Outline,
+        positions: &[Position],
+        parent_id: &str,
+        base: &Path,
+        inherited_paths: &[String],
+        jobs: &mut Vec<DerivedJob>,
+    ) {
+        for (index, position) in positions.iter().enumerate() {
+            let position_id = if parent_id.is_empty() {
+                index.to_string()
+            } else {
+                format!("{parent_id}/{index}")
+            };
+            let node = &outline.nodes[&position.node];
+            let mut paths = inherited_paths.to_vec();
+            if let Some(path) =
+                path_directive(&node.headline).or_else(|| path_directive(&node.body))
+            {
+                paths.push(path);
+            }
+            if let Some(filename) = thin_filename(&node.headline) {
+                let mut path = base.to_path_buf();
+                for component in inherited_paths {
+                    path.push(component);
+                }
+                path.push(filename);
+                jobs.push(DerivedJob {
+                    position: PositionId(position_id.clone()),
+                    path,
+                });
+            }
+            visit(
+                outline,
+                &position.children,
+                &position_id,
+                base,
+                &paths,
+                jobs,
+            );
+        }
+    }
+    let base = outline_path.parent().unwrap_or_else(|| Path::new("."));
+    let mut jobs = Vec::new();
+    visit(outline, &outline.roots, "", base, &[], &mut jobs);
+    jobs
+}
+
+fn thin_filename(headline: &str) -> Option<&str> {
+    let (directive, filename) = headline.trim().split_once(char::is_whitespace)?;
+    matches!(directive, "@file" | "@thin" | "@file-thin")
+        .then(|| strip_path_cruft(filename))
+        .filter(|filename| !filename.is_empty())
+}
+
+fn path_directive(text: &str) -> Option<String> {
+    text.lines().find_map(|line| {
+        line.strip_prefix("@path")
+            .and_then(|rest| rest.starts_with(char::is_whitespace).then_some(rest))
+            .map(strip_path_cruft)
+            .filter(|path| !path.is_empty())
+            .map(str::to_owned)
+    })
+}
+
+fn strip_path_cruft(path: &str) -> &str {
+    let path = path.trim();
+    if path.len() > 2 {
+        let pair = (path.as_bytes()[0], path.as_bytes()[path.len() - 1]);
+        if matches!(pair, (b'<', b'>') | (b'"', b'"') | (b'\'', b'\'')) {
+            return path[1..path.len() - 1].trim();
+        }
+    }
+    path
 }
 
 fn clone_count(outline: &Outline, id: &NodeId) -> usize {
@@ -235,4 +369,48 @@ fn clone_count(outline: &Outline, id: &NodeId) -> usize {
             .sum()
     }
     count(&outline.roots, id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recognizes_only_sentinelled_file_headlines() {
+        assert_eq!(thin_filename("@file src/main.rs"), Some("src/main.rs"));
+        assert_eq!(thin_filename("@file \"src/main.rs\""), Some("src/main.rs"));
+        assert_eq!(thin_filename("@clean src/main.rs"), None);
+        assert_eq!(thin_filename("ordinary"), None);
+    }
+
+    #[test]
+    fn extracts_leo_path_directives() {
+        assert_eq!(
+            path_directive("@language rust\n@path <src/core>\n"),
+            Some("src/core".into())
+        );
+    }
+
+    #[test]
+    fn expands_checked_out_leo_reference_when_available() {
+        let path = Path::new("/home/v/r/ref/leo-editor/leo/core/LeoPyRef.leo");
+        if !path.exists() {
+            return;
+        }
+        let mut document = LeoDocument::open(path).unwrap();
+        let report = load_derived_files(&mut document.outline, path);
+        assert!(report.loaded > 40, "{:?}", report.errors);
+        let at_file = document
+            .outline
+            .nodes
+            .get(&NodeId::from("ekr.20150323150718.1"))
+            .unwrap();
+        assert_eq!(at_file.headline, "@file leoAtFile.py");
+        assert!(
+            document
+                .outline
+                .nodes
+                .contains_key(&NodeId::from("ekr.20041005105605.2"))
+        );
+    }
 }
