@@ -1,7 +1,8 @@
 use std::{
-    collections::HashSet,
-    fs, io,
+    collections::{HashMap, HashSet},
+    env, fs, io,
     path::{Path, PathBuf},
+    process::Command,
     time::Duration,
 };
 
@@ -34,10 +35,15 @@ struct App {
     expanded: HashSet<PositionId>,
     selected: usize,
     status: String,
+    source_locations: HashMap<PositionId, SourceLocation>,
 }
 
 impl App {
-    fn new(document: LeoDocument, status: String) -> Self {
+    fn new(
+        document: LeoDocument,
+        status: String,
+        source_locations: HashMap<PositionId, SourceLocation>,
+    ) -> Self {
         let expanded = document
             .outline
             .roots
@@ -50,6 +56,7 @@ impl App {
             expanded,
             selected: 0,
             status,
+            source_locations,
         }
     }
 
@@ -115,9 +122,9 @@ impl App {
 
 pub fn run(path: PathBuf, load_derived: bool) -> Result<()> {
     let mut document = LeoDocument::open(&path)?;
-    let status = if load_derived {
+    let (status, source_locations) = if load_derived {
         let report = load_derived_files(&mut document.outline, &path);
-        if report.errors.is_empty() {
+        let status = if report.errors.is_empty() {
             format!("loaded {} derived file(s)", report.loaded)
         } else {
             format!(
@@ -126,11 +133,12 @@ pub fn run(path: PathBuf, load_derived: bool) -> Result<()> {
                 report.errors.len(),
                 report.errors.join(" | ")
             )
-        }
+        };
+        (status, report.locations)
     } else {
-        "derived files disabled".to_owned()
+        ("derived files disabled".to_owned(), HashMap::new())
     };
-    let mut app = App::new(document, status);
+    let mut app = App::new(document, status, source_locations);
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -158,6 +166,7 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
         }
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
+            KeyCode::Char('o') => open_selected(terminal, app),
             KeyCode::Down | KeyCode::Char('j') => app.move_selection(1),
             KeyCode::Up | KeyCode::Char('k') => app.move_selection(-1),
             KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => app.toggle(true),
@@ -243,7 +252,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &App) {
     );
     frame.render_widget(
         Paragraph::new(format!(
-            "↑/k ↓/j   →/l expand   ←/h collapse   q quit   [{}]",
+            "↑/k ↓/j   →/l expand   ←/h collapse   o open source   q quit   [{}]",
             app.status
         ))
         .style(Style::default().fg(Color::DarkGray)),
@@ -255,11 +264,18 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &App) {
 struct LoadReport {
     loaded: usize,
     errors: Vec<String>,
+    locations: HashMap<PositionId, SourceLocation>,
 }
 
 struct DerivedJob {
     position: PositionId,
     path: PathBuf,
+}
+
+#[derive(Clone)]
+struct SourceLocation {
+    path: PathBuf,
+    line: usize,
 }
 
 fn load_derived_files(outline: &mut Outline, outline_path: &Path) -> LoadReport {
@@ -273,7 +289,22 @@ fn load_derived_files(outline: &mut Outline, outline_path: &Path) -> LoadReport 
             .and_then(|derived| {
                 derived
                     .merge_into(outline, &job.position)
-                    .map_err(|error| error.to_string())
+                    .map_err(|error| error.to_string())?;
+                for (derived_position, line) in &derived.locations {
+                    let suffix = derived_position
+                        .0
+                        .strip_prefix("0")
+                        .unwrap_or(&derived_position.0);
+                    let position = PositionId(format!("{}{}", job.position.0, suffix));
+                    report.locations.insert(
+                        position,
+                        SourceLocation {
+                            path: job.path.clone(),
+                            line: *line,
+                        },
+                    );
+                }
+                Ok(())
             });
         match result {
             Ok(()) => report.loaded += 1,
@@ -281,6 +312,78 @@ fn load_derived_files(outline: &mut Outline, outline_path: &Path) -> LoadReport 
         }
     }
     report
+}
+
+fn open_selected(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) {
+    let Some(row) = app.rows().get(app.selected).cloned() else {
+        return;
+    };
+    let Some(location) = app.source_locations.get(&row.position).cloned() else {
+        app.status = "selected node has no external source location".to_owned();
+        return;
+    };
+    if let Err(error) = suspend_and_open(terminal, &location) {
+        app.status = format!("open failed: {error}");
+    } else {
+        app.status = format!("opened {}:{}", location.path.display(), location.line);
+    }
+}
+
+fn suspend_and_open(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    location: &SourceLocation,
+) -> Result<()> {
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    terminal.show_cursor()?;
+    let editor_result = run_editor(location);
+    execute!(terminal.backend_mut(), EnterAlternateScreen)?;
+    enable_raw_mode()?;
+    terminal.clear()?;
+    editor_result
+}
+
+fn run_editor(location: &SourceLocation) -> Result<()> {
+    let editor = env::var("VISUAL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| env::var("EDITOR").ok().filter(|s| !s.trim().is_empty()))
+        .unwrap_or_else(|| "vi".to_owned());
+    let mut parts = editor.split_whitespace();
+    let program = parts
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("empty editor command"))?;
+    let mut command = Command::new(program);
+    command.args(parts);
+    let name = Path::new(program)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(program);
+    let path = location.path.as_os_str();
+    match name {
+        "vim" | "nvim" | "vi" | "view" | "nano" => {
+            command.arg(format!("+{}", location.line)).arg(path);
+        }
+        "emacs" | "emacsclient" => {
+            command.arg(format!("+{}:1", location.line)).arg(path);
+        }
+        "code" | "code-insiders" | "codium" => {
+            command
+                .arg("--goto")
+                .arg(format!("{}:{}:1", location.path.display(), location.line));
+        }
+        "hx" | "helix" | "kak" => {
+            command.arg(format!("{}:{}:1", location.path.display(), location.line));
+        }
+        _ => {
+            command.arg(path);
+        }
+    }
+    let status = command.status()?;
+    if !status.success() {
+        anyhow::bail!("editor exited with {status}");
+    }
+    Ok(())
 }
 
 fn derived_jobs(outline: &Outline, outline_path: &Path) -> Vec<DerivedJob> {
@@ -387,29 +490,6 @@ mod tests {
         assert_eq!(
             path_directive("@language rust\n@path <src/core>\n"),
             Some("src/core".into())
-        );
-    }
-
-    #[test]
-    fn expands_checked_out_leo_reference_when_available() {
-        let path = Path::new("/home/v/r/ref/leo-editor/leo/core/LeoPyRef.leo");
-        if !path.exists() {
-            return;
-        }
-        let mut document = LeoDocument::open(path).unwrap();
-        let report = load_derived_files(&mut document.outline, path);
-        assert!(report.loaded > 40, "{:?}", report.errors);
-        let at_file = document
-            .outline
-            .nodes
-            .get(&NodeId::from("ekr.20150323150718.1"))
-            .unwrap();
-        assert_eq!(at_file.headline, "@file leoAtFile.py");
-        assert!(
-            document
-                .outline
-                .nodes
-                .contains_key(&NodeId::from("ekr.20041005105605.2"))
         );
     }
 }

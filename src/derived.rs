@@ -13,6 +13,8 @@ pub struct DerivedFile {
     pub root: NodeId,
     pub start_delimiter: String,
     pub end_delimiter: String,
+    /// One-based sentinel line for each physical outline position.
+    pub locations: HashMap<PositionId, usize>,
 }
 
 #[derive(Debug, Error, PartialEq)]
@@ -53,6 +55,7 @@ impl DerivedFile {
         let mut outline = Outline::default();
         let mut root = None;
         let mut level_paths: Vec<Vec<usize>> = Vec::new();
+        let mut locations = HashMap::new();
         let mut current: Option<NodeId> = None;
         let mut indent = 0usize;
         let mut expansions: Vec<(NodeId, usize)> = Vec::new();
@@ -162,6 +165,16 @@ impl DerivedFile {
                 };
                 level_paths.truncate(level.saturating_sub(1));
                 level_paths.push(path);
+                let position_id = PositionId(
+                    level_paths
+                        .last()
+                        .expect("just pushed")
+                        .iter()
+                        .map(usize::to_string)
+                        .collect::<Vec<_>>()
+                        .join("/"),
+                );
+                locations.insert(position_id, line_number);
                 current = Some(gnx);
                 indent = captures[1].len();
                 continue;
@@ -269,6 +282,7 @@ impl DerivedFile {
             root,
             start_delimiter,
             end_delimiter,
+            locations,
         })
     }
 

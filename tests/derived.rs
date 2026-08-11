@@ -41,6 +41,7 @@ fn reconstructs_hierarchy_bodies_and_verbatim_lines() {
     let parsed = DerivedFile::parse(PYTHON).unwrap();
     assert_eq!(parsed.root, NodeId::from("root.1"));
     assert_eq!(parsed.outline.roots[0].children.len(), 2);
+    assert_eq!(parsed.locations[&PositionId("0/0".into())], 6);
     assert_eq!(
         parsed.outline.nodes[&NodeId::from("root.1")].body,
         "root line\n@others\nroot tail\n"

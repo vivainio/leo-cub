@@ -7,7 +7,7 @@ use std::{fs, path::PathBuf};
 mod tui;
 
 #[derive(Parser)]
-#[command(version, about)]
+#[command(name = "cub", version, about)]
 struct Cli {
     #[command(subcommand)]
     command: Command,

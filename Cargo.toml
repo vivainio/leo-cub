@@ -1,5 +1,5 @@
 [package]
-name = "leo-rs"
+name = "leo-cub"
 version = "0.1.0"
 edition = "2024"
 description = "Automation-safe library and CLI for Leo outline files"
@@ -7,6 +7,10 @@ license = "MIT OR Apache-2.0"
 
 [lib]
 name = "leo"
+
+[[bin]]
+name = "cub"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0"
