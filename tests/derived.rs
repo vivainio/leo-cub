@@ -26,6 +26,16 @@ int value;
 
 const FIRST_LAST: &str = "#!/usr/bin/env python\n#@+leo-ver=5-thin-encoding=utf-8,.\n#@+node:first.1: * @file script.py\n#@@first\nbody\n#@@last\n#@-leo\ntrailer\n";
 
+const INDENTED_OTHERS: &str = r#"#@+leo-ver=5-thin
+#@+node:indent.1: * @file nested.py
+def outer():
+    #@+others
+    #@+node:indent.2: ** child
+    return 1
+    #@-others
+#@-leo
+"#;
+
 #[test]
 fn reconstructs_hierarchy_bodies_and_verbatim_lines() {
     let parsed = DerivedFile::parse(PYTHON).unwrap();
@@ -63,6 +73,19 @@ fn restores_first_last_and_encoded_headers() {
     assert_eq!(
         parsed.outline.nodes[&NodeId::from("first.1")].body,
         "@first #!/usr/bin/env python\nbody\n@last trailer\n"
+    );
+}
+
+#[test]
+fn preserves_directive_and_child_body_indentation() {
+    let parsed = DerivedFile::parse(INDENTED_OTHERS).unwrap();
+    assert_eq!(
+        parsed.outline.nodes[&NodeId::from("indent.1")].body,
+        "def outer():\n    @others\n"
+    );
+    assert_eq!(
+        parsed.outline.nodes[&NodeId::from("indent.2")].body,
+        "return 1\n"
     );
 }
 

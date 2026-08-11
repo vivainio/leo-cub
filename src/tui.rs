@@ -18,7 +18,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
 };
 
 #[derive(Clone)]
@@ -224,7 +224,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &App) {
         .get(app.selected)
         .map(|row| {
             let node = &app.document.outline.nodes[&row.node];
-            Text::from(vec![
+            let mut text = Text::from(vec![
                 Line::styled(
                     &node.headline,
                     Style::default().add_modifier(Modifier::BOLD),
@@ -232,14 +232,13 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &App) {
                 Line::from(format!("GNX: {}", node.id.0)),
                 Line::from(format!("Position: {}", row.position.0)),
                 Line::from(""),
-                Line::from(node.body.as_str()),
-            ])
+            ]);
+            text.extend(Text::from(node.body.as_str()));
+            text
         })
         .unwrap_or_default();
     frame.render_widget(
-        Paragraph::new(details)
-            .block(Block::default().title(" Node ").borders(Borders::ALL))
-            .wrap(Wrap { trim: false }),
+        Paragraph::new(details).block(Block::default().title(" Node ").borders(Borders::ALL)),
         columns[1],
     );
     frame.render_widget(

@@ -77,7 +77,7 @@ impl DerivedFile {
                 if let Some(id) = current.as_ref()
                     && let Some(node) = outline.nodes.get_mut(id)
                 {
-                    let joined = format!("{}{}", node.body.trim_end(), strip_indent(line, indent));
+                    let joined = format!("{}{}", node.body.trim_end(), line);
                     node.body = joined;
                 }
                 after_ref = false;
@@ -197,13 +197,14 @@ impl DerivedFile {
 
             if let Some(tail) = inner.strip_prefix("@+others") {
                 let id = current.clone().ok_or(SentinelError::MissingRoot)?;
+                let leading = leading_width(line);
                 append_body(
                     &mut outline,
                     Some(&id),
-                    &format!("{}@others{}\n", " ".repeat(indent), tail),
+                    &format!("{}@others{}\n", &line[..leading], tail),
                 );
                 expansions.push((id, indent));
-                indent += leading_width(line);
+                indent += leading;
                 continue;
             }
             if inner.starts_with("@-others") {
@@ -212,13 +213,14 @@ impl DerivedFile {
             }
             if let Some(tail) = inner.strip_prefix("@+all") {
                 let id = current.clone().ok_or(SentinelError::MissingRoot)?;
+                let leading = leading_width(line);
                 append_body(
                     &mut outline,
                     Some(&id),
-                    &format!("{}@all{}\n", " ".repeat(indent), tail),
+                    &format!("{}@all{}\n", &line[..leading], tail),
                 );
                 expansions.push((id, indent));
-                indent += leading_width(line);
+                indent += leading;
                 continue;
             }
             if inner.starts_with("@-all") {
@@ -228,13 +230,14 @@ impl DerivedFile {
             if let Some(section) = inner.strip_prefix("@+<<") {
                 let id = current.clone().ok_or(SentinelError::MissingRoot)?;
                 let section = section.strip_suffix(">>").unwrap_or(section);
+                let leading = leading_width(line);
                 append_body(
                     &mut outline,
                     Some(&id),
-                    &format!("{}<<{}>>\n", " ".repeat(indent), section),
+                    &format!("{}<<{}>>\n", &line[..leading], section),
                 );
                 expansions.push((id, indent));
-                indent += leading_width(line);
+                indent += leading;
                 continue;
             }
             if inner.starts_with("@-<<") {
