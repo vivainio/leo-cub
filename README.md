@@ -23,6 +23,7 @@ and exposes transactional operations intended for scripts and AI tools.
 - Reconstruct `@file`, `@thin`, and `@file-thin` hierarchies and bodies.
 - Resolve ancestor `@path` directives in the TUI.
 - Browse outlines with a small Ratatui interface.
+- Highlight node bodies with Syntect, using `@language` or source extensions.
 - Open a derived node's full source file at its sentinel line using `$VISUAL` or
   `$EDITOR`.
 
@@ -56,6 +57,7 @@ The browser resolves external thin files in memory. Its keys are:
 | `l`, `→`, `Enter` | Expand selected node |
 | `h`, `←` | Collapse selected node |
 | `o` | Open the full external source file at the node sentinel |
+| `y` | Toggle syntax highlighting |
 | `q`, `Esc` | Quit |
 
 Use `--no-derived` to display only the hierarchy physically present in the

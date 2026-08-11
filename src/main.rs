@@ -3,6 +3,8 @@ use clap::{Parser, Subcommand};
 use leo::{DerivedFile, LeoDocument, OperationBatch, PositionId};
 use std::{fs, path::PathBuf};
 
+#[cfg(all(feature = "tui", feature = "syntax"))]
+mod syntax;
 #[cfg(feature = "tui")]
 mod tui;
 

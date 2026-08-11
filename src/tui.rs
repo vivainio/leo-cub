@@ -36,6 +36,12 @@ struct App {
     selected: usize,
     status: String,
     source_locations: HashMap<PositionId, SourceLocation>,
+    #[cfg(feature = "syntax")]
+    syntax: crate::syntax::SyntaxHighlighter,
+    #[cfg(feature = "syntax")]
+    syntax_enabled: bool,
+    #[cfg(feature = "syntax")]
+    highlight_cache: HashMap<PositionId, Text<'static>>,
 }
 
 impl App {
@@ -57,6 +63,12 @@ impl App {
             selected: 0,
             status,
             source_locations,
+            #[cfg(feature = "syntax")]
+            syntax: crate::syntax::SyntaxHighlighter::new(),
+            #[cfg(feature = "syntax")]
+            syntax_enabled: true,
+            #[cfg(feature = "syntax")]
+            highlight_cache: HashMap::new(),
         }
     }
 
@@ -167,6 +179,14 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
             KeyCode::Char('o') => open_selected(terminal, app),
+            #[cfg(feature = "syntax")]
+            KeyCode::Char('y') => {
+                app.syntax_enabled = !app.syntax_enabled;
+                app.status = format!(
+                    "syntax highlighting {}",
+                    if app.syntax_enabled { "on" } else { "off" }
+                );
+            }
             KeyCode::Down | KeyCode::Char('j') => app.move_selection(1),
             KeyCode::Up | KeyCode::Char('k') => app.move_selection(-1),
             KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => app.toggle(true),
@@ -178,7 +198,7 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
     }
 }
 
-fn draw(frame: &mut ratatui::Frame<'_>, app: &App) {
+fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
     let areas = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(4), Constraint::Length(1)])
@@ -233,16 +253,15 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &App) {
         .get(app.selected)
         .map(|row| {
             let node = &app.document.outline.nodes[&row.node];
+            let headline = node.headline.clone();
+            let gnx = node.id.0.clone();
             let mut text = Text::from(vec![
-                Line::styled(
-                    &node.headline,
-                    Style::default().add_modifier(Modifier::BOLD),
-                ),
-                Line::from(format!("GNX: {}", node.id.0)),
+                Line::styled(headline, Style::default().add_modifier(Modifier::BOLD)),
+                Line::from(format!("GNX: {gnx}")),
                 Line::from(format!("Position: {}", row.position.0)),
                 Line::from(""),
             ]);
-            text.extend(Text::from(node.body.as_str()));
+            text.extend(body_text(app, row));
             text
         })
         .unwrap_or_default();
@@ -251,13 +270,36 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &App) {
         columns[1],
     );
     frame.render_widget(
-        Paragraph::new(format!(
-            "↑/k ↓/j   →/l expand   ←/h collapse   o open source   q quit   [{}]",
-            app.status
-        ))
-        .style(Style::default().fg(Color::DarkGray)),
+        Paragraph::new(format!("{}   [{}]", controls(), app.status))
+            .style(Style::default().fg(Color::DarkGray)),
         areas[1],
     );
+}
+
+fn controls() -> &'static str {
+    #[cfg(feature = "syntax")]
+    return "↑/k ↓/j   →/l expand   ←/h collapse   o open   y syntax   q quit";
+    #[cfg(not(feature = "syntax"))]
+    "↑/k ↓/j   →/l expand   ←/h collapse   o open   q quit"
+}
+
+fn body_text(app: &mut App, row: &Row) -> Text<'static> {
+    let body = app.document.outline.nodes[&row.node].body.clone();
+    #[cfg(feature = "syntax")]
+    if app.syntax_enabled {
+        if let Some(cached) = app.highlight_cache.get(&row.position) {
+            return cached.clone();
+        }
+        let source_path = app
+            .source_locations
+            .get(&row.position)
+            .map(|location| location.path.as_path());
+        let highlighted = app.syntax.highlight(&body, source_path);
+        app.highlight_cache
+            .insert(row.position.clone(), highlighted.clone());
+        return highlighted;
+    }
+    Text::from(body)
 }
 
 #[derive(Default)]
