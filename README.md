@@ -6,6 +6,8 @@ outlines.
 
 The installed command is `cub`; the Rust library namespace is `leo`.
 
+![leo-cub TUI browsing an expanded external file node](docs/tui.svg)
+
 ## Why
 
 Leo outlines are not ordinary XML trees. A GNX identifies shared vnode content,

@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="680" viewBox="0 0 1200 680">
+  <rect width="1200" height="680" rx="12" fill="#0d1117"/>
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="16" fill="#c9d1d9">
+    <text x="20" y="34" fill="#8b949e">┌─ Outline ─────────────────────────────────────┐┌─ Node ───────────────────────────────────────────────────────────────┐</text>
+    <text x="20" y="58">│▾ Startup                                      ││<tspan font-weight="bold" fill="#f0f6fc">@file ../doc/leoAttic.txt</tspan>                                          │</text>
+    <text x="20" y="82">│  ▸ @settings                                  ││GNX: ekr.20170302123956.1                                           │</text>
+    <text x="20" y="106">│  ▸ scripts                                    ││Position: 0/3/0                                                       │</text>
+    <text x="20" y="130">│▾ The attic                                    ││                                                                    │</text>
+    <rect x="20" y="140" width="470" height="24" fill="#1f6feb"/>
+    <text x="20" y="158" fill="#ffffff" font-weight="bold">│  ▾ @file ../doc/leoAttic.txt                  │</text>
+    <text x="510" y="158">│# This is Leo's final resting place for dead code.                   │</text>
+    <text x="20" y="182">│    ▸ Permanent attic                          ││# New in Leo 6.7.5. The attic will contain only code retired in the │</text>
+    <text x="20" y="206">│    ▸ Temporary Attic                          ││                                                                    │</text>
+    <text x="20" y="230">│▾ Code                                         ││@language python                                                    │</text>
+    <text x="20" y="254">│    About this file                            ││@killbeautify                                                       │</text>
+    <text x="20" y="278">│    Core classes                               ││@all                                                                │</text>
+    <text x="20" y="302">│    Command classes                            ││@nosearch                                                           │</text>
+    <text x="20" y="326">│    Gui base classes                           ││                                                                    │</text>
+    <text x="20" y="350">│    Other files                                ││                                                                    │</text>
+    <text x="20" y="374">│    Qt gui                                     ││                                                                    │</text>
+    <text x="20" y="398">│    Plugins                                    ││                                                                    │</text>
+    <text x="20" y="422">│    Testing                                    ││                                                                    │</text>
+    <text x="20" y="446">│  ▸ leo/unittests                              ││                                                                    │</text>
+    <text x="20" y="470">│  ▸ Version                                    ││                                                                    │</text>
+    <text x="20" y="494">│                                               ││                                                                    │</text>
+    <text x="20" y="518">│                                               ││                                                                    │</text>
+    <text x="20" y="542">│                                               ││                                                                    │</text>
+    <text x="20" y="566">│                                               ││                                                                    │</text>
+    <text x="20" y="590">└───────────────────────────────────────────────┘└────────────────────────────────────────────────────────────────────┘</text>
+    <text x="20" y="625" fill="#8b949e">↑/k ↓/j   →/l expand   ←/h collapse   o open source   q quit</text>
+    <text x="20" y="651" fill="#3fb950">loaded 358 derived file(s)</text>
+  </g>
+</svg>
