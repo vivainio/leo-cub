@@ -1966,9 +1966,9 @@ pub use xml::{LeoDocument, LeoXmlError};
 @tabwidth -4
 </t>
 <t tx="ekr.20260812053055.2"></t>
-<t tx="ekr.20260812053055.20" _mod_time="4741da9f2d4cab80892e">use anyhow::{Context, Result, bail};
+<t tx="ekr.20260812053055.20" _mod_time="4741da9f2f584fb3352e">use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use leo::{DerivedFile, LeoDocument, OperationBatch, PositionId, sync_document};
+use leo::{DerivedFile, LeoDocument, OperationBatch, sync_document};
 use std::{fs, path::PathBuf};
 
 @others
@@ -2019,14 +2019,6 @@ enum Command {
         #[arg(long, conflicts_with = "external")]
         gnx: Option&lt;String&gt;,
         /// Validate and report changes without writing the outline.
-        #[arg(long)]
-        dry_run: bool,
-    },
-    /// Reconstruct an @file subtree from a thin derived file.
-    RefreshDerived {
-        file: PathBuf,
-        position: String,
-        derived: PathBuf,
         #[arg(long)]
         dry_run: bool,
     },
@@ -2097,28 +2089,6 @@ enum Command {
                 document.save(&amp;file)?;
             }
             println!("{}", serde_json::to_string_pretty(&amp;report)?);
-        }
-        Command::RefreshDerived {
-            file,
-            position,
-            derived,
-            dry_run,
-        } =&gt; {
-            let mut document = LeoDocument::open(&amp;file)?;
-            let source = fs::read_to_string(&amp;derived).context("read derived file")?;
-            let parsed = DerivedFile::parse(&amp;source)?;
-            parsed.merge_into(&amp;mut document.outline, &amp;PositionId(position))?;
-            if !dry_run {
-                document.save(file)?;
-            }
-            println!(
-                "{}",
-                serde_json::json!({
-                    "root": parsed.root,
-                    "nodes": parsed.outline.nodes.len(),
-                    "dry_run": dry_run
-                })
-            );
         }
         Command::InspectDerived { derived, summary } =&gt; {
             let source = fs::read_to_string(derived).context("read derived file")?;

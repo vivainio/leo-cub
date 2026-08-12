@@ -112,7 +112,6 @@ cub sync outline.leo src/main.rs --dry-run
 cub sync outline.leo --gnx ekr.20260811210000.1
 cub diff before.leo after.leo
 cub inspect-derived path/to/derived.py --summary
-cub refresh-derived outline.leo 0 path/to/derived.py --dry-run
 cub apply outline.leo operations.json --dry-run
 ```
 
