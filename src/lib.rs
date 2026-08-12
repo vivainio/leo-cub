@@ -2,6 +2,7 @@
 
 mod clean;
 mod derived;
+mod inspect;
 mod model;
 mod operation;
 mod sync;
@@ -9,6 +10,11 @@ mod xml;
 
 pub use clean::propagate_clean_changes;
 pub use derived::{DerivedFile, SentinelError};
+pub use inspect::{
+    ExternalFilter, InspectError, InspectSelector, SearchExcerpt, SearchMatch,
+    load_matching_external_files, render_compact, render_search_compact, search_outline,
+    select_subtrees,
+};
 pub use model::{Node, NodeId, Outline, Position, PositionId, ValidationError};
 pub use operation::{ApplyError, ApplyReport, Operation, OperationBatch, Target};
 pub use sync::{SyncError, SyncItem, SyncReport, sync_document};

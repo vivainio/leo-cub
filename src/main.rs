@@ -1,6 +1,11 @@
 use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand};
-use leo::{DerivedFile, LeoDocument, OperationBatch, sync_document};
+use clap::{Parser, Subcommand, ValueEnum};
+use leo::{
+    DerivedFile, ExternalFilter, InspectSelector, LeoDocument, OperationBatch, PositionId,
+    load_matching_external_files, render_compact, render_search_compact, search_outline,
+    select_subtrees, sync_document,
+};
+use regex::Regex;
 use std::{fs, path::PathBuf};
 
 mod install;
@@ -14,6 +19,13 @@ mod tui;
 struct Cli {
     #[command(subcommand)]
     command: Command,
+}
+
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+enum InspectFormat {
+    #[default]
+    Compact,
+    Json,
 }
 
 #[derive(Subcommand)]
@@ -30,6 +42,20 @@ enum Command {
     },
     Inspect {
         file: PathBuf,
+        /// Show the external @file/@clean subtree matching this path or basename.
+        external: Option<String>,
+        /// Show all occurrences of the subtree with this GNX.
+        #[arg(long, conflicts_with_all = ["external", "position"])]
+        gnx: Option<String>,
+        /// Show the subtree at this occurrence path (for example, 0/2/1).
+        #[arg(long, conflicts_with_all = ["external", "gnx"])]
+        position: Option<String>,
+        /// Search headlines and bodies; repeat for OR matching.
+        #[arg(long, value_name = "REGEX")]
+        search: Vec<String>,
+        /// Output format. Compact is intended for reading; JSON for scripts.
+        #[arg(long, value_enum, default_value_t)]
+        format: InspectFormat,
     },
     Validate {
         file: PathBuf,
@@ -89,10 +115,56 @@ fn main() -> Result<()> {
         Command::InstallSkills => install::install_skills()?,
         #[cfg(feature = "tui")]
         Command::Tui { file, no_derived } => tui::run(file, !no_derived)?,
-        Command::Inspect { file } => println!(
-            "{}",
-            serde_json::to_string_pretty(&LeoDocument::open(file)?.outline)?
-        ),
+        Command::Inspect {
+            file,
+            external,
+            gnx,
+            position,
+            search,
+            format,
+        } => {
+            let mut outline = LeoDocument::open(&file)?.outline;
+            let patterns = search
+                .iter()
+                .map(|pattern| Regex::new(pattern))
+                .collect::<Result<Vec<_>, _>>()?;
+            if let Some(gnx) = gnx.as_deref() {
+                load_matching_external_files(&mut outline, &file, ExternalFilter::Gnx(gnx))?;
+            } else if !patterns.is_empty() {
+                load_matching_external_files(
+                    &mut outline,
+                    &file,
+                    ExternalFilter::Search(&patterns),
+                )?;
+            } else if let Some(external) = external.as_deref() {
+                load_matching_external_files(&mut outline, &file, ExternalFilter::File(external))?;
+            }
+            let selected = if let Some(external) = external.as_deref() {
+                select_subtrees(&outline, InspectSelector::File(external))?
+            } else if let Some(gnx) = gnx.as_deref() {
+                select_subtrees(&outline, InspectSelector::Gnx(gnx))?
+            } else if let Some(position) = position {
+                select_subtrees(&outline, InspectSelector::Position(&PositionId(position)))?
+            } else {
+                outline
+            };
+            if !search.is_empty() {
+                let matches = search_outline(&selected, &patterns);
+                match format {
+                    InspectFormat::Compact => print!("{}", render_search_compact(&matches)),
+                    InspectFormat::Json => {
+                        println!("{}", serde_json::to_string_pretty(&matches)?)
+                    }
+                }
+            } else {
+                match format {
+                    InspectFormat::Compact => print!("{}", render_compact(&selected)),
+                    InspectFormat::Json => {
+                        println!("{}", serde_json::to_string_pretty(&selected)?)
+                    }
+                }
+            }
+        }
         Command::Validate { file } => {
             let errors = LeoDocument::open(file)?.outline.validate();
             println!(

@@ -12,12 +12,23 @@ directly. Run `cub --help` or `cub <command> --help` for complete options.
 
 ```bash
 cub inspect outline.leo
+cub inspect outline.leo src/main.rs
+cub inspect outline.leo --gnx ekr.20260811210000.1
+cub inspect outline.leo --position 0/2/1
+cub inspect outline.leo --search 'render_(compact|json)'
+cub inspect outline.leo --search TODO --search FIXME
 cub validate outline.leo
 cub inspect-derived path/to/derived.py --summary
 cub diff before.leo after.leo
 ```
 
-`inspect` emits the logical outline as JSON. `validate` exits unsuccessfully
+Use `inspect` directly when reading an outline. Give it an external filename,
+GNX, or position path to emit only matching subtrees; bodies are included and
+GNX lookup returns every clone occurrence. Use `--format json` only when a
+script needs structured output. Use repeatable `--search REGEX` options to find
+headline or body matches (using OR semantics) as short, line-numbered excerpts.
+Search and GNX lookup include lazily reconstructed thin external files.
+`validate` exits unsuccessfully
 when it finds structural errors. `inspect-derived` reconstructs an outline from
 a Leo thin derived file.
 
