@@ -62,7 +62,7 @@ jobs:
         shell: bash
         run: |
           cargo install cargo-edit --locked
-          cargo set-version "${GITHUB_REF_NAME#v}"
+          cargo set-version --allow-downgrade "${GITHUB_REF_NAME#v}"
 
       - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }} --locked
