@@ -33,15 +33,23 @@ and exposes transactional operations intended for scripts and AI tools.
 
 ## Install
 
-Install the `cub` command from PyPI with
-[pipx](https://pipx.pypa.io/) (recommended for command-line applications):
+The recommended installation method is [`uv`](https://docs.astral.sh/uv/):
 
 ```sh
-pipx install leo-cub
+uv tool install leo-cub
 ```
 
-You can also use `pip install leo-cub`, or download the appropriate archive
+This installs the `cub` command. You can also use `pip install leo-cub`,
+or download the appropriate archive
 from the [latest GitHub release](https://github.com/vivainio/leo-cub/releases/latest).
+
+### Installation from source
+
+From the repository root, install the `cub` command with Cargo:
+
+```sh
+cargo install --path .
+```
 
 ## TUI
 
