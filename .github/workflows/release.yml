@@ -1,0 +1,108 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: cub-linux-x86_64.tar.gz
+            binary: cub
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: cub-windows-x86_64.zip
+            binary: cub.exe
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            archive: cub-macos-x86_64.tar.gz
+            binary: cub
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: cub-macos-arm64.tar.gz
+            binary: cub
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ matrix.target }}-
+
+      - name: Set version from tag
+        shell: bash
+        run: |
+          cargo install cargo-edit --locked
+          cargo set-version "${GITHUB_REF_NAME#v}"
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }} --locked
+
+      - name: Create archive
+        shell: bash
+        run: |
+          mkdir staging
+          cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" staging/
+          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            7z a "${{ matrix.archive }}" "staging/${{ matrix.binary }}"
+          else
+            tar -C staging -czf "${{ matrix.archive }}" "${{ matrix.binary }}"
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ matrix.archive }}
+          path: ${{ matrix.archive }}
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v7
+        with:
+          path: artifacts
+          pattern: cub-*
+          merge-multiple: true
+
+      - name: Publish release artifacts
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          fail_on_unmatched_files: true
+          generate_release_notes: true
