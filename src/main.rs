@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use leo::{DerivedFile, LeoDocument, OperationBatch, PositionId, sync_document};
+use leo::{DerivedFile, LeoDocument, OperationBatch, sync_document};
 use std::{fs, path::PathBuf};
 
 #[cfg(all(feature = "tui", feature = "syntax"))]
@@ -46,14 +46,6 @@ enum Command {
         #[arg(long, conflicts_with = "external")]
         gnx: Option<String>,
         /// Validate and report changes without writing the outline.
-        #[arg(long)]
-        dry_run: bool,
-    },
-    /// Reconstruct an @file subtree from a thin derived file.
-    RefreshDerived {
-        file: PathBuf,
-        position: String,
-        derived: PathBuf,
         #[arg(long)]
         dry_run: bool,
     },
@@ -123,28 +115,6 @@ fn main() -> Result<()> {
                 document.save(&file)?;
             }
             println!("{}", serde_json::to_string_pretty(&report)?);
-        }
-        Command::RefreshDerived {
-            file,
-            position,
-            derived,
-            dry_run,
-        } => {
-            let mut document = LeoDocument::open(&file)?;
-            let source = fs::read_to_string(&derived).context("read derived file")?;
-            let parsed = DerivedFile::parse(&source)?;
-            parsed.merge_into(&mut document.outline, &PositionId(position))?;
-            if !dry_run {
-                document.save(file)?;
-            }
-            println!(
-                "{}",
-                serde_json::json!({
-                    "root": parsed.root,
-                    "nodes": parsed.outline.nodes.len(),
-                    "dry_run": dry_run
-                })
-            );
         }
         Command::InspectDerived { derived, summary } => {
             let source = fs::read_to_string(derived).context("read derived file")?;
