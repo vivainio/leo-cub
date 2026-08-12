@@ -378,7 +378,7 @@ mod tests {
     }
 }
 </t>
-<t tx="None.20260812210606.3" _mod_time="4741da9f2d93fd6b022e">//! Synchronize external Leo file nodes into an outline.
+<t tx="None.20260812210606.3" _mod_time="4741da9f2f223bfe512e">//! Synchronize external Leo file nodes into an outline.
 
 use std::{
     collections::HashMap,
@@ -400,8 +400,6 @@ pub enum SyncError {
         path: PathBuf,
         source: std::io::Error,
     },
-    #[error("unsupported comment delimiters for @clean file: {0}")]
-    UnsupportedCleanFile(PathBuf),
     #[error("unsupported @clean expansion in node {gnx}: {directive}")]
     UnsupportedExpansion { gnx: String, directive: String },
     #[error("no external node matches {0:?}")]
@@ -461,22 +459,44 @@ pub fn sync_document(
             path: job.path.clone(),
             source,
         })?;
-        let parsed = if job.directive == "@clean" {
-            let (start, end) = comment_delimiters(&amp;job.path)
-                .ok_or_else(|| SyncError::UnsupportedCleanFile(job.path.clone()))?;
+        if job.directive == "@clean" {
+            let (start, end) = comment_delimiters(&amp;job.path);
             let private = render_private(&amp;next.outline, &amp;job.position, start, end)?;
             let updated = propagate_clean_changes(&amp;source, &amp;private, start, end);
-            DerivedFile::parse(&amp;updated)?
+            let parsed = DerivedFile::parse(&amp;updated)?;
+            parsed.merge_into(&amp;mut next.outline, &amp;job.position)?;
         } else {
-            DerivedFile::parse(&amp;source)?
-        };
-        parsed.merge_into(&amp;mut next.outline, &amp;job.position)?;
+            // Leo reconstructs @file trees in memory, but their content remains
+            // exclusively in the thin derived file. Validate the derived file and
+            // its root GNX without materializing that transient tree in the .leo file.
+            let parsed = DerivedFile::parse(&amp;source)?;
+            let target_node = next
+                .outline
+                .position(&amp;job.position)
+                .map(|target| target.node.clone())
+                .ok_or_else(|| crate::SentinelError::PositionNotFound(job.position.0.clone()))?;
+            if target_node != parsed.root {
+                return Err(crate::SentinelError::RootMismatch {
+                    outline: target_node.0.clone(),
+                    derived: parsed.root.0,
+                }
+                .into());
+            }
+            if let Some(node) = next.outline.nodes.get_mut(&amp;target_node) {
+                node.vnode_attributes.remove("expanded");
+            }
+        }
         items.push(SyncItem {
             gnx: job.gnx,
             path: job.path,
             directive: job.directive,
             changed: before != next.outline,
         });
+    }
+    // Leo treats `_mod_time` as a session-only cache and discards values
+    // serialized by older releases whenever an outline is refreshed and saved.
+    for node in next.outline.nodes.values_mut() {
+        node.tnode_attributes.remove("_mod_time");
     }
     let errors = next
         .outline
@@ -621,17 +641,26 @@ fn strip_path_cruft(path: &amp;str) -&gt; &amp;str {
     path
 }
 
-fn comment_delimiters(path: &amp;Path) -&gt; Option&lt;(&amp;'static str, &amp;'static str)&gt; {
-    match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
+fn comment_delimiters(path: &amp;Path) -&gt; (&amp;'static str, &amp;'static str) {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "py" | "pyw" | "sh" | "bash" | "zsh" | "fish" | "rb" | "pl" | "pm" | "r" | "toml"
-        | "yaml" | "yml" =&gt; Some(("#", "")),
+        | "yaml" | "yml" =&gt; ("#", ""),
         "rs" | "c" | "h" | "cc" | "cpp" | "cxx" | "hpp" | "java" | "js" | "jsx" | "ts" | "tsx"
-        | "go" | "swift" | "kt" | "kts" | "cs" =&gt; Some(("//", "")),
-        "html" | "htm" | "xml" | "xhtml" | "svg" =&gt; Some(("&lt;!--", "--&gt;")),
-        "css" | "scss" | "less" =&gt; Some(("/*", "*/")),
-        "sql" | "lua" =&gt; Some(("--", "")),
-        "ini" | "cfg" =&gt; Some(("#", "")),
-        _ =&gt; None,
+        | "go" | "swift" | "kt" | "kts" | "cs" =&gt; ("//", ""),
+        "html" | "htm" | "xml" | "xhtml" | "svg" =&gt; ("&lt;!--", "--&gt;"),
+        "css" | "scss" | "less" =&gt; ("/*", "*/"),
+        "sql" | "lua" =&gt; ("--", ""),
+        "ini" | "cfg" =&gt; ("#", ""),
+        // The private sentinel stream is an internal merge representation and
+        // is never written to the external @clean file. A line-comment fallback
+        // therefore supports plain-text and otherwise unknown extensions safely.
+        _ =&gt; ("#", ""),
     }
 }
 
@@ -768,6 +797,47 @@ mod tests {
         let report = sync_document(&amp;mut doc, &amp;outline_path, None, None, true).unwrap();
         assert_eq!(report.changed, 1);
         assert_eq!(doc.outline, before);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn file_sync_validates_without_materializing_the_derived_tree() {
+        let source = concat!(
+            r#"&lt;leo_file&gt;&lt;vnodes&gt;&lt;v t="r"&gt;&lt;vh&gt;@file test.py&lt;/vh&gt;&lt;/v&gt;&lt;/vnodes&gt;"#,
+            r#"&lt;tnodes&gt;&lt;t tx="r"&gt;&lt;/t&gt;&lt;/tnodes&gt;&lt;/leo_file&gt;"#,
+        );
+        let mut doc = LeoDocument::parse(source).unwrap();
+        let before = doc.outline.clone();
+        let dir =
+            std::env::temp_dir().join(format!("leo-cub-file-sync-test-{}", std::process::id()));
+        fs::create_dir_all(&amp;dir).unwrap();
+        let outline_path = dir.join("outline.leo");
+        fs::write(
+            dir.join("test.py"),
+            "#@+leo-ver=5-thin\n#@+node:r: * @file test.py\n#@+others\n#@+node:c: ** child\nbody\n#@-others\n#@-leo\n",
+        )
+        .unwrap();
+        let report = sync_document(&amp;mut doc, &amp;outline_path, None, None, false).unwrap();
+        assert_eq!(report.changed, 0);
+        assert_eq!(doc.outline, before);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn clean_sync_uses_fallback_delimiters_for_plain_text() {
+        let source = concat!(
+            r#"&lt;leo_file&gt;&lt;vnodes&gt;&lt;v t="r"&gt;&lt;vh&gt;@clean test.txt&lt;/vh&gt;&lt;/v&gt;&lt;/vnodes&gt;"#,
+            r#"&lt;tnodes&gt;&lt;t tx="r"&gt;old\n&lt;/t&gt;&lt;/tnodes&gt;&lt;/leo_file&gt;"#,
+        );
+        let mut doc = LeoDocument::parse(source).unwrap();
+        let dir =
+            std::env::temp_dir().join(format!("leo-cub-clean-sync-test-{}", std::process::id()));
+        fs::create_dir_all(&amp;dir).unwrap();
+        let outline_path = dir.join("outline.leo");
+        fs::write(dir.join("test.txt"), "new\n").unwrap();
+        let report = sync_document(&amp;mut doc, &amp;outline_path, None, None, false).unwrap();
+        assert_eq!(report.changed, 1);
+        assert_eq!(doc.outline.nodes[&amp;NodeId::from("r")].body, "new\n");
         let _ = fs::remove_dir_all(dir);
     }
 }
