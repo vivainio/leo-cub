@@ -1,6 +1,9 @@
 use std::{
     collections::{HashMap, HashSet},
-    env, fs, io,
+    env, fs,
+    fs::OpenOptions,
+    io,
+    io::Write,
     path::{Path, PathBuf},
     process::Command,
     time::Duration,
@@ -36,6 +39,10 @@ struct App {
     path: PathBuf,
     expanded: HashSet<PositionId>,
     selected: usize,
+    body_scroll: usize,
+    body_page_size: usize,
+    body_scroll_max: usize,
+    help: bool,
     status: String,
     input: Option<HeadlineInput>,
     find: Option<FindInput>,
@@ -75,6 +82,10 @@ impl App {
             path,
             expanded,
             selected: 0,
+            body_scroll: 0,
+            body_page_size: 1,
+            body_scroll_max: 0,
+            help: false,
             status,
             input: None,
             find: None,
@@ -136,7 +147,19 @@ impl App {
             self.selected = 0;
             return;
         }
-        self.selected = self.selected.saturating_add_signed(delta).min(len - 1);
+        let selected = self.selected.saturating_add_signed(delta).min(len - 1);
+        if selected != self.selected {
+            self.selected = selected;
+            self.body_scroll = 0;
+        }
+    }
+
+    fn scroll_body(&mut self, pages: isize) {
+        let amount = self.body_page_size.max(1);
+        self.body_scroll = self
+            .body_scroll
+            .saturating_add_signed(pages.saturating_mul(amount as isize))
+            .min(self.body_scroll_max);
     }
 
     fn toggle(&mut self, expand: bool) {
@@ -260,6 +283,15 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
             handle_find_input(app, key);
             continue;
         }
+        if app.help {
+            if matches!(
+                key.code,
+                KeyCode::Char('?') | KeyCode::Char('q') | KeyCode::Esc
+            ) {
+                app.help = false;
+            }
+            continue;
+        }
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
                 KeyCode::Char('p') => start_find(app),
@@ -275,6 +307,7 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
             continue;
         }
         match key.code {
+            KeyCode::Char('?') => app.help = true,
             KeyCode::Char('q') | KeyCode::Esc => {
                 if !app.dirty || app.quit_armed {
                     return Ok(());
@@ -297,8 +330,16 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
             KeyCode::Up | KeyCode::Char('k') => app.move_selection(-1),
             KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => app.toggle(true),
             KeyCode::Left | KeyCode::Char('h') => app.toggle(false),
-            KeyCode::Home => app.selected = 0,
-            KeyCode::End => app.selected = app.rows().len().saturating_sub(1),
+            KeyCode::Home => {
+                app.selected = 0;
+                app.body_scroll = 0;
+            }
+            KeyCode::End => {
+                app.selected = app.rows().len().saturating_sub(1);
+                app.body_scroll = 0;
+            }
+            KeyCode::PageUp => app.scroll_body(-1),
+            KeyCode::PageDown => app.scroll_body(1),
             _ => {}
         }
     }
@@ -696,6 +737,9 @@ fn remove_position(outline: &mut Outline, id: &PositionId) -> Option<Position> {
 
 fn select_position(app: &mut App, id: &PositionId) {
     if let Some(index) = app.rows().iter().position(|row| &row.position == id) {
+        if index != app.selected {
+            app.body_scroll = 0;
+        }
         app.selected = index;
     }
 }
@@ -773,26 +817,34 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
         &mut state,
     );
 
-    let details = rows
-        .get(app.selected)
-        .map(|row| {
-            let node = &app.document.outline.nodes[&row.node];
-            let headline = node.headline.clone();
-            let gnx = node.id.0.clone();
-            let mut text = Text::from(vec![
-                Line::styled(headline, Style::default().add_modifier(Modifier::BOLD)),
-                Line::from(format!("GNX: {gnx}")),
-                Line::from(format!("Position: {}", row.position.0)),
-                Line::from(""),
-            ]);
-            text.extend(body_text(app, row));
-            text
-        })
-        .unwrap_or_default();
-    frame.render_widget(
-        Paragraph::new(details).block(Block::default().title(" Node ").borders(Borders::ALL)),
-        columns[1],
-    );
+    let node_block = Block::default().title(" Node ").borders(Borders::ALL);
+    let node_area = node_block.inner(columns[1]);
+    frame.render_widget(node_block, columns[1]);
+    if let Some(row) = rows.get(app.selected) {
+        let node = &app.document.outline.nodes[&row.node];
+        let metadata = Text::from(vec![
+            Line::styled(
+                node.headline.clone(),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Line::from(format!("GNX: {}", node.id.0)),
+            Line::from(format!("Position: {}", row.position.0)),
+        ]);
+        let node_rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(4), Constraint::Min(0)])
+            .split(node_area);
+        frame.render_widget(Paragraph::new(metadata), node_rows[0]);
+
+        let body = body_text(app, row);
+        app.body_page_size = usize::from(node_rows[1].height).max(1);
+        app.body_scroll_max = body.lines.len().saturating_sub(app.body_page_size);
+        app.body_scroll = app.body_scroll.min(app.body_scroll_max);
+        frame.render_widget(
+            Paragraph::new(body).scroll((app.body_scroll.min(u16::MAX as usize) as u16, 0)),
+            node_rows[1],
+        );
+    }
     frame.render_widget(
         Paragraph::new(format!("{}   [{}]", controls(), app.status))
             .style(Style::default().fg(Color::DarkGray)),
@@ -841,13 +893,57 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
             area,
         );
     }
+    if app.help {
+        draw_help(frame);
+    }
 }
 
 fn controls() -> &'static str {
     #[cfg(feature = "syntax")]
-    return "Ctrl-P find  Ctrl-I new  Ctrl-H rename  Ctrl-↑↓←→ move  Ctrl-S save  o open  y syntax  q quit";
+    return "? help  PgUp/PgDn body  o open/edit  Ctrl-P find  Ctrl-I new  Ctrl-H rename  Ctrl-↑↓←→ move  Ctrl-S save  y syntax  q quit";
     #[cfg(not(feature = "syntax"))]
-    "Ctrl-P find  Ctrl-I new  Ctrl-H rename  Ctrl-↑↓←→ move  Ctrl-S save  o open  q quit"
+    "? help  PgUp/PgDn body  o open/edit  Ctrl-P find  Ctrl-I new  Ctrl-H rename  Ctrl-↑↓←→ move  Ctrl-S save  q quit"
+}
+
+fn draw_help(frame: &mut ratatui::Frame<'_>) {
+    let width = frame.area().width.saturating_sub(4).min(72);
+    let height = frame.area().height.saturating_sub(2).min(20);
+    let area = Rect::new(
+        frame.area().x + (frame.area().width.saturating_sub(width)) / 2,
+        frame.area().y + (frame.area().height.saturating_sub(height)) / 2,
+        width,
+        height,
+    );
+    let lines = vec![
+        Line::from("↑/↓ or k/j       Select previous/next node"),
+        Line::from("←/→ or h/l       Collapse/expand node"),
+        Line::from("Enter            Expand node"),
+        Line::from("Home/End         Select first/last visible node"),
+        Line::from("PageUp/PageDown  Scroll the body pane"),
+        Line::from("Ctrl-P           Find a headline"),
+        Line::from("Ctrl-I or Tab    Insert a sibling"),
+        Line::from("Ctrl-H/Backspace Rename the headline"),
+        Line::from("Ctrl-↑↓←→        Move/promote/demote node"),
+        Line::from("Ctrl-S           Save"),
+        Line::from("o                Edit body, or open derived source"),
+        #[cfg(feature = "syntax")]
+        Line::from("y                Toggle syntax highlighting"),
+        Line::from("q or Esc         Quit"),
+        Line::from(""),
+        Line::styled(
+            "Press ?, q, or Esc to close",
+            Style::default().fg(Color::DarkGray),
+        ),
+    ];
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .title(" Command help ")
+                .borders(Borders::ALL),
+        ),
+        area,
+    );
 }
 
 fn body_text(app: &mut App, row: &Row) -> Text<'static> {
@@ -990,20 +1086,78 @@ fn open_selected(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mu
     let Some(row) = app.rows().get(app.selected).cloned() else {
         return;
     };
-    let Some(location) = app
+    if let Some(location) = app
         .source_locations
         .get(&row.position)
         .or_else(|| app.source_nodes.get(&row.node))
         .cloned()
-    else {
-        app.status = "selected node has no external source location".to_owned();
+    {
+        if let Err(error) = suspend_and_open(terminal, &location) {
+            app.status = format!("open failed: {error}");
+        } else {
+            app.status = format!("opened {}:{}", location.path.display(), location.line);
+        }
         return;
-    };
-    if let Err(error) = suspend_and_open(terminal, &location) {
-        app.status = format!("open failed: {error}");
-    } else {
-        app.status = format!("opened {}:{}", location.path.display(), location.line);
     }
+
+    if !app.editable(&row) {
+        return;
+    }
+    match edit_body_in_temp_file(terminal, &app.document.outline.nodes[&row.node].body) {
+        Ok(Some(body)) => {
+            app.document
+                .outline
+                .nodes
+                .get_mut(&row.node)
+                .expect("edited node exists")
+                .body = body;
+            #[cfg(feature = "syntax")]
+            app.highlight_cache.clear();
+            app.body_scroll = 0;
+            app.dirty = true;
+            app.quit_armed = false;
+            app.status = "body changed (Ctrl-S to save)".into();
+        }
+        Ok(None) => app.status = "body unchanged".into(),
+        Err(error) => app.status = format!("body edit failed: {error}"),
+    }
+}
+
+fn edit_body_in_temp_file(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    original: &str,
+) -> Result<Option<String>> {
+    let path = unique_body_temp_path();
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)?;
+    file.write_all(original.as_bytes())?;
+    drop(file);
+
+    let location = SourceLocation {
+        path: path.clone(),
+        line: 1,
+    };
+    let editor_result = suspend_and_open(terminal, &location);
+    let result = editor_result.and_then(|()| {
+        let edited = fs::read_to_string(&path)?;
+        Ok((edited != original).then_some(edited))
+    });
+    let _ = fs::remove_file(path);
+    result
+}
+
+fn unique_body_temp_path() -> PathBuf {
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    env::temp_dir().join(format!(
+        "leo-cub-body-{}-{}-{}.txt",
+        std::process::id(),
+        duration.as_secs(),
+        duration.subsec_nanos()
+    ))
 }
 
 fn suspend_and_open(
@@ -1049,7 +1203,7 @@ fn run_editor(location: &SourceLocation) -> Result<()> {
                 .arg("--goto")
                 .arg(format!("{}:{}:1", location.path.display(), location.line));
         }
-        "hx" | "helix" | "kak" => {
+        "edit" | "msedit" | "hx" | "helix" | "kak" => {
             command.arg(format!("{}:{}:1", location.path.display(), location.line));
         }
         _ => {
@@ -1253,6 +1407,33 @@ mod tests {
         );
         assert!(app.expanded.contains(&PositionId("0".into())));
         assert_eq!(app.find.as_ref().unwrap().matches.len(), 1);
+    }
+
+    #[test]
+    fn scrolls_body_by_a_page_and_stays_in_bounds() {
+        let mut app = editing_app();
+        app.body_page_size = 10;
+        app.body_scroll_max = 24;
+
+        app.scroll_body(1);
+        assert_eq!(app.body_scroll, 10);
+        app.scroll_body(2);
+        assert_eq!(app.body_scroll, 24);
+        app.scroll_body(-1);
+        assert_eq!(app.body_scroll, 14);
+        app.scroll_body(-2);
+        assert_eq!(app.body_scroll, 0);
+    }
+
+    #[test]
+    fn changing_selection_resets_body_scroll() {
+        let mut app = editing_app();
+        app.body_scroll = 12;
+
+        app.move_selection(1);
+
+        assert_eq!(app.selected, 1);
+        assert_eq!(app.body_scroll, 0);
     }
 
     #[test]

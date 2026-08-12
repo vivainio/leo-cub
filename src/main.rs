@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use leo::{DerivedFile, LeoDocument, OperationBatch, PositionId};
+use leo::{DerivedFile, LeoDocument, OperationBatch, PositionId, sync_document};
 use std::{fs, path::PathBuf};
 
 #[cfg(all(feature = "tui", feature = "syntax"))]
@@ -34,6 +34,18 @@ enum Command {
     Apply {
         file: PathBuf,
         operations: PathBuf,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Synchronize external @file and @clean nodes into an outline.
+    Sync {
+        file: PathBuf,
+        /// External filename to sync. Omit to sync all external nodes.
+        external: Option<String>,
+        /// Sync the external node with this GNX.
+        #[arg(long, conflicts_with = "external")]
+        gnx: Option<String>,
+        /// Validate and report changes without writing the outline.
         #[arg(long)]
         dry_run: bool,
     },
@@ -90,6 +102,25 @@ fn main() -> Result<()> {
             let report = doc.outline.apply(&batch)?;
             if !dry_run {
                 doc.save(file)?;
+            }
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
+        Command::Sync {
+            file,
+            external,
+            gnx,
+            dry_run,
+        } => {
+            let mut document = LeoDocument::open(&file)?;
+            let report = sync_document(
+                &mut document,
+                &file,
+                external.as_deref(),
+                gnx.as_deref(),
+                dry_run,
+            )?;
+            if !dry_run && report.changed > 0 {
+                document.save(&file)?;
             }
             println!("{}", serde_json::to_string_pretty(&report)?);
         }

@@ -30,6 +30,8 @@
 </v>
 </v>
 <v t="ekr.20260812053055.19"><vh>@clean src/lib.rs</vh></v>
+<v t="None.20260812210606.3"><vh>@clean src/sync.rs</vh></v>
+<v t="None.20260812205242.3"><vh>@clean src/clean.rs</vh></v>
 <v t="ekr.20260812053055.20"><vh>@clean src/main.rs</vh>
 <v t="ekr.20260812053055.21"><vh>struct Cli</vh></v>
 <v t="ekr.20260812053055.22"><vh>enum Command</vh></v>
@@ -167,6 +169,609 @@
 </v>
 </vnodes>
 <tnodes>
+<t tx="None.20260812205242.3" _mod_time="4741da9f2cb110dc042e">//! Leo's Mulder/Ream algorithm for propagating public-file edits through
+//! sentinelized private text.
+
+use std::ops::Range;
+
+/// Reinsert the sentinels from `old_private` into the edited public text.
+///
+/// `start_delimiter` and `end_delimiter` describe the sentinel comment. For a
+/// line comment such as `#`, pass an empty end delimiter. For a block comment,
+/// pass both delimiters, such as `/*` and `*/`.
+pub fn propagate_clean_changes(
+    new_public: &amp;str,
+    old_private: &amp;str,
+    start_delimiter: &amp;str,
+    end_delimiter: &amp;str,
+) -&gt; String {
+    let marker = Marker {
+        start: start_delimiter,
+        end: end_delimiter,
+    };
+    let (old_public, mut sentinels, trailing) = split_private(old_private, marker);
+    let old_public = normalized_lines(&amp;old_public.concat());
+    let new_public = normalized_lines(new_public);
+    let matches = lcs_matches(&amp;old_public, &amp;new_public);
+    let mut result = Vec::new();
+
+    // Leo puts leading sentinels first, then prevents them being emitted twice.
+    put_sentinels(&amp;mut result, &amp;sentinels, 0);
+    if let Some(first) = sentinels.first_mut() {
+        first.clear();
+    }
+
+    let mut old_at = 0;
+    let mut new_at = 0;
+    for (old_match, new_match) in matches
+        .into_iter()
+        .chain(std::iter::once((old_public.len(), new_public.len())))
+    {
+        replace_region(
+            &amp;mut result,
+            &amp;sentinels,
+            &amp;new_public,
+            old_at..old_match,
+            new_at..new_match,
+            marker,
+        );
+        if old_match &lt; old_public.len() {
+            put_sentinels(&amp;mut result, &amp;sentinels, old_match);
+            put_plain_line(&amp;mut result, &amp;old_public[old_match], marker);
+        }
+        old_at = old_match + 1;
+        new_at = new_match + 1;
+    }
+    result.extend(trailing);
+    result.concat()
+}
+
+#[derive(Clone, Copy)]
+struct Marker&lt;'a&gt; {
+    start: &amp;'a str,
+    end: &amp;'a str,
+}
+
+impl Marker&lt;'_&gt; {
+    fn is_sentinel(self, line: &amp;str) -&gt; bool {
+        let line = line.trim();
+        line.starts_with(&amp;format!("{}@", self.start))
+            &amp;&amp; (self.end.is_empty() || line.ends_with(self.end))
+    }
+
+    fn is_verbatim(self, line: &amp;str) -&gt; bool {
+        let line = line.trim();
+        line.starts_with(&amp;format!("{}@verbatim", self.start))
+            &amp;&amp; (self.end.is_empty() || line.ends_with(self.end))
+    }
+}
+
+fn normalized_lines(text: &amp;str) -&gt; Vec&lt;String&gt; {
+    text.lines().map(|line| format!("{line}\n")).collect()
+}
+
+fn original_lines(text: &amp;str) -&gt; Vec&lt;String&gt; {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    text.split_inclusive('\n').map(str::to_owned).collect()
+}
+
+fn split_private(
+    old_private: &amp;str,
+    marker: Marker&lt;'_&gt;,
+) -&gt; (Vec&lt;String&gt;, Vec&lt;Vec&lt;String&gt;&gt;, Vec&lt;String&gt;) {
+    let lines = original_lines(old_private);
+    let mut public = Vec::new();
+    let mut sentinels = Vec::new();
+    let mut pending = Vec::new();
+    let mut index = 0;
+    while index &lt; lines.len() {
+        let line = &amp;lines[index];
+        index += 1;
+        if marker.is_verbatim(line) {
+            if let Some(line) = lines.get(index) {
+                sentinels.push(std::mem::take(&amp;mut pending));
+                public.push(line.clone());
+                index += 1;
+            }
+        } else if marker.is_sentinel(line) {
+            pending.push(line.clone());
+        } else {
+            sentinels.push(std::mem::take(&amp;mut pending));
+            public.push(line.clone());
+        }
+    }
+    (public, sentinels, pending)
+}
+
+fn replace_region(
+    result: &amp;mut Vec&lt;String&gt;,
+    sentinels: &amp;[Vec&lt;String&gt;],
+    new_lines: &amp;[String],
+    old: Range&lt;usize&gt;,
+    new: Range&lt;usize&gt;,
+    marker: Marker&lt;'_&gt;,
+) {
+    let mut replacements = new_lines[new].iter();
+    for old_index in old {
+        put_sentinels(result, sentinels, old_index);
+        if let Some(line) = replacements.next() {
+            put_plain_line(result, line, marker);
+        }
+    }
+    for line in replacements {
+        put_plain_line(result, line, marker);
+    }
+}
+
+fn put_sentinels(result: &amp;mut Vec&lt;String&gt;, sentinels: &amp;[Vec&lt;String&gt;], index: usize) {
+    if let Some(lines) = sentinels.get(index) {
+        result.extend(lines.iter().cloned());
+    }
+}
+
+fn put_plain_line(result: &amp;mut Vec&lt;String&gt;, line: &amp;str, marker: Marker&lt;'_&gt;) {
+    if marker.is_sentinel(line) {
+        result.push(format!("{}@verbatim{}\n", marker.start, marker.end));
+    }
+    result.push(line.to_owned());
+}
+
+/// Return one increasing set of equal-line pairs. This is the set of anchors
+/// needed by the propagation rules; regions between anchors are replacements.
+fn lcs_matches(old: &amp;[String], new: &amp;[String]) -&gt; Vec&lt;(usize, usize)&gt; {
+    let mut lengths = vec![vec![0usize; new.len() + 1]; old.len() + 1];
+    for i in (0..old.len()).rev() {
+        for j in (0..new.len()).rev() {
+            lengths[i][j] = if old[i] == new[j] {
+                lengths[i + 1][j + 1] + 1
+            } else {
+                lengths[i + 1][j].max(lengths[i][j + 1])
+            };
+        }
+    }
+    let (mut i, mut j) = (0, 0);
+    let mut matches = Vec::new();
+    while i &lt; old.len() &amp;&amp; j &lt; new.len() {
+        if old[i] == new[j] {
+            matches.push((i, j));
+            i += 1;
+            j += 1;
+        } else if lengths[i + 1][j] &gt;= lengths[i][j + 1] {
+            i += 1;
+        } else {
+            j += 1;
+        }
+    }
+    matches
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PRIVATE: &amp;str = "#@+leo-ver=5-thin\n#@+node:root: * root\nroot 1\n#@+node:child: ** child\nchild 1\nchild 2\n#@-leo\n";
+
+    #[test]
+    fn propagates_insert_delete_and_replace_without_moving_sentinels() {
+        let public = "root changed\ninserted\nchild 2\n";
+        let expected = "#@+leo-ver=5-thin\n#@+node:root: * root\nroot changed\n#@+node:child: ** child\ninserted\nchild 2\n#@-leo\n";
+        assert_eq!(propagate_clean_changes(public, PRIVATE, "#", ""), expected);
+    }
+
+    #[test]
+    fn protects_new_lines_that_resemble_sentinels() {
+        let public = "root 1\n#@not-a-sentinel-to-the-user\nchild 1\nchild 2\n";
+        let result = propagate_clean_changes(public, PRIVATE, "#", "");
+        assert!(result.contains("#@verbatim\n#@not-a-sentinel-to-the-user\n"));
+    }
+
+    #[test]
+    fn supports_block_comment_sentinels() {
+        let private = "/*@+leo-ver=5-thin*/\n/*@+node:r: * r*/\none\n/*@-leo*/\n";
+        let expected = "/*@+leo-ver=5-thin*/\n/*@+node:r: * r*/\ntwo\n/*@-leo*/\n";
+        assert_eq!(
+            propagate_clean_changes("two\n", private, "/*", "*/"),
+            expected
+        );
+    }
+}
+</t>
+<t tx="None.20260812210606.3" _mod_time="4741da9f2d93fd6b022e">//! Synchronize external Leo file nodes into an outline.
+
+use std::{
+    collections::HashMap,
+    fs,
+    path::{Path, PathBuf},
+};
+
+use serde::Serialize;
+use thiserror::Error;
+
+use crate::{
+    DerivedFile, LeoDocument, NodeId, Outline, Position, PositionId, propagate_clean_changes,
+};
+
+#[derive(Debug, Error)]
+pub enum SyncError {
+    #[error("I/O error for {path}: {source}")]
+    Io {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("unsupported comment delimiters for @clean file: {0}")]
+    UnsupportedCleanFile(PathBuf),
+    #[error("unsupported @clean expansion in node {gnx}: {directive}")]
+    UnsupportedExpansion { gnx: String, directive: String },
+    #[error("no external node matches {0:?}")]
+    NoMatch(String),
+    #[error("no external node has GNX {0}")]
+    NoGnx(String),
+    #[error("cloned external node {gnx} resolves to multiple files: {paths:?}")]
+    AmbiguousClone { gnx: String, paths: Vec&lt;PathBuf&gt; },
+    #[error(transparent)]
+    Sentinel(#[from] crate::SentinelError),
+    #[error("sync produced an invalid outline: {0:?}")]
+    InvalidOutline(Vec&lt;String&gt;),
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct SyncItem {
+    pub gnx: NodeId,
+    pub path: PathBuf,
+    pub directive: String,
+    pub changed: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct SyncReport {
+    pub examined: usize,
+    pub changed: usize,
+    pub dry_run: bool,
+    pub items: Vec&lt;SyncItem&gt;,
+}
+
+#[derive(Clone)]
+struct Job {
+    position: PositionId,
+    gnx: NodeId,
+    path: PathBuf,
+    directive: String,
+}
+
+/// Sync selected external files into `document`, without writing it.
+pub fn sync_document(
+    document: &amp;mut LeoDocument,
+    outline_path: &amp;Path,
+    filename: Option&lt;&amp;str&gt;,
+    gnx: Option&lt;&amp;str&gt;,
+    dry_run: bool,
+) -&gt; Result&lt;SyncReport, SyncError&gt; {
+    let jobs = select_jobs(
+        external_jobs(&amp;document.outline, outline_path),
+        filename,
+        gnx,
+    )?;
+    let mut next = document.clone();
+    let mut items = Vec::new();
+    for job in jobs {
+        let before = next.outline.clone();
+        let source = fs::read_to_string(&amp;job.path).map_err(|source| SyncError::Io {
+            path: job.path.clone(),
+            source,
+        })?;
+        let parsed = if job.directive == "@clean" {
+            let (start, end) = comment_delimiters(&amp;job.path)
+                .ok_or_else(|| SyncError::UnsupportedCleanFile(job.path.clone()))?;
+            let private = render_private(&amp;next.outline, &amp;job.position, start, end)?;
+            let updated = propagate_clean_changes(&amp;source, &amp;private, start, end);
+            DerivedFile::parse(&amp;updated)?
+        } else {
+            DerivedFile::parse(&amp;source)?
+        };
+        parsed.merge_into(&amp;mut next.outline, &amp;job.position)?;
+        items.push(SyncItem {
+            gnx: job.gnx,
+            path: job.path,
+            directive: job.directive,
+            changed: before != next.outline,
+        });
+    }
+    let errors = next
+        .outline
+        .validate()
+        .into_iter()
+        .map(|error| error.to_string())
+        .collect::&lt;Vec&lt;_&gt;&gt;();
+    if !errors.is_empty() {
+        return Err(SyncError::InvalidOutline(errors));
+    }
+    let changed = items.iter().filter(|item| item.changed).count();
+    if !dry_run {
+        *document = next;
+    }
+    Ok(SyncReport {
+        examined: items.len(),
+        changed,
+        dry_run,
+        items,
+    })
+}
+
+fn select_jobs(
+    jobs: Vec&lt;Job&gt;,
+    filename: Option&lt;&amp;str&gt;,
+    gnx: Option&lt;&amp;str&gt;,
+) -&gt; Result&lt;Vec&lt;Job&gt;, SyncError&gt; {
+    let mut by_gnx: HashMap&lt;NodeId, Vec&lt;Job&gt;&gt; = HashMap::new();
+    for job in jobs {
+        by_gnx.entry(job.gnx.clone()).or_default().push(job);
+    }
+    let mut unique = Vec::new();
+    for (id, mut clones) in by_gnx {
+        clones.sort_by(|a, b| a.path.cmp(&amp;b.path));
+        clones.dedup_by(|a, b| a.path == b.path);
+        if clones.len() &gt; 1 {
+            return Err(SyncError::AmbiguousClone {
+                gnx: id.0,
+                paths: clones.into_iter().map(|job| job.path).collect(),
+            });
+        }
+        unique.push(clones.remove(0));
+    }
+    unique.sort_by(|a, b| a.path.cmp(&amp;b.path));
+    if let Some(gnx) = gnx {
+        let selected = unique
+            .into_iter()
+            .filter(|job| job.gnx.0 == gnx)
+            .collect::&lt;Vec&lt;_&gt;&gt;();
+        return (!selected.is_empty())
+            .then_some(selected)
+            .ok_or_else(|| SyncError::NoGnx(gnx.to_owned()));
+    }
+    if let Some(filename) = filename {
+        let wanted = Path::new(filename);
+        let selected = unique
+            .into_iter()
+            .filter(|job| job.path == wanted || job.path.ends_with(wanted))
+            .collect::&lt;Vec&lt;_&gt;&gt;();
+        return (!selected.is_empty())
+            .then_some(selected)
+            .ok_or_else(|| SyncError::NoMatch(filename.to_owned()));
+    }
+    Ok(unique)
+}
+
+fn external_jobs(outline: &amp;Outline, outline_path: &amp;Path) -&gt; Vec&lt;Job&gt; {
+    fn visit(
+        outline: &amp;Outline,
+        positions: &amp;[Position],
+        parent: &amp;str,
+        base: &amp;Path,
+        inherited_paths: &amp;[String],
+        jobs: &amp;mut Vec&lt;Job&gt;,
+    ) {
+        for (index, position) in positions.iter().enumerate() {
+            let id = if parent.is_empty() {
+                index.to_string()
+            } else {
+                format!("{parent}/{index}")
+            };
+            let node = &amp;outline.nodes[&amp;position.node];
+            let mut paths = inherited_paths.to_vec();
+            if let Some(path) =
+                path_directive(&amp;node.headline).or_else(|| path_directive(&amp;node.body))
+            {
+                paths.push(path);
+            }
+            if let Some((directive, filename)) = external_filename(&amp;node.headline) {
+                let mut path = base.to_path_buf();
+                for component in inherited_paths {
+                    path.push(component);
+                }
+                path.push(filename);
+                jobs.push(Job {
+                    position: PositionId(id.clone()),
+                    gnx: position.node.clone(),
+                    path,
+                    directive: directive.to_owned(),
+                });
+            }
+            visit(outline, &amp;position.children, &amp;id, base, &amp;paths, jobs);
+        }
+    }
+    let mut jobs = Vec::new();
+    visit(
+        outline,
+        &amp;outline.roots,
+        "",
+        outline_path.parent().unwrap_or_else(|| Path::new(".")),
+        &amp;[],
+        &amp;mut jobs,
+    );
+    jobs
+}
+
+fn external_filename(headline: &amp;str) -&gt; Option&lt;(&amp;str, &amp;str)&gt; {
+    let (directive, filename) = headline.trim().split_once(char::is_whitespace)?;
+    matches!(directive, "@file" | "@thin" | "@file-thin" | "@clean")
+        .then(|| (directive, strip_path_cruft(filename)))
+        .filter(|(_, filename)| !filename.is_empty())
+}
+
+fn path_directive(text: &amp;str) -&gt; Option&lt;String&gt; {
+    text.lines().find_map(|line| {
+        line.strip_prefix("@path")
+            .and_then(|rest| rest.starts_with(char::is_whitespace).then_some(rest))
+            .map(strip_path_cruft)
+            .filter(|path| !path.is_empty())
+            .map(str::to_owned)
+    })
+}
+
+fn strip_path_cruft(path: &amp;str) -&gt; &amp;str {
+    let path = path.trim();
+    if path.len() &gt; 2 {
+        let pair = (path.as_bytes()[0], path.as_bytes()[path.len() - 1]);
+        if matches!(pair, (b'&lt;', b'&gt;') | (b'"', b'"') | (b'\'', b'\'')) {
+            return path[1..path.len() - 1].trim();
+        }
+    }
+    path
+}
+
+fn comment_delimiters(path: &amp;Path) -&gt; Option&lt;(&amp;'static str, &amp;'static str)&gt; {
+    match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
+        "py" | "pyw" | "sh" | "bash" | "zsh" | "fish" | "rb" | "pl" | "pm" | "r" | "toml"
+        | "yaml" | "yml" =&gt; Some(("#", "")),
+        "rs" | "c" | "h" | "cc" | "cpp" | "cxx" | "hpp" | "java" | "js" | "jsx" | "ts" | "tsx"
+        | "go" | "swift" | "kt" | "kts" | "cs" =&gt; Some(("//", "")),
+        "html" | "htm" | "xml" | "xhtml" | "svg" =&gt; Some(("&lt;!--", "--&gt;")),
+        "css" | "scss" | "less" =&gt; Some(("/*", "*/")),
+        "sql" | "lua" =&gt; Some(("--", "")),
+        "ini" | "cfg" =&gt; Some(("#", "")),
+        _ =&gt; None,
+    }
+}
+
+fn render_private(
+    outline: &amp;Outline,
+    target: &amp;PositionId,
+    start: &amp;str,
+    end: &amp;str,
+) -&gt; Result&lt;String, SyncError&gt; {
+    let root = outline
+        .position(target)
+        .ok_or_else(|| crate::SentinelError::PositionNotFound(target.0.clone()))?;
+    ensure_supported_clean_tree(outline, root)?;
+    let mut result = format!("{start}@+leo-ver=5-thin{end}\n");
+    render_position(outline, root, 1, "", start, end, &amp;mut result);
+    result.push_str(&amp;format!("{start}@-leo{end}\n"));
+    Ok(result)
+}
+
+fn ensure_supported_clean_tree(outline: &amp;Outline, position: &amp;Position) -&gt; Result&lt;(), SyncError&gt; {
+    let node = &amp;outline.nodes[&amp;position.node];
+    for line in node.body.lines() {
+        let line = line.trim();
+        if line == "@all" || (line.starts_with("&lt;&lt;") &amp;&amp; line.ends_with("&gt;&gt;")) {
+            return Err(SyncError::UnsupportedExpansion {
+                gnx: node.id.0.clone(),
+                directive: line.to_owned(),
+            });
+        }
+    }
+    for child in &amp;position.children {
+        ensure_supported_clean_tree(outline, child)?;
+    }
+    Ok(())
+}
+
+fn render_position(
+    outline: &amp;Outline,
+    position: &amp;Position,
+    level: usize,
+    indent: &amp;str,
+    start: &amp;str,
+    end: &amp;str,
+    result: &amp;mut String,
+) {
+    let node = &amp;outline.nodes[&amp;position.node];
+    let stars = if level &lt;= 5 {
+        "*".repeat(level)
+    } else {
+        format!("*{level}*")
+    };
+    result.push_str(&amp;format!(
+        "{indent}{start}@+node:{}: {stars} {}{end}\n",
+        node.id.0, node.headline
+    ));
+    let mut expanded = false;
+    for line in node.body.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        if trimmed.trim_end() == "@others" {
+            expanded = true;
+            let leading = &amp;line[..line.len() - trimmed.len()];
+            let child_indent = format!("{indent}{leading}");
+            result.push_str(&amp;format!("{indent}{leading}{start}@+others{end}\n"));
+            for child in &amp;position.children {
+                render_position(outline, child, level + 1, &amp;child_indent, start, end, result);
+            }
+            result.push_str(&amp;format!("{indent}{leading}{start}@-others{end}\n"));
+        } else if let Some(directive) = trimmed.strip_prefix('@') {
+            result.push_str(&amp;format!(
+                "{indent}{start}@@{}{end}\n",
+                directive.trim_end_matches(['\r', '\n'])
+            ));
+        } else {
+            let rendered = format!("{indent}{line}");
+            if is_sentinel_like(&amp;rendered, start, end) {
+                result.push_str(&amp;format!("{indent}{start}@verbatim{end}\n"));
+            }
+            result.push_str(&amp;rendered);
+            if !line.ends_with('\n') {
+                result.push('\n');
+            }
+        }
+    }
+    if !expanded &amp;&amp; !position.children.is_empty() {
+        result.push_str(&amp;format!("{indent}{start}@+others{end}\n"));
+        for child in &amp;position.children {
+            render_position(outline, child, level + 1, indent, start, end, result);
+        }
+        result.push_str(&amp;format!("{indent}{start}@-others{end}\n"));
+    }
+}
+
+fn is_sentinel_like(line: &amp;str, start: &amp;str, end: &amp;str) -&gt; bool {
+    let line = line.trim();
+    line.starts_with(&amp;format!("{start}@")) &amp;&amp; (end.is_empty() || line.ends_with(end))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn document() -&gt; LeoDocument {
+        let source = concat!(
+@others
+            r#"&lt;leo_file&gt;&lt;vnodes&gt;&lt;v t="r"&gt;&lt;vh&gt;@clean test.py&lt;/vh&gt;&lt;v t="c"&gt;&lt;vh&gt;child&lt;/vh&gt;&lt;/v&gt;&lt;/v&gt;&lt;/vnodes&gt;&lt;tnodes&gt;&lt;t tx="r"&gt;root"#,
+            "\n@",
+            "others\ntail\n",
+            r#"&lt;/t&gt;&lt;t tx="c"&gt;child
+&lt;/t&gt;&lt;/tnodes&gt;&lt;/leo_file&gt;"#,
+        );
+        LeoDocument::parse(source).unwrap()
+    }
+
+    #[test]
+    fn renders_clean_tree_as_parseable_private_text() {
+        let doc = document();
+        let private = render_private(&amp;doc.outline, &amp;PositionId("0".into()), "#", "").unwrap();
+        let parsed = DerivedFile::parse(&amp;private).unwrap();
+        assert_eq!(
+            parsed.outline.nodes[&amp;NodeId::from("r")].body,
+            "root\n@others\ntail\n"
+        );
+        assert_eq!(parsed.outline.nodes[&amp;NodeId::from("c")].body, "child\n");
+    }
+
+    #[test]
+    fn dry_run_does_not_mutate_document() {
+        let mut doc = document();
+        let before = doc.outline.clone();
+        let dir = std::env::temp_dir().join(format!("leo-cub-sync-test-{}", std::process::id()));
+        fs::create_dir_all(&amp;dir).unwrap();
+        let outline_path = dir.join("outline.leo");
+        fs::write(dir.join("test.py"), "changed\nchild\ntail\n").unwrap();
+        let report = sync_document(&amp;mut doc, &amp;outline_path, None, None, true).unwrap();
+        assert_eq!(report.changed, 1);
+        assert_eq!(doc.outline, before);
+        let _ = fs::remove_dir_all(dir);
+    }
+}
+</t>
 <t tx="ekr.20260812052828.2"></t>
 <t tx="ekr.20260812052904.1">"""Recursively import all python files in a directory and clean the result."""
 @tabwidth - 4  # For a better match.
@@ -241,8 +846,13 @@ mod tests {
         path,
         expanded,
         selected: 0,
+        body_scroll: 0,
+        body_page_size: 1,
+        body_scroll_max: 0,
+        help: false,
         status,
         input: None,
+        find: None,
         dirty: false,
         quit_armed: false,
         source_locations,
@@ -279,7 +889,19 @@ mod tests {
         self.selected = 0;
         return;
     }
-    self.selected = self.selected.saturating_add_signed(delta).min(len - 1);
+    let selected = self.selected.saturating_add_signed(delta).min(len - 1);
+    if selected != self.selected {
+        self.selected = selected;
+        self.body_scroll = 0;
+    }
+}
+
+fn scroll_body(&amp;mut self, pages: isize) {
+    let amount = self.body_page_size.max(1);
+    self.body_scroll = self
+        .body_scroll
+        .saturating_add_signed(pages.saturating_mul(amount as isize))
+        .min(self.body_scroll_max);
 }
 
 </t>
@@ -412,6 +1034,26 @@ fn recognizes_only_sentinelled_file_headlines() {
 
 </t>
 <t tx="ekr.20260812053055.114">#[test]
+fn recognizes_clean_files_for_syntax_context() {
+    assert_eq!(external_filename("@clean src/main.rs"), Some("src/main.rs"));
+    assert_eq!(
+        external_filename("@clean \"src/main.rs\""),
+        Some("src/main.rs")
+    );
+}
+
+#[test]
+fn inherits_syntax_context_from_clean_file_ancestor() {
+    let document = LeoDocument::parse(
+        r#"&lt;leo_file&gt;&lt;vnodes&gt;&lt;v t="a"&gt;&lt;vh&gt;@clean src/main.rs&lt;/vh&gt;&lt;v t="b"&gt;&lt;vh&gt;child&lt;/vh&gt;&lt;/v&gt;&lt;/v&gt;&lt;/vnodes&gt;&lt;tnodes&gt;&lt;t tx="a"&gt;@language rust&lt;/t&gt;&lt;t tx="b"&gt;fn child() {}&lt;/t&gt;&lt;/tnodes&gt;&lt;/leo_file&gt;"#,
+    )
+    .unwrap();
+    let (language, path) = syntax_context(&amp;document.outline, &amp;PositionId("0/0".into()));
+    assert_eq!(language.as_deref(), Some("rust"));
+    assert_eq!(path.as_deref(), Some(Path::new("src/main.rs")));
+}
+
+#[test]
 fn extracts_leo_path_directives() {
     assert_eq!(
         path_directive("@language rust\n@path &lt;src/core&gt;\n"),
@@ -442,6 +1084,83 @@ fn moves_nodes_with_leo_control_arrow_semantics() {
         app.document.outline.roots[0].children[1].node,
         NodeId::from("c")
     );
+}
+
+#[test]
+fn finds_headlines_incrementally_and_reveals_collapsed_matches() {
+    let mut app = editing_app();
+    app.expanded.clear();
+    start_find(&amp;mut app);
+    handle_find_input(
+        &amp;mut app,
+        KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
+    );
+
+    assert_eq!(
+        app.selected_row().unwrap().position,
+        PositionId("0/1".into())
+    );
+    assert!(app.expanded.contains(&amp;PositionId("0".into())));
+    assert_eq!(app.find.as_ref().unwrap().matches.len(), 1);
+}
+
+#[test]
+fn scrolls_body_by_a_page_and_stays_in_bounds() {
+    let mut app = editing_app();
+    app.body_page_size = 10;
+    app.body_scroll_max = 24;
+
+    app.scroll_body(1);
+    assert_eq!(app.body_scroll, 10);
+    app.scroll_body(2);
+    assert_eq!(app.body_scroll, 24);
+    app.scroll_body(-1);
+    assert_eq!(app.body_scroll, 14);
+    app.scroll_body(-2);
+    assert_eq!(app.body_scroll, 0);
+}
+
+#[test]
+fn changing_selection_resets_body_scroll() {
+    let mut app = editing_app();
+    app.body_scroll = 12;
+
+    app.move_selection(1);
+
+    assert_eq!(app.selected, 1);
+    assert_eq!(app.body_scroll, 0);
+}
+
+#[test]
+fn find_cycles_matches_and_escape_restores_selection() {
+    let mut app = editing_app();
+    app.document
+        .outline
+        .nodes
+        .get_mut(&amp;NodeId::from("a"))
+        .unwrap()
+        .headline = "Alpha".into();
+    app.document
+        .outline
+        .nodes
+        .get_mut(&amp;NodeId::from("b"))
+        .unwrap()
+        .headline = "Beta".into();
+    start_find(&amp;mut app);
+    handle_find_input(
+        &amp;mut app,
+        KeyEvent::new(KeyCode::Char('a'), KeyModifiers::SHIFT),
+    );
+    assert_eq!(app.find.as_ref().unwrap().matches.len(), 2);
+    handle_find_input(&amp;mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    assert_eq!(
+        app.selected_row().unwrap().position,
+        PositionId("0/0".into())
+    );
+
+    handle_find_input(&amp;mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(app.find.is_none());
+    assert_eq!(app.selected_row().unwrap().position, PositionId("0".into()));
 }
 
 </t>
@@ -485,7 +1204,7 @@ fn restores_external_children_before_serializing() {
     }
 }
 </t>
-<t tx="ekr.20260812053055.118">@others
+<t tx="ekr.20260812053055.118" _mod_time="4741da9edef0e8a5152e">@others
 @language rust
 @tabwidth -4
 </t>
@@ -1029,13 +1748,14 @@ pub fn parse(source: &amp;str) -&gt; Result&lt;Self, SentinelError&gt; {
         if let Some(tail) = inner.strip_prefix("@+others") {
             let id = current.clone().ok_or(SentinelError::MissingRoot)?;
             let leading = leading_width(line);
+            let local = leading.saturating_sub(indent);
             append_body(
                 &amp;mut outline,
                 Some(&amp;id),
-                &amp;format!("{}@others{}\n", &amp;line[..leading], tail),
+                &amp;format!("{}@others{}\n", &amp;line[indent..indent + local], tail),
             );
             expansions.push((id, indent));
-            indent += leading;
+            indent = leading;
             continue;
         }
         if inner.starts_with("@-others") {
@@ -1045,13 +1765,14 @@ pub fn parse(source: &amp;str) -&gt; Result&lt;Self, SentinelError&gt; {
         if let Some(tail) = inner.strip_prefix("@+all") {
             let id = current.clone().ok_or(SentinelError::MissingRoot)?;
             let leading = leading_width(line);
+            let local = leading.saturating_sub(indent);
             append_body(
                 &amp;mut outline,
                 Some(&amp;id),
-                &amp;format!("{}@all{}\n", &amp;line[..leading], tail),
+                &amp;format!("{}@all{}\n", &amp;line[indent..indent + local], tail),
             );
             expansions.push((id, indent));
-            indent += leading;
+            indent = leading;
             continue;
         }
         if inner.starts_with("@-all") {
@@ -1062,13 +1783,14 @@ pub fn parse(source: &amp;str) -&gt; Result&lt;Self, SentinelError&gt; {
             let id = current.clone().ok_or(SentinelError::MissingRoot)?;
             let section = section.strip_suffix("&gt;&gt;").unwrap_or(section);
             let leading = leading_width(line);
+            let local = leading.saturating_sub(indent);
             append_body(
                 &amp;mut outline,
                 Some(&amp;id),
-                &amp;format!("{}&lt;&lt;{}&gt;&gt;\n", &amp;line[..leading], section),
+                &amp;format!("{}&lt;&lt;{}&gt;&gt;\n", &amp;line[indent..indent + local], section),
             );
             expansions.push((id, indent));
-            indent += leading;
+            indent = leading;
             continue;
         }
         if inner.starts_with("@-&lt;&lt;") {
@@ -1131,7 +1853,12 @@ pub fn merge_into(
         .body = root_body;
     for (id, node) in &amp;self.outline.nodes {
         if id != &amp;self.root {
-            next.nodes.insert(id.clone(), node.clone());
+            if let Some(existing) = next.nodes.get_mut(id) {
+                existing.headline.clone_from(&amp;node.headline);
+                existing.body.clone_from(&amp;node.body);
+            } else {
+                next.nodes.insert(id.clone(), node.clone());
+            }
         }
     }
     next.children_mut(Some(target))
@@ -1150,24 +1877,28 @@ pub fn merge_into(
     }
 }
 </t>
-<t tx="ekr.20260812053055.19">//! Clone-aware, automation-safe manipulation of Leo XML outlines.
+<t tx="ekr.20260812053055.19" _mod_time="4741da9f2d4ca63d8f2e">//! Clone-aware, automation-safe manipulation of Leo XML outlines.
 
+mod clean;
 mod derived;
 mod model;
 mod operation;
+mod sync;
 mod xml;
 
+pub use clean::propagate_clean_changes;
 pub use derived::{DerivedFile, SentinelError};
 pub use model::{Node, NodeId, Outline, Position, PositionId, ValidationError};
 pub use operation::{ApplyError, ApplyReport, Operation, OperationBatch, Target};
+pub use sync::{SyncError, SyncItem, SyncReport, sync_document};
 pub use xml::{LeoDocument, LeoXmlError};
 @language rust
 @tabwidth -4
 </t>
 <t tx="ekr.20260812053055.2"></t>
-<t tx="ekr.20260812053055.20">use anyhow::{Context, Result, bail};
+<t tx="ekr.20260812053055.20" _mod_time="4741da9f2d4cab80892e">use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use leo::{DerivedFile, LeoDocument, OperationBatch, PositionId};
+use leo::{DerivedFile, LeoDocument, OperationBatch, PositionId, sync_document};
 use std::{fs, path::PathBuf};
 
 @others
@@ -1206,6 +1937,18 @@ enum Command {
     Apply {
         file: PathBuf,
         operations: PathBuf,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Synchronize external @file and @clean nodes into an outline.
+    Sync {
+        file: PathBuf,
+        /// External filename to sync. Omit to sync all external nodes.
+        external: Option&lt;String&gt;,
+        /// Sync the external node with this GNX.
+        #[arg(long, conflicts_with = "external")]
+        gnx: Option&lt;String&gt;,
+        /// Validate and report changes without writing the outline.
         #[arg(long)]
         dry_run: bool,
     },
@@ -1263,6 +2006,25 @@ enum Command {
             let report = doc.outline.apply(&amp;batch)?;
             if !dry_run {
                 doc.save(file)?;
+            }
+            println!("{}", serde_json::to_string_pretty(&amp;report)?);
+        }
+        Command::Sync {
+            file,
+            external,
+            gnx,
+            dry_run,
+        } =&gt; {
+            let mut document = LeoDocument::open(&amp;file)?;
+            let report = sync_document(
+                &amp;mut document,
+                &amp;file,
+                external.as_deref(),
+                gnx.as_deref(),
+                dry_run,
+            )?;
+            if !dry_run &amp;&amp; report.changed &gt; 0 {
+                document.save(&amp;file)?;
             }
             println!("{}", serde_json::to_string_pretty(&amp;report)?);
         }
@@ -1326,7 +2088,7 @@ enum Command {
         .sum()
 }
 </t>
-<t tx="ekr.20260812053055.25">use std::collections::{HashMap, HashSet};
+<t tx="ekr.20260812053055.25" _mod_time="4741da9eded7ef6c852e">use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -1377,7 +2139,7 @@ pub struct Outline {
 }
 
 </t>
-<t tx="ekr.20260812053055.3">@others
+<t tx="ekr.20260812053055.3" _mod_time="4741da9f2d794b1fc42e">@others
 @language rust
 @tabwidth -4
 </t>
@@ -1482,7 +2244,7 @@ fn walk(
     }
 }
 </t>
-<t tx="ekr.20260812053055.38">use serde::{Deserialize, Serialize};
+<t tx="ekr.20260812053055.38" _mod_time="4741da9eded7ef6c852e">use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{Node, NodeId, Outline, Position, PositionId};
@@ -1731,7 +2493,7 @@ pub fn apply(&amp;mut self, batch: &amp;OperationBatch) -&gt; Result&lt;ApplyRep
     Ok(())
 }
 </t>
-<t tx="ekr.20260812053055.49">use std::path::Path;
+<t tx="ekr.20260812053055.49" _mod_time="4741da9f1f160d8c102e">use std::path::Path;
 
 use ratatui::{
 @others
@@ -1783,7 +2545,7 @@ pub enum SentinelError {
 }
 
 </t>
-<t tx="ekr.20260812053055.54">fn language_directive(body: &amp;str) -&gt; Option&lt;&amp;str&gt; {
+<t tx="ekr.20260812053055.54">pub(crate) fn language_directive(body: &amp;str) -&gt; Option&lt;&amp;str&gt; {
     body.lines().find_map(|line| {
         line.trim_start()
             .strip_prefix("@language")
@@ -1805,8 +2567,13 @@ mod tests {
 }
 
 </t>
-<t tx="ekr.20260812053055.57">pub fn highlight(&amp;self, body: &amp;str, source_path: Option&lt;&amp;Path&gt;) -&gt; Text&lt;'static&gt; {
-    let syntax = self.syntax_for(body, source_path);
+<t tx="ekr.20260812053055.57">pub fn highlight_with_language(
+    &amp;self,
+    body: &amp;str,
+    source_path: Option&lt;&amp;Path&gt;,
+    inherited_language: Option&lt;&amp;str&gt;,
+) -&gt; Text&lt;'static&gt; {
+    let syntax = self.syntax_for(body, source_path, inherited_language);
     let theme = &amp;self.themes.themes["base16-ocean.dark"];
     let mut highlighter = HighlightLines::new(syntax, theme);
     let mut lines = Vec::new();
@@ -1846,8 +2613,14 @@ mod tests {
 }
 
 </t>
-<t tx="ekr.20260812053055.58">fn syntax_for&lt;'a&gt;(&amp;'a self, body: &amp;str, source_path: Option&lt;&amp;Path&gt;) -&gt; &amp;'a SyntaxReference {
+<t tx="ekr.20260812053055.58">fn syntax_for&lt;'a&gt;(
+    &amp;'a self,
+    body: &amp;str,
+    source_path: Option&lt;&amp;Path&gt;,
+    inherited_language: Option&lt;&amp;str&gt;,
+) -&gt; &amp;'a SyntaxReference {
     language_directive(body)
+        .or(inherited_language)
         .and_then(|language| self.syntaxes.find_syntax_by_token(language))
         .or_else(|| {
             source_path
@@ -1877,19 +2650,25 @@ fn finds_leo_language_directives() {
 </t>
 <t tx="ekr.20260812053055.60">#[test]
 fn highlighting_preserves_line_structure_and_whitespace() {
-    let text = SyntaxHighlighter::new()
-        .highlight("fn main() {\n    true\n}\n", Some(Path::new("main.rs")));
+    let text = SyntaxHighlighter::new().highlight_with_language(
+        "fn main() {\n    true\n}\n",
+        Some(Path::new("main.rs")),
+        None,
+    );
     assert_eq!(text.lines.len(), 3);
     assert_eq!(text.lines[1].width(), 8);
 }
 </t>
-<t tx="ekr.20260812053055.61">@others
+<t tx="ekr.20260812053055.61" _mod_time="4741da9f2c5cabaf662e">@others
 @language rust
 @tabwidth -4
 </t>
 <t tx="ekr.20260812053055.62">use std::{
     collections::{HashMap, HashSet},
-    env, fs, io,
+    env, fs,
+    fs::OpenOptions,
+    io,
+    io::Write,
     path::{Path, PathBuf},
     process::Command,
     time::Duration,
@@ -1908,10 +2687,10 @@ use crossterm::{
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
 };
 
 </t>
@@ -1929,8 +2708,13 @@ struct Row {
     path: PathBuf,
     expanded: HashSet&lt;PositionId&gt;,
     selected: usize,
+    body_scroll: usize,
+    body_page_size: usize,
+    body_scroll_max: usize,
+    help: bool,
     status: String,
     input: Option&lt;HeadlineInput&gt;,
+    find: Option&lt;FindInput&gt;,
     dirty: bool,
     quit_armed: bool,
     source_locations: HashMap&lt;PositionId, SourceLocation&gt;,
@@ -1956,6 +2740,13 @@ struct Row {
     value: String,
     original: String,
     inserted_position: Option&lt;PositionId&gt;,
+}
+
+struct FindInput {
+    query: String,
+    matches: Vec&lt;PositionId&gt;,
+    active: usize,
+    original: Option&lt;PositionId&gt;,
 }
 
 </t>
@@ -2049,8 +2840,22 @@ enum MoveDirection {
             handle_headline_input(app, key);
             continue;
         }
+        if app.find.is_some() {
+            handle_find_input(app, key);
+            continue;
+        }
+        if app.help {
+            if matches!(
+                key.code,
+                KeyCode::Char('?') | KeyCode::Char('q') | KeyCode::Esc
+            ) {
+                app.help = false;
+            }
+            continue;
+        }
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
+                KeyCode::Char('p') =&gt; start_find(app),
                 KeyCode::Char('s') =&gt; save(app),
                 KeyCode::Char('i') | KeyCode::Tab =&gt; insert_headline(app),
                 KeyCode::Char('h') | KeyCode::Backspace =&gt; edit_headline(app),
@@ -2063,6 +2868,7 @@ enum MoveDirection {
             continue;
         }
         match key.code {
+            KeyCode::Char('?') =&gt; app.help = true,
             KeyCode::Char('q') | KeyCode::Esc =&gt; {
                 if !app.dirty || app.quit_armed {
                     return Ok(());
@@ -2085,11 +2891,135 @@ enum MoveDirection {
             KeyCode::Up | KeyCode::Char('k') =&gt; app.move_selection(-1),
             KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter =&gt; app.toggle(true),
             KeyCode::Left | KeyCode::Char('h') =&gt; app.toggle(false),
-            KeyCode::Home =&gt; app.selected = 0,
-            KeyCode::End =&gt; app.selected = app.rows().len().saturating_sub(1),
+            KeyCode::Home =&gt; {
+                app.selected = 0;
+                app.body_scroll = 0;
+            }
+            KeyCode::End =&gt; {
+                app.selected = app.rows().len().saturating_sub(1);
+                app.body_scroll = 0;
+            }
+            KeyCode::PageUp =&gt; app.scroll_body(-1),
+            KeyCode::PageDown =&gt; app.scroll_body(1),
             _ =&gt; {}
         }
     }
+}
+
+fn start_find(app: &amp;mut App) {
+    let original = app.selected_row().map(|row| row.position);
+    app.find = Some(FindInput {
+        query: String::new(),
+        matches: Vec::new(),
+        active: 0,
+        original,
+    });
+    app.status = "find headline: type to search, Enter accepts, Esc cancels".into();
+}
+
+fn handle_find_input(app: &amp;mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Enter =&gt; {
+            app.find = None;
+            app.status = "headline selected".into();
+        }
+        KeyCode::Esc =&gt; {
+            let original = app.find.take().and_then(|find| find.original);
+            if let Some(position) = original {
+                reveal_and_select(app, &amp;position);
+            }
+            app.status = "headline find cancelled".into();
+        }
+        KeyCode::Backspace =&gt; {
+            app.find.as_mut().expect("find input exists").query.pop();
+            update_find_matches(app, 0);
+        }
+        KeyCode::Down =&gt; cycle_find_match(app, 1),
+        KeyCode::Up =&gt; cycle_find_match(app, -1),
+        KeyCode::Char(character)
+            if !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =&gt;
+        {
+            app.find
+                .as_mut()
+                .expect("find input exists")
+                .query
+                .push(character);
+            update_find_matches(app, 0);
+        }
+        _ =&gt; {}
+    }
+}
+
+fn update_find_matches(app: &amp;mut App, active: usize) {
+    let query = app
+        .find
+        .as_ref()
+        .expect("find input exists")
+        .query
+        .to_lowercase();
+    let matches = if query.is_empty() {
+        Vec::new()
+    } else {
+        all_rows(&amp;app.document.outline)
+            .into_iter()
+            .filter(|row| {
+                app.document.outline.nodes[&amp;row.node]
+                    .headline
+                    .to_lowercase()
+                    .contains(&amp;query)
+            })
+            .map(|row| row.position)
+            .collect::&lt;Vec&lt;_&gt;&gt;()
+    };
+    let active = active.min(matches.len().saturating_sub(1));
+    let selected = matches.get(active).cloned();
+    let find = app.find.as_mut().expect("find input exists");
+    find.matches = matches;
+    find.active = active;
+    if let Some(position) = selected {
+        reveal_and_select(app, &amp;position);
+    }
+}
+
+fn cycle_find_match(app: &amp;mut App, delta: isize) {
+    let find = app.find.as_ref().expect("find input exists");
+    if find.matches.is_empty() {
+        return;
+    }
+    let len = find.matches.len() as isize;
+    let active = (find.active as isize + delta).rem_euclid(len) as usize;
+    let position = find.matches[active].clone();
+    app.find.as_mut().expect("find input exists").active = active;
+    reveal_and_select(app, &amp;position);
+}
+
+fn all_rows(outline: &amp;Outline) -&gt; Vec&lt;Row&gt; {
+    fn collect(position: &amp;Position, path: String, depth: usize, rows: &amp;mut Vec&lt;Row&gt;) {
+        rows.push(Row {
+            position: PositionId(path.clone()),
+            node: position.node.clone(),
+            depth,
+            has_children: !position.children.is_empty(),
+        });
+        for (index, child) in position.children.iter().enumerate() {
+            collect(child, format!("{path}/{index}"), depth + 1, rows);
+        }
+    }
+    let mut rows = Vec::new();
+    for (index, root) in outline.roots.iter().enumerate() {
+        collect(root, index.to_string(), 0, &amp;mut rows);
+    }
+    rows
+}
+
+fn reveal_and_select(app: &amp;mut App, position: &amp;PositionId) {
+    let components = position.0.split('/').collect::&lt;Vec&lt;_&gt;&gt;();
+    for end in 1..components.len() {
+        app.expanded.insert(PositionId(components[..end].join("/")));
+    }
+    select_position(app, position);
 }
 
 </t>
@@ -2388,6 +3318,9 @@ enum MoveDirection {
 </t>
 <t tx="ekr.20260812053055.85">fn select_position(app: &amp;mut App, id: &amp;PositionId) {
     if let Some(index) = app.rows().iter().position(|row| &amp;row.position == id) {
+        if index != app.selected {
+            app.body_scroll = 0;
+        }
         app.selected = index;
     }
 }
@@ -2467,39 +3400,134 @@ enum MoveDirection {
         &amp;mut state,
     );
 
-    let details = rows
-        .get(app.selected)
-        .map(|row| {
-            let node = &amp;app.document.outline.nodes[&amp;row.node];
-            let headline = node.headline.clone();
-            let gnx = node.id.0.clone();
-            let mut text = Text::from(vec![
-                Line::styled(headline, Style::default().add_modifier(Modifier::BOLD)),
-                Line::from(format!("GNX: {gnx}")),
-                Line::from(format!("Position: {}", row.position.0)),
-                Line::from(""),
-            ]);
-            text.extend(body_text(app, row));
-            text
-        })
-        .unwrap_or_default();
-    frame.render_widget(
-        Paragraph::new(details).block(Block::default().title(" Node ").borders(Borders::ALL)),
-        columns[1],
-    );
+    let node_block = Block::default().title(" Node ").borders(Borders::ALL);
+    let node_area = node_block.inner(columns[1]);
+    frame.render_widget(node_block, columns[1]);
+    if let Some(row) = rows.get(app.selected) {
+        let node = &amp;app.document.outline.nodes[&amp;row.node];
+        let metadata = Text::from(vec![
+            Line::styled(
+                node.headline.clone(),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Line::from(format!("GNX: {}", node.id.0)),
+            Line::from(format!("Position: {}", row.position.0)),
+        ]);
+        let node_rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(4), Constraint::Min(0)])
+            .split(node_area);
+        frame.render_widget(Paragraph::new(metadata), node_rows[0]);
+
+        let body = body_text(app, row);
+        app.body_page_size = usize::from(node_rows[1].height).max(1);
+        app.body_scroll_max = body.lines.len().saturating_sub(app.body_page_size);
+        app.body_scroll = app.body_scroll.min(app.body_scroll_max);
+        frame.render_widget(
+            Paragraph::new(body).scroll((app.body_scroll.min(u16::MAX as usize) as u16, 0)),
+            node_rows[1],
+        );
+    }
     frame.render_widget(
         Paragraph::new(format!("{}   [{}]", controls(), app.status))
             .style(Style::default().fg(Color::DarkGray)),
         areas[1],
     );
+    if let Some(find) = &amp;app.find {
+        let width = frame.area().width.saturating_sub(4).min(72);
+        let shown = find.matches.len().min(5);
+        let height = (3 + shown as u16).min(frame.area().height.saturating_sub(2));
+        let area = Rect::new(
+            frame.area().x + (frame.area().width.saturating_sub(width)) / 2,
+            frame.area().y + 1,
+            width,
+            height,
+        );
+        let count = if find.query.is_empty() {
+            String::new()
+        } else if find.matches.is_empty() {
+            "no matches".into()
+        } else {
+            format!("{} of {}", find.active + 1, find.matches.len())
+        };
+        let rows = all_rows(&amp;app.document.outline);
+        let first = find.active.saturating_sub(4);
+        let mut lines = vec![Line::from(format!("&gt; {}▏", find.query))];
+        lines.extend(find.matches.iter().enumerate().skip(first).take(5).map(
+            |(index, position)| {
+                let row = rows
+                    .iter()
+                    .find(|row| &amp;row.position == position)
+                    .expect("matched position exists");
+                let marker = if index == find.active { "› " } else { "  " };
+                Line::from(format!(
+                    "{marker}{}",
+                    app.document.outline.nodes[&amp;row.node].headline
+                ))
+            },
+        ));
+        frame.render_widget(Clear, area);
+        frame.render_widget(
+            Paragraph::new(lines).block(
+                Block::default()
+                    .title(format!(" Find headline  {count} "))
+                    .borders(Borders::ALL),
+            ),
+            area,
+        );
+    }
+    if app.help {
+        draw_help(frame);
+    }
 }
 
 </t>
 <t tx="ekr.20260812053055.88">fn controls() -&gt; &amp;'static str {
     #[cfg(feature = "syntax")]
-    return "Ctrl-I new  Ctrl-H rename  Ctrl-↑↓←→ move  Ctrl-S save  o open  y syntax  q quit";
+    return "? help  PgUp/PgDn body  o open/edit  Ctrl-P find  Ctrl-I new  Ctrl-H rename  Ctrl-↑↓←→ move  Ctrl-S save  y syntax  q quit";
     #[cfg(not(feature = "syntax"))]
-    "Ctrl-I new  Ctrl-H rename  Ctrl-↑↓←→ move  Ctrl-S save  o open  q quit"
+    "? help  PgUp/PgDn body  o open/edit  Ctrl-P find  Ctrl-I new  Ctrl-H rename  Ctrl-↑↓←→ move  Ctrl-S save  q quit"
+}
+
+fn draw_help(frame: &amp;mut ratatui::Frame&lt;'_&gt;) {
+    let width = frame.area().width.saturating_sub(4).min(72);
+    let height = frame.area().height.saturating_sub(2).min(20);
+    let area = Rect::new(
+        frame.area().x + (frame.area().width.saturating_sub(width)) / 2,
+        frame.area().y + (frame.area().height.saturating_sub(height)) / 2,
+        width,
+        height,
+    );
+    let lines = vec![
+        Line::from("↑/↓ or k/j       Select previous/next node"),
+        Line::from("←/→ or h/l       Collapse/expand node"),
+        Line::from("Enter            Expand node"),
+        Line::from("Home/End         Select first/last visible node"),
+        Line::from("PageUp/PageDown  Scroll the body pane"),
+        Line::from("Ctrl-P           Find a headline"),
+        Line::from("Ctrl-I or Tab    Insert a sibling"),
+        Line::from("Ctrl-H/Backspace Rename the headline"),
+        Line::from("Ctrl-↑↓←→        Move/promote/demote node"),
+        Line::from("Ctrl-S           Save"),
+        Line::from("o                Edit body, or open derived source"),
+        #[cfg(feature = "syntax")]
+        Line::from("y                Toggle syntax highlighting"),
+        Line::from("q or Esc         Quit"),
+        Line::from(""),
+        Line::styled(
+            "Press ?, q, or Esc to close",
+            Style::default().fg(Color::DarkGray),
+        ),
+    ];
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .title(" Command help ")
+                .borders(Borders::ALL),
+        ),
+        area,
+    );
 }
 
 </t>
@@ -2510,16 +3538,47 @@ enum MoveDirection {
         if let Some(cached) = app.highlight_cache.get(&amp;row.position) {
             return cached.clone();
         }
+        let (inherited_language, external_path) =
+            syntax_context(&amp;app.document.outline, &amp;row.position);
         let source_path = app
             .source_locations
             .get(&amp;row.position)
-            .map(|location| location.path.as_path());
-        let highlighted = app.syntax.highlight(&amp;body, source_path);
+            .map(|location| location.path.as_path())
+            .or(external_path.as_deref());
+        let highlighted =
+            app.syntax
+                .highlight_with_language(&amp;body, source_path, inherited_language.as_deref());
         app.highlight_cache
             .insert(row.position.clone(), highlighted.clone());
         return highlighted;
     }
     Text::from(body)
+}
+
+#[cfg(feature = "syntax")]
+fn syntax_context(outline: &amp;Outline, position: &amp;PositionId) -&gt; (Option&lt;String&gt;, Option&lt;PathBuf&gt;) {
+    let mut language = None;
+    let mut source_path = None;
+    let mut prefix = String::new();
+
+    for component in position.0.split('/') {
+        if !prefix.is_empty() {
+            prefix.push('/');
+        }
+        prefix.push_str(component);
+        let Some(position) = outline.position(&amp;PositionId(prefix.clone())) else {
+            break;
+        };
+        let node = &amp;outline.nodes[&amp;position.node];
+        if let Some(value) = crate::syntax::language_directive(&amp;node.body) {
+            language = Some(value.to_owned());
+        }
+        if let Some(filename) = external_filename(&amp;node.headline) {
+            source_path = Some(PathBuf::from(filename));
+        }
+    }
+
+    (language, source_path)
 }
 
 </t>
@@ -2624,20 +3683,78 @@ struct SourceLocation {
     let Some(row) = app.rows().get(app.selected).cloned() else {
         return;
     };
-    let Some(location) = app
+    if let Some(location) = app
         .source_locations
         .get(&amp;row.position)
         .or_else(|| app.source_nodes.get(&amp;row.node))
         .cloned()
-    else {
-        app.status = "selected node has no external source location".to_owned();
+    {
+        if let Err(error) = suspend_and_open(terminal, &amp;location) {
+            app.status = format!("open failed: {error}");
+        } else {
+            app.status = format!("opened {}:{}", location.path.display(), location.line);
+        }
         return;
-    };
-    if let Err(error) = suspend_and_open(terminal, &amp;location) {
-        app.status = format!("open failed: {error}");
-    } else {
-        app.status = format!("opened {}:{}", location.path.display(), location.line);
     }
+
+    if !app.editable(&amp;row) {
+        return;
+    }
+    match edit_body_in_temp_file(terminal, &amp;app.document.outline.nodes[&amp;row.node].body) {
+        Ok(Some(body)) =&gt; {
+            app.document
+                .outline
+                .nodes
+                .get_mut(&amp;row.node)
+                .expect("edited node exists")
+                .body = body;
+            #[cfg(feature = "syntax")]
+            app.highlight_cache.clear();
+            app.body_scroll = 0;
+            app.dirty = true;
+            app.quit_armed = false;
+            app.status = "body changed (Ctrl-S to save)".into();
+        }
+        Ok(None) =&gt; app.status = "body unchanged".into(),
+        Err(error) =&gt; app.status = format!("body edit failed: {error}"),
+    }
+}
+
+fn edit_body_in_temp_file(
+    terminal: &amp;mut Terminal&lt;CrosstermBackend&lt;io::Stdout&gt;&gt;,
+    original: &amp;str,
+) -&gt; Result&lt;Option&lt;String&gt;&gt; {
+    let path = unique_body_temp_path();
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&amp;path)?;
+    file.write_all(original.as_bytes())?;
+    drop(file);
+
+    let location = SourceLocation {
+        path: path.clone(),
+        line: 1,
+    };
+    let editor_result = suspend_and_open(terminal, &amp;location);
+    let result = editor_result.and_then(|()| {
+        let edited = fs::read_to_string(&amp;path)?;
+        Ok((edited != original).then_some(edited))
+    });
+    let _ = fs::remove_file(path);
+    result
+}
+
+fn unique_body_temp_path() -&gt; PathBuf {
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    env::temp_dir().join(format!(
+        "leo-cub-body-{}-{}-{}.txt",
+        std::process::id(),
+        duration.as_secs(),
+        duration.subsec_nanos()
+    ))
 }
 
 </t>
@@ -2685,7 +3802,7 @@ struct SourceLocation {
                 .arg("--goto")
                 .arg(format!("{}:{}:1", location.path.display(), location.line));
         }
-        "hx" | "helix" | "kak" =&gt; {
+        "edit" | "msedit" | "hx" | "helix" | "kak" =&gt; {
             command.arg(format!("{}:{}:1", location.path.display(), location.line));
         }
         _ =&gt; {
@@ -2712,6 +3829,13 @@ struct SourceLocation {
 <t tx="ekr.20260812053055.98">fn thin_filename(headline: &amp;str) -&gt; Option&lt;&amp;str&gt; {
     let (directive, filename) = headline.trim().split_once(char::is_whitespace)?;
     matches!(directive, "@file" | "@thin" | "@file-thin")
+        .then(|| strip_path_cruft(filename))
+        .filter(|filename| !filename.is_empty())
+}
+
+fn external_filename(headline: &amp;str) -&gt; Option&lt;&amp;str&gt; {
+    let (directive, filename) = headline.trim().split_once(char::is_whitespace)?;
+    matches!(directive, "@file" | "@thin" | "@file-thin" | "@clean")
         .then(|| strip_path_cruft(filename))
         .filter(|filename| !filename.is_empty())
 }

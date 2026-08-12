@@ -91,6 +91,16 @@ fn preserves_directive_and_child_body_indentation() {
 }
 
 #[test]
+fn preserves_expansion_indentation_relative_to_nested_node() {
+    let source = "#@+leo-ver=5-thin\n#@+node:r: * root\n#@+others\n    #@+node:c: ** child\n        #@+others\n        #@+node:g: *3* grandchild\n        body\n        #@-others\n    #@-others\n#@-leo\n";
+    let parsed = DerivedFile::parse(source).unwrap();
+    assert_eq!(
+        parsed.outline.nodes[&NodeId::from("c")].body,
+        "    @others\n"
+    );
+}
+
+#[test]
 fn merges_only_when_root_identity_matches() {
     let xml = r#"<leo_file><vnodes><v t="root.1"><vh>@file example.py</vh></v></vnodes><tnodes><t tx="root.1"></t></tnodes></leo_file>"#;
     let mut document = LeoDocument::parse(xml).unwrap();
@@ -104,4 +114,27 @@ fn merges_only_when_root_identity_matches() {
         .merge_into(&mut document.outline, &PositionId("0/0".into()))
         .unwrap_err();
     assert!(matches!(error, SentinelError::RootMismatch { .. }));
+}
+
+#[test]
+fn merge_preserves_existing_node_attributes() {
+    let parsed = DerivedFile::parse(PYTHON).unwrap();
+    let mut document = LeoDocument::parse(
+        r#"<leo_file><vnodes><v t="root.1"><vh>root</vh><v t="child.1" custom="v"><vh>old</vh></v></v></vnodes><tnodes><t tx="root.1"></t><t tx="child.1" custom="t">old</t></tnodes></leo_file>"#,
+    )
+    .unwrap();
+
+    parsed
+        .merge_into(&mut document.outline, &PositionId("0".into()))
+        .unwrap();
+
+    let child = &document.outline.nodes[&NodeId::from("child.1")];
+    assert_eq!(
+        child.vnode_attributes.get("custom").map(String::as_str),
+        Some("v")
+    );
+    assert_eq!(
+        child.tnode_attributes.get("custom").map(String::as_str),
+        Some("t")
+    );
 }
