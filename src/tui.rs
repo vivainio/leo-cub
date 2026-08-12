@@ -17,10 +17,10 @@ use leo::{DerivedFile, LeoDocument, NodeId, Outline, Position, PositionId};
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
 };
 
 #[derive(Clone)]
@@ -38,6 +38,7 @@ struct App {
     selected: usize,
     status: String,
     input: Option<HeadlineInput>,
+    find: Option<FindInput>,
     dirty: bool,
     quit_armed: bool,
     source_locations: HashMap<PositionId, SourceLocation>,
@@ -76,6 +77,7 @@ impl App {
             selected: 0,
             status,
             input: None,
+            find: None,
             dirty: false,
             quit_armed: false,
             source_locations,
@@ -171,6 +173,13 @@ struct HeadlineInput {
     inserted_position: Option<PositionId>,
 }
 
+struct FindInput {
+    query: String,
+    matches: Vec<PositionId>,
+    active: usize,
+    original: Option<PositionId>,
+}
+
 #[derive(Clone, Copy)]
 enum MoveDirection {
     Up,
@@ -247,8 +256,13 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
             handle_headline_input(app, key);
             continue;
         }
+        if app.find.is_some() {
+            handle_find_input(app, key);
+            continue;
+        }
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
+                KeyCode::Char('p') => start_find(app),
                 KeyCode::Char('s') => save(app),
                 KeyCode::Char('i') | KeyCode::Tab => insert_headline(app),
                 KeyCode::Char('h') | KeyCode::Backspace => edit_headline(app),
@@ -288,6 +302,122 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
             _ => {}
         }
     }
+}
+
+fn start_find(app: &mut App) {
+    let original = app.selected_row().map(|row| row.position);
+    app.find = Some(FindInput {
+        query: String::new(),
+        matches: Vec::new(),
+        active: 0,
+        original,
+    });
+    app.status = "find headline: type to search, Enter accepts, Esc cancels".into();
+}
+
+fn handle_find_input(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Enter => {
+            app.find = None;
+            app.status = "headline selected".into();
+        }
+        KeyCode::Esc => {
+            let original = app.find.take().and_then(|find| find.original);
+            if let Some(position) = original {
+                reveal_and_select(app, &position);
+            }
+            app.status = "headline find cancelled".into();
+        }
+        KeyCode::Backspace => {
+            app.find.as_mut().expect("find input exists").query.pop();
+            update_find_matches(app, 0);
+        }
+        KeyCode::Down => cycle_find_match(app, 1),
+        KeyCode::Up => cycle_find_match(app, -1),
+        KeyCode::Char(character)
+            if !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
+            app.find
+                .as_mut()
+                .expect("find input exists")
+                .query
+                .push(character);
+            update_find_matches(app, 0);
+        }
+        _ => {}
+    }
+}
+
+fn update_find_matches(app: &mut App, active: usize) {
+    let query = app
+        .find
+        .as_ref()
+        .expect("find input exists")
+        .query
+        .to_lowercase();
+    let matches = if query.is_empty() {
+        Vec::new()
+    } else {
+        all_rows(&app.document.outline)
+            .into_iter()
+            .filter(|row| {
+                app.document.outline.nodes[&row.node]
+                    .headline
+                    .to_lowercase()
+                    .contains(&query)
+            })
+            .map(|row| row.position)
+            .collect::<Vec<_>>()
+    };
+    let active = active.min(matches.len().saturating_sub(1));
+    let selected = matches.get(active).cloned();
+    let find = app.find.as_mut().expect("find input exists");
+    find.matches = matches;
+    find.active = active;
+    if let Some(position) = selected {
+        reveal_and_select(app, &position);
+    }
+}
+
+fn cycle_find_match(app: &mut App, delta: isize) {
+    let find = app.find.as_ref().expect("find input exists");
+    if find.matches.is_empty() {
+        return;
+    }
+    let len = find.matches.len() as isize;
+    let active = (find.active as isize + delta).rem_euclid(len) as usize;
+    let position = find.matches[active].clone();
+    app.find.as_mut().expect("find input exists").active = active;
+    reveal_and_select(app, &position);
+}
+
+fn all_rows(outline: &Outline) -> Vec<Row> {
+    fn collect(position: &Position, path: String, depth: usize, rows: &mut Vec<Row>) {
+        rows.push(Row {
+            position: PositionId(path.clone()),
+            node: position.node.clone(),
+            depth,
+            has_children: !position.children.is_empty(),
+        });
+        for (index, child) in position.children.iter().enumerate() {
+            collect(child, format!("{path}/{index}"), depth + 1, rows);
+        }
+    }
+    let mut rows = Vec::new();
+    for (index, root) in outline.roots.iter().enumerate() {
+        collect(root, index.to_string(), 0, &mut rows);
+    }
+    rows
+}
+
+fn reveal_and_select(app: &mut App, position: &PositionId) {
+    let components = position.0.split('/').collect::<Vec<_>>();
+    for end in 1..components.len() {
+        app.expanded.insert(PositionId(components[..end].join("/")));
+    }
+    select_position(app, position);
 }
 
 fn handle_headline_input(app: &mut App, key: KeyEvent) {
@@ -668,13 +798,56 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
             .style(Style::default().fg(Color::DarkGray)),
         areas[1],
     );
+    if let Some(find) = &app.find {
+        let width = frame.area().width.saturating_sub(4).min(72);
+        let shown = find.matches.len().min(5);
+        let height = (3 + shown as u16).min(frame.area().height.saturating_sub(2));
+        let area = Rect::new(
+            frame.area().x + (frame.area().width.saturating_sub(width)) / 2,
+            frame.area().y + 1,
+            width,
+            height,
+        );
+        let count = if find.query.is_empty() {
+            String::new()
+        } else if find.matches.is_empty() {
+            "no matches".into()
+        } else {
+            format!("{} of {}", find.active + 1, find.matches.len())
+        };
+        let rows = all_rows(&app.document.outline);
+        let first = find.active.saturating_sub(4);
+        let mut lines = vec![Line::from(format!("> {}▏", find.query))];
+        lines.extend(find.matches.iter().enumerate().skip(first).take(5).map(
+            |(index, position)| {
+                let row = rows
+                    .iter()
+                    .find(|row| &row.position == position)
+                    .expect("matched position exists");
+                let marker = if index == find.active { "› " } else { "  " };
+                Line::from(format!(
+                    "{marker}{}",
+                    app.document.outline.nodes[&row.node].headline
+                ))
+            },
+        ));
+        frame.render_widget(Clear, area);
+        frame.render_widget(
+            Paragraph::new(lines).block(
+                Block::default()
+                    .title(format!(" Find headline  {count} "))
+                    .borders(Borders::ALL),
+            ),
+            area,
+        );
+    }
 }
 
 fn controls() -> &'static str {
     #[cfg(feature = "syntax")]
-    return "Ctrl-I new  Ctrl-H rename  Ctrl-↑↓←→ move  Ctrl-S save  o open  y syntax  q quit";
+    return "Ctrl-P find  Ctrl-I new  Ctrl-H rename  Ctrl-↑↓←→ move  Ctrl-S save  o open  y syntax  q quit";
     #[cfg(not(feature = "syntax"))]
-    "Ctrl-I new  Ctrl-H rename  Ctrl-↑↓←→ move  Ctrl-S save  o open  q quit"
+    "Ctrl-P find  Ctrl-I new  Ctrl-H rename  Ctrl-↑↓←→ move  Ctrl-S save  o open  q quit"
 }
 
 fn body_text(app: &mut App, row: &Row) -> Text<'static> {
@@ -1062,6 +1235,56 @@ mod tests {
             app.document.outline.roots[0].children[1].node,
             NodeId::from("c")
         );
+    }
+
+    #[test]
+    fn finds_headlines_incrementally_and_reveals_collapsed_matches() {
+        let mut app = editing_app();
+        app.expanded.clear();
+        start_find(&mut app);
+        handle_find_input(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
+        );
+
+        assert_eq!(
+            app.selected_row().unwrap().position,
+            PositionId("0/1".into())
+        );
+        assert!(app.expanded.contains(&PositionId("0".into())));
+        assert_eq!(app.find.as_ref().unwrap().matches.len(), 1);
+    }
+
+    #[test]
+    fn find_cycles_matches_and_escape_restores_selection() {
+        let mut app = editing_app();
+        app.document
+            .outline
+            .nodes
+            .get_mut(&NodeId::from("a"))
+            .unwrap()
+            .headline = "Alpha".into();
+        app.document
+            .outline
+            .nodes
+            .get_mut(&NodeId::from("b"))
+            .unwrap()
+            .headline = "Beta".into();
+        start_find(&mut app);
+        handle_find_input(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::SHIFT),
+        );
+        assert_eq!(app.find.as_ref().unwrap().matches.len(), 2);
+        handle_find_input(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(
+            app.selected_row().unwrap().position,
+            PositionId("0/0".into())
+        );
+
+        handle_find_input(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.find.is_none());
+        assert_eq!(app.selected_row().unwrap().position, PositionId("0".into()));
     }
 
     #[test]
