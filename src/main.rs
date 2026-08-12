@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 use leo::{DerivedFile, LeoDocument, OperationBatch, sync_document};
 use std::{fs, path::PathBuf};
 
+mod install;
 #[cfg(all(feature = "tui", feature = "syntax"))]
 mod syntax;
 #[cfg(feature = "tui")]
@@ -17,6 +18,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Install the bundled skill into ~/.claude/skills.
+    InstallSkills,
     /// Browse an outline interactively (read-only).
     #[cfg(feature = "tui")]
     Tui {
@@ -31,6 +34,25 @@ enum Command {
     Validate {
         file: PathBuf,
     },
+    /// Apply a transactional JSON operation batch to an outline.
+    #[command(after_help = r#"OPERATIONS FORMAT:
+  The file is a JSON object with an "operations" array. Supported operations:
+
+  {"op":"set-headline","node":"<gnx>","headline":"new","expected":"old"}
+  {"op":"set-body","node":"<gnx>","body":"new","expected":"old"}
+  {"op":"insert","parent":"<parent-gnx>","index":0,
+   "node":{"id":"<new-gnx>","headline":"New node","body":""}}
+  {"op":"clone","parent":"<parent-gnx>","index":0,"node":"<gnx>"}
+  {"op":"remove","position":"<position>"}
+
+  "parent" is a GNX and may be null for the outline root. Inserting below a
+  cloned parent affects all its occurrences. "index" and "expected" are
+  optional. "position" is an index path such as "0/2/1" and identifies one
+  clone occurrence. The complete batch is committed only if every operation
+  succeeds.
+
+EXAMPLE:
+  {"operations":[{"op":"set-body","node":"ekr.1","expected":"old","body":"new"}]}"#)]
     Apply {
         file: PathBuf,
         operations: PathBuf,
@@ -64,6 +86,7 @@ enum Command {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
+        Command::InstallSkills => install::install_skills()?,
         #[cfg(feature = "tui")]
         Command::Tui { file, no_derived } => tui::run(file, !no_derived)?,
         Command::Inspect { file } => println!(

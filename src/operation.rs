@@ -14,12 +14,12 @@ pub enum Target {
 #[serde(tag = "op", rename_all = "kebab-case")]
 pub enum Operation {
     Insert {
-        parent: Option<PositionId>,
+        parent: Option<NodeId>,
         index: Option<usize>,
         node: Node,
     },
     Clone {
-        parent: Option<PositionId>,
+        parent: Option<NodeId>,
         index: Option<usize>,
         node: NodeId,
     },
@@ -91,9 +91,8 @@ impl Outline {
                     return Err(ApplyError::DuplicateNode(node.id.0.clone()));
                 }
                 let id = node.id.clone();
-                let children = self.children_mut(parent.as_ref()).ok_or_else(|| {
-                    ApplyError::PositionNotFound(parent.as_ref().unwrap().0.clone())
-                })?;
+                let children = children_for_parent(self, parent.as_ref())
+                    .ok_or_else(|| ApplyError::NodeNotFound(parent.as_ref().unwrap().0.clone()))?;
                 let at = index.unwrap_or(children.len());
                 if at > children.len() {
                     return Err(ApplyError::BadIndex {
@@ -118,9 +117,8 @@ impl Outline {
                 if !self.nodes.contains_key(node) {
                     return Err(ApplyError::NodeNotFound(node.0.clone()));
                 }
-                let children = self.children_mut(parent.as_ref()).ok_or_else(|| {
-                    ApplyError::PositionNotFound(parent.as_ref().unwrap().0.clone())
-                })?;
+                let children = children_for_parent(self, parent.as_ref())
+                    .ok_or_else(|| ApplyError::NodeNotFound(parent.as_ref().unwrap().0.clone()))?;
                 let at = index.unwrap_or(children.len());
                 if at > children.len() {
                     return Err(ApplyError::BadIndex {
@@ -180,6 +178,32 @@ impl Outline {
         }
         Ok(())
     }
+}
+
+/// Return the shared child list for a parent vnode. Leo writes the complete
+/// subtree on the vnode's defining (first) occurrence; later clone occurrences
+/// are references to that same structure.
+fn children_for_parent<'a>(
+    outline: &'a mut Outline,
+    parent: Option<&NodeId>,
+) -> Option<&'a mut Vec<Position>> {
+    let Some(parent) = parent else {
+        return Some(&mut outline.roots);
+    };
+
+    fn find<'a>(positions: &'a mut [Position], parent: &NodeId) -> Option<&'a mut Vec<Position>> {
+        for position in positions {
+            if &position.node == parent {
+                return Some(&mut position.children);
+            }
+            if let Some(children) = find(&mut position.children, parent) {
+                return Some(children);
+            }
+        }
+        None
+    }
+
+    find(&mut outline.roots, parent)
 }
 
 fn set_text(
