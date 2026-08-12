@@ -4,11 +4,12 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
     time::Duration,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::Result;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind},
+    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -32,10 +33,17 @@ struct Row {
 
 struct App {
     document: LeoDocument,
+    path: PathBuf,
     expanded: HashSet<PositionId>,
     selected: usize,
     status: String,
+    input: Option<HeadlineInput>,
+    dirty: bool,
+    quit_armed: bool,
     source_locations: HashMap<PositionId, SourceLocation>,
+    source_nodes: HashMap<NodeId, SourceLocation>,
+    derived_nodes: HashSet<NodeId>,
+    derived_roots: HashMap<NodeId, Vec<Position>>,
     #[cfg(feature = "syntax")]
     syntax: crate::syntax::SyntaxHighlighter,
     #[cfg(feature = "syntax")]
@@ -47,8 +55,12 @@ struct App {
 impl App {
     fn new(
         document: LeoDocument,
+        path: PathBuf,
         status: String,
         source_locations: HashMap<PositionId, SourceLocation>,
+        source_nodes: HashMap<NodeId, SourceLocation>,
+        derived_nodes: HashSet<NodeId>,
+        derived_roots: HashMap<NodeId, Vec<Position>>,
     ) -> Self {
         let expanded = document
             .outline
@@ -59,10 +71,17 @@ impl App {
             .collect();
         Self {
             document,
+            path,
             expanded,
             selected: 0,
             status,
+            input: None,
+            dirty: false,
+            quit_armed: false,
             source_locations,
+            source_nodes,
+            derived_nodes,
+            derived_roots,
             #[cfg(feature = "syntax")]
             syntax: crate::syntax::SyntaxHighlighter::new(),
             #[cfg(feature = "syntax")]
@@ -130,11 +149,39 @@ impl App {
             self.expanded.remove(&row.position);
         }
     }
+
+    fn selected_row(&self) -> Option<Row> {
+        self.rows().get(self.selected).cloned()
+    }
+
+    fn editable(&mut self, row: &Row) -> bool {
+        if self.derived_nodes.contains(&row.node) {
+            self.status = "derived descendants are read-only; press o to edit the source".into();
+            false
+        } else {
+            true
+        }
+    }
+}
+
+struct HeadlineInput {
+    node: NodeId,
+    value: String,
+    original: String,
+    inserted_position: Option<PositionId>,
+}
+
+#[derive(Clone, Copy)]
+enum MoveDirection {
+    Up,
+    Down,
+    Left,
+    Right,
 }
 
 pub fn run(path: PathBuf, load_derived: bool) -> Result<()> {
     let mut document = LeoDocument::open(&path)?;
-    let (status, source_locations) = if load_derived {
+    let (status, source_locations, source_nodes, derived_nodes, derived_roots) = if load_derived {
         let report = load_derived_files(&mut document.outline, &path);
         let status = if report.errors.is_empty() {
             format!("loaded {} derived file(s)", report.loaded)
@@ -146,11 +193,31 @@ pub fn run(path: PathBuf, load_derived: bool) -> Result<()> {
                 report.errors.join(" | ")
             )
         };
-        (status, report.locations)
+        (
+            status,
+            report.locations,
+            report.node_locations,
+            report.derived_nodes,
+            report.original_children,
+        )
     } else {
-        ("derived files disabled".to_owned(), HashMap::new())
+        (
+            "derived files disabled".to_owned(),
+            HashMap::new(),
+            HashMap::new(),
+            HashSet::new(),
+            HashMap::new(),
+        )
     };
-    let mut app = App::new(document, status, source_locations);
+    let mut app = App::new(
+        document,
+        path,
+        status,
+        source_locations,
+        source_nodes,
+        derived_nodes,
+        derived_roots,
+    );
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -176,9 +243,34 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
         if key.kind != KeyEventKind::Press {
             continue;
         }
+        if app.input.is_some() {
+            handle_headline_input(app, key);
+            continue;
+        }
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            match key.code {
+                KeyCode::Char('s') => save(app),
+                KeyCode::Char('i') | KeyCode::Tab => insert_headline(app),
+                KeyCode::Char('h') | KeyCode::Backspace => edit_headline(app),
+                KeyCode::Up => move_selected(app, MoveDirection::Up),
+                KeyCode::Down => move_selected(app, MoveDirection::Down),
+                KeyCode::Left => move_selected(app, MoveDirection::Left),
+                KeyCode::Right => move_selected(app, MoveDirection::Right),
+                _ => {}
+            }
+            continue;
+        }
         match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
+            KeyCode::Char('q') | KeyCode::Esc => {
+                if !app.dirty || app.quit_armed {
+                    return Ok(());
+                }
+                app.quit_armed = true;
+                app.status = "unsaved changes; press q again to discard, or Ctrl-S to save".into();
+            }
             KeyCode::Char('o') => open_selected(terminal, app),
+            KeyCode::Tab => insert_headline(app),
+            KeyCode::Backspace => edit_headline(app),
             #[cfg(feature = "syntax")]
             KeyCode::Char('y') => {
                 app.syntax_enabled = !app.syntax_enabled;
@@ -196,6 +288,297 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
             _ => {}
         }
     }
+}
+
+fn handle_headline_input(app: &mut App, key: KeyEvent) {
+    let Some(input) = app.input.as_mut() else {
+        return;
+    };
+    match key.code {
+        KeyCode::Enter => {
+            let headline = input.value.trim().to_owned();
+            if headline.is_empty() {
+                app.status = "headline may not be empty".into();
+                return;
+            }
+            app.document
+                .outline
+                .nodes
+                .get_mut(&input.node)
+                .expect("edited node exists")
+                .headline = headline;
+            app.input = None;
+            app.dirty = true;
+            app.quit_armed = false;
+            app.status = "headline changed (Ctrl-S to save)".into();
+        }
+        KeyCode::Esc => {
+            let input = app.input.take().expect("input exists");
+            if let Some(position) = input.inserted_position {
+                remove_position(&mut app.document.outline, &position);
+                app.document.outline.nodes.remove(&input.node);
+            } else {
+                app.document
+                    .outline
+                    .nodes
+                    .get_mut(&input.node)
+                    .expect("node exists")
+                    .headline = input.original;
+            }
+            app.status = "headline edit cancelled".into();
+        }
+        KeyCode::Backspace => {
+            input.value.pop();
+        }
+        KeyCode::Char(character)
+            if !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
+            input.value.push(character);
+        }
+        _ => {}
+    }
+}
+
+fn edit_headline(app: &mut App) {
+    let Some(row) = app.selected_row() else {
+        return;
+    };
+    if !app.editable(&row) {
+        return;
+    }
+    let original = app.document.outline.nodes[&row.node].headline.clone();
+    app.input = Some(HeadlineInput {
+        node: row.node,
+        value: original.clone(),
+        original,
+        inserted_position: None,
+    });
+    app.status = "editing headline: Enter accepts, Esc cancels".into();
+}
+
+fn insert_headline(app: &mut App) {
+    let Some(row) = app.selected_row() else {
+        return;
+    };
+    if !app.editable(&row) || position_contains_derived(app, &row.position) {
+        app.status = "cannot insert beside an external derived subtree".into();
+        return;
+    }
+    let Some((parent, index)) = split_position(&row.position) else {
+        return;
+    };
+    let id = fresh_node_id();
+    let position = Position {
+        node: id.clone(),
+        children: Vec::new(),
+    };
+    let Some(siblings) = children_mut(&mut app.document.outline, parent.as_ref()) else {
+        return;
+    };
+    siblings.insert(index + 1, position);
+    let inserted = join_position(parent.as_ref(), index + 1);
+    app.document.outline.nodes.insert(
+        id.clone(),
+        leo::Node {
+            id: id.clone(),
+            headline: "New Headline".into(),
+            body: String::new(),
+            vnode_attributes: HashMap::new(),
+            tnode_attributes: HashMap::new(),
+        },
+    );
+    select_position(app, &inserted);
+    app.input = Some(HeadlineInput {
+        node: id,
+        value: String::new(),
+        original: String::new(),
+        inserted_position: Some(inserted),
+    });
+    app.status = "new headline: type a name, Enter accepts, Esc cancels".into();
+}
+
+fn move_selected(app: &mut App, direction: MoveDirection) {
+    let Some(row) = app.selected_row() else {
+        return;
+    };
+    if !app.editable(&row) || position_contains_derived(app, &row.position) {
+        app.status = "external derived subtrees cannot be moved".into();
+        return;
+    }
+    let Some((parent, index)) = split_position(&row.position) else {
+        return;
+    };
+    let target = match direction {
+        MoveDirection::Up | MoveDirection::Down => {
+            let Some(siblings) = children_mut(&mut app.document.outline, parent.as_ref()) else {
+                return;
+            };
+            let other = if matches!(direction, MoveDirection::Up) {
+                index.checked_sub(1)
+            } else if index + 1 < siblings.len() {
+                Some(index + 1)
+            } else {
+                None
+            };
+            let Some(other) = other else {
+                app.status = "node is already at the edge".into();
+                return;
+            };
+            siblings.swap(index, other);
+            join_position(parent.as_ref(), other)
+        }
+        MoveDirection::Right => {
+            let Some(previous) = index.checked_sub(1) else {
+                app.status = "no previous sibling to become parent".into();
+                return;
+            };
+            let Some(siblings) = children_mut(&mut app.document.outline, parent.as_ref()) else {
+                return;
+            };
+            let position = siblings.remove(index);
+            let child_index = siblings[previous].children.len();
+            siblings[previous].children.push(position);
+            let previous_path = join_position(parent.as_ref(), previous);
+            app.expanded.insert(previous_path.clone());
+            join_position(Some(&previous_path), child_index)
+        }
+        MoveDirection::Left => {
+            let Some(parent_id) = parent else {
+                app.status = "top-level nodes cannot be promoted".into();
+                return;
+            };
+            let Some((grandparent, parent_index)) = split_position(&parent_id) else {
+                return;
+            };
+            let position = {
+                let Some(siblings) = children_mut(&mut app.document.outline, Some(&parent_id))
+                else {
+                    return;
+                };
+                siblings.remove(index)
+            };
+            let Some(grand_siblings) =
+                children_mut(&mut app.document.outline, grandparent.as_ref())
+            else {
+                return;
+            };
+            grand_siblings.insert(parent_index + 1, position);
+            join_position(grandparent.as_ref(), parent_index + 1)
+        }
+    };
+    app.dirty = true;
+    app.quit_armed = false;
+    select_position(app, &target);
+    app.status = "node moved (Ctrl-S to save)".into();
+}
+
+fn save(app: &mut App) {
+    let mut persisted = app.document.clone();
+    restore_derived_children(&mut persisted.outline.roots, &app.derived_roots);
+    let referenced = referenced_nodes(&persisted.outline.roots);
+    persisted
+        .outline
+        .nodes
+        .retain(|id, _| referenced.contains(id));
+    match persisted.save(&app.path) {
+        Ok(()) => {
+            app.dirty = false;
+            app.quit_armed = false;
+            app.status = format!("saved {}", app.path.display());
+        }
+        Err(error) => app.status = format!("save failed: {error}"),
+    }
+}
+
+fn restore_derived_children(
+    positions: &mut [Position],
+    originals: &HashMap<NodeId, Vec<Position>>,
+) {
+    for position in positions {
+        if let Some(children) = originals.get(&position.node) {
+            position.children.clone_from(children);
+        } else {
+            restore_derived_children(&mut position.children, originals);
+        }
+    }
+}
+
+fn referenced_nodes(positions: &[Position]) -> HashSet<NodeId> {
+    let mut result = HashSet::new();
+    fn visit(positions: &[Position], result: &mut HashSet<NodeId>) {
+        for position in positions {
+            result.insert(position.node.clone());
+            visit(&position.children, result);
+        }
+    }
+    visit(positions, &mut result);
+    result
+}
+
+fn position_contains_derived(app: &App, id: &PositionId) -> bool {
+    app.document
+        .outline
+        .position(id)
+        .is_some_and(|position| subtree_contains(&position.children, &app.derived_nodes))
+}
+
+fn subtree_contains(positions: &[Position], nodes: &HashSet<NodeId>) -> bool {
+    positions.iter().any(|position| {
+        nodes.contains(&position.node) || subtree_contains(&position.children, nodes)
+    })
+}
+
+fn split_position(id: &PositionId) -> Option<(Option<PositionId>, usize)> {
+    let (parent, index) =
+        id.0.rsplit_once('/')
+            .map_or((None, id.0.as_str()), |(p, i)| {
+                (Some(PositionId(p.to_owned())), i)
+            });
+    Some((parent, index.parse().ok()?))
+}
+
+fn join_position(parent: Option<&PositionId>, index: usize) -> PositionId {
+    PositionId(parent.map_or_else(|| index.to_string(), |p| format!("{}/{index}", p.0)))
+}
+
+fn children_mut<'a>(
+    outline: &'a mut Outline,
+    parent: Option<&PositionId>,
+) -> Option<&'a mut Vec<Position>> {
+    let Some(parent) = parent else {
+        return Some(&mut outline.roots);
+    };
+    let mut indices = parent.0.split('/').map(str::parse::<usize>);
+    let mut position = outline.roots.get_mut(indices.next()?.ok()?)?;
+    for index in indices {
+        position = position.children.get_mut(index.ok()?)?;
+    }
+    Some(&mut position.children)
+}
+
+fn remove_position(outline: &mut Outline, id: &PositionId) -> Option<Position> {
+    let (parent, index) = split_position(id)?;
+    let siblings = children_mut(outline, parent.as_ref())?;
+    (index < siblings.len()).then(|| siblings.remove(index))
+}
+
+fn select_position(app: &mut App, id: &PositionId) {
+    if let Some(index) = app.rows().iter().position(|row| &row.position == id) {
+        app.selected = index;
+    }
+}
+
+fn fresh_node_id() -> NodeId {
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    NodeId(format!(
+        "cub.{}.{}",
+        duration.as_secs(),
+        duration.subsec_nanos()
+    ))
 }
 
 fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
@@ -230,7 +613,18 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
             ListItem::new(Line::from(vec![
                 Span::raw("  ".repeat(row.depth)),
                 Span::raw(marker),
-                Span::raw(&node.headline),
+                Span::raw(
+                    app.input
+                        .as_ref()
+                        .filter(|input| input.node == row.node)
+                        .map_or(node.headline.as_str(), |input| input.value.as_str()),
+                ),
+                Span::raw(
+                    app.input
+                        .as_ref()
+                        .filter(|input| input.node == row.node)
+                        .map_or("", |_| "▏"),
+                ),
                 Span::styled(clone, Style::default().fg(Color::DarkGray)),
             ]))
         })
@@ -278,9 +672,9 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
 
 fn controls() -> &'static str {
     #[cfg(feature = "syntax")]
-    return "↑/k ↓/j   →/l expand   ←/h collapse   o open   y syntax   q quit";
+    return "Ctrl-I new  Ctrl-H rename  Ctrl-↑↓←→ move  Ctrl-S save  o open  y syntax  q quit";
     #[cfg(not(feature = "syntax"))]
-    "↑/k ↓/j   →/l expand   ←/h collapse   o open   q quit"
+    "Ctrl-I new  Ctrl-H rename  Ctrl-↑↓←→ move  Ctrl-S save  o open  q quit"
 }
 
 fn body_text(app: &mut App, row: &Row) -> Text<'static> {
@@ -307,6 +701,9 @@ struct LoadReport {
     loaded: usize,
     errors: Vec<String>,
     locations: HashMap<PositionId, SourceLocation>,
+    node_locations: HashMap<NodeId, SourceLocation>,
+    derived_nodes: HashSet<NodeId>,
+    original_children: HashMap<NodeId, Vec<Position>>,
 }
 
 struct DerivedJob {
@@ -329,6 +726,14 @@ fn load_derived_files(outline: &mut Outline, outline_path: &Path) -> LoadReport 
             .map_err(|error| error.to_string())
             .and_then(|source| DerivedFile::parse(&source).map_err(|error| error.to_string()))
             .and_then(|derived| {
+                let root_node = outline
+                    .position(&job.position)
+                    .map(|position| position.node.clone())
+                    .ok_or_else(|| "derived root position disappeared".to_owned())?;
+                let original_children = outline
+                    .position(&job.position)
+                    .map(|position| position.children.clone())
+                    .unwrap_or_default();
                 derived
                     .merge_into(outline, &job.position)
                     .map_err(|error| error.to_string())?;
@@ -345,7 +750,28 @@ fn load_derived_files(outline: &mut Outline, outline_path: &Path) -> LoadReport 
                             line: *line,
                         },
                     );
+                    if let Some(position) = derived.outline.position(derived_position) {
+                        report
+                            .node_locations
+                            .entry(position.node.clone())
+                            .or_insert(SourceLocation {
+                                path: job.path.clone(),
+                                line: *line,
+                            });
+                    }
                 }
+                report
+                    .original_children
+                    .entry(root_node)
+                    .or_insert(original_children);
+                report.derived_nodes.extend(
+                    derived
+                        .outline
+                        .nodes
+                        .keys()
+                        .filter(|id| **id != derived.root)
+                        .cloned(),
+                );
                 Ok(())
             });
         match result {
@@ -360,7 +786,12 @@ fn open_selected(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mu
     let Some(row) = app.rows().get(app.selected).cloned() else {
         return;
     };
-    let Some(location) = app.source_locations.get(&row.position).cloned() else {
+    let Some(location) = app
+        .source_locations
+        .get(&row.position)
+        .or_else(|| app.source_nodes.get(&row.node))
+        .cloned()
+    else {
         app.status = "selected node has no external source location".to_owned();
         return;
     };
@@ -519,6 +950,22 @@ fn clone_count(outline: &Outline, id: &NodeId) -> usize {
 mod tests {
     use super::*;
 
+    fn editing_app() -> App {
+        let document = LeoDocument::parse(
+            r#"<leo_file><vnodes><v t="a"><vh>A</vh><v t="b"><vh>B</vh></v><v t="c"><vh>C</vh></v></v></vnodes><tnodes><t tx="a"></t><t tx="b"></t><t tx="c"></t></tnodes></leo_file>"#,
+        )
+        .unwrap();
+        App::new(
+            document,
+            PathBuf::from("test.leo"),
+            String::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashSet::new(),
+            HashMap::new(),
+        )
+    }
+
     #[test]
     fn recognizes_only_sentinelled_file_headlines() {
         assert_eq!(thin_filename("@file src/main.rs"), Some("src/main.rs"));
@@ -533,5 +980,43 @@ mod tests {
             path_directive("@language rust\n@path <src/core>\n"),
             Some("src/core".into())
         );
+    }
+
+    #[test]
+    fn moves_nodes_with_leo_control_arrow_semantics() {
+        let mut app = editing_app();
+        select_position(&mut app, &PositionId("0/1".into()));
+        move_selected(&mut app, MoveDirection::Up);
+        assert_eq!(
+            app.document.outline.roots[0].children[0].node,
+            NodeId::from("c")
+        );
+
+        move_selected(&mut app, MoveDirection::Down);
+        move_selected(&mut app, MoveDirection::Right);
+        assert_eq!(
+            app.document.outline.roots[0].children[0].children[0].node,
+            NodeId::from("c")
+        );
+
+        move_selected(&mut app, MoveDirection::Left);
+        assert_eq!(
+            app.document.outline.roots[0].children[1].node,
+            NodeId::from("c")
+        );
+    }
+
+    #[test]
+    fn restores_external_children_before_serializing() {
+        let mut roots = vec![Position {
+            node: NodeId::from("file"),
+            children: vec![Position {
+                node: NodeId::from("derived"),
+                children: vec![],
+            }],
+        }];
+        let originals = HashMap::from([(NodeId::from("file"), Vec::new())]);
+        restore_derived_children(&mut roots, &originals);
+        assert!(roots[0].children.is_empty());
     }
 }
