@@ -54,6 +54,7 @@ The browser resolves external thin files in memory.
 | `l`, `→`, `Enter` | Expand selected node |
 | `h`, `←` | Collapse selected node |
 | `Home` / `End` | Select the first/last visible node |
+| `Ctrl-P` | Find a headline incrementally; use `↑`/`↓` to cycle matches |
 | `o` | Open the full external source file at the node sentinel |
 | `y` | Toggle syntax highlighting |
 
