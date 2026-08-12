@@ -684,16 +684,47 @@ fn body_text(app: &mut App, row: &Row) -> Text<'static> {
         if let Some(cached) = app.highlight_cache.get(&row.position) {
             return cached.clone();
         }
+        let (inherited_language, external_path) =
+            syntax_context(&app.document.outline, &row.position);
         let source_path = app
             .source_locations
             .get(&row.position)
-            .map(|location| location.path.as_path());
-        let highlighted = app.syntax.highlight(&body, source_path);
+            .map(|location| location.path.as_path())
+            .or(external_path.as_deref());
+        let highlighted =
+            app.syntax
+                .highlight_with_language(&body, source_path, inherited_language.as_deref());
         app.highlight_cache
             .insert(row.position.clone(), highlighted.clone());
         return highlighted;
     }
     Text::from(body)
+}
+
+#[cfg(feature = "syntax")]
+fn syntax_context(outline: &Outline, position: &PositionId) -> (Option<String>, Option<PathBuf>) {
+    let mut language = None;
+    let mut source_path = None;
+    let mut prefix = String::new();
+
+    for component in position.0.split('/') {
+        if !prefix.is_empty() {
+            prefix.push('/');
+        }
+        prefix.push_str(component);
+        let Some(position) = outline.position(&PositionId(prefix.clone())) else {
+            break;
+        };
+        let node = &outline.nodes[&position.node];
+        if let Some(value) = crate::syntax::language_directive(&node.body) {
+            language = Some(value.to_owned());
+        }
+        if let Some(filename) = external_filename(&node.headline) {
+            source_path = Some(PathBuf::from(filename));
+        }
+    }
+
+    (language, source_path)
 }
 
 #[derive(Default)]
@@ -915,6 +946,13 @@ fn thin_filename(headline: &str) -> Option<&str> {
         .filter(|filename| !filename.is_empty())
 }
 
+fn external_filename(headline: &str) -> Option<&str> {
+    let (directive, filename) = headline.trim().split_once(char::is_whitespace)?;
+    matches!(directive, "@file" | "@thin" | "@file-thin" | "@clean")
+        .then(|| strip_path_cruft(filename))
+        .filter(|filename| !filename.is_empty())
+}
+
 fn path_directive(text: &str) -> Option<String> {
     text.lines().find_map(|line| {
         line.strip_prefix("@path")
@@ -972,6 +1010,26 @@ mod tests {
         assert_eq!(thin_filename("@file \"src/main.rs\""), Some("src/main.rs"));
         assert_eq!(thin_filename("@clean src/main.rs"), None);
         assert_eq!(thin_filename("ordinary"), None);
+    }
+
+    #[test]
+    fn recognizes_clean_files_for_syntax_context() {
+        assert_eq!(external_filename("@clean src/main.rs"), Some("src/main.rs"));
+        assert_eq!(
+            external_filename("@clean \"src/main.rs\""),
+            Some("src/main.rs")
+        );
+    }
+
+    #[test]
+    fn inherits_syntax_context_from_clean_file_ancestor() {
+        let document = LeoDocument::parse(
+            r#"<leo_file><vnodes><v t="a"><vh>@clean src/main.rs</vh><v t="b"><vh>child</vh></v></v></vnodes><tnodes><t tx="a">@language rust</t><t tx="b">fn child() {}</t></tnodes></leo_file>"#,
+        )
+        .unwrap();
+        let (language, path) = syntax_context(&document.outline, &PositionId("0/0".into()));
+        assert_eq!(language.as_deref(), Some("rust"));
+        assert_eq!(path.as_deref(), Some(Path::new("src/main.rs")));
     }
 
     #[test]

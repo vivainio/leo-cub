@@ -23,8 +23,13 @@ impl SyntaxHighlighter {
         }
     }
 
-    pub fn highlight(&self, body: &str, source_path: Option<&Path>) -> Text<'static> {
-        let syntax = self.syntax_for(body, source_path);
+    pub fn highlight_with_language(
+        &self,
+        body: &str,
+        source_path: Option<&Path>,
+        inherited_language: Option<&str>,
+    ) -> Text<'static> {
+        let syntax = self.syntax_for(body, source_path, inherited_language);
         let theme = &self.themes.themes["base16-ocean.dark"];
         let mut highlighter = HighlightLines::new(syntax, theme);
         let mut lines = Vec::new();
@@ -63,8 +68,14 @@ impl SyntaxHighlighter {
         Text::from(lines)
     }
 
-    fn syntax_for<'a>(&'a self, body: &str, source_path: Option<&Path>) -> &'a SyntaxReference {
+    fn syntax_for<'a>(
+        &'a self,
+        body: &str,
+        source_path: Option<&Path>,
+        inherited_language: Option<&str>,
+    ) -> &'a SyntaxReference {
         language_directive(body)
+            .or(inherited_language)
             .and_then(|language| self.syntaxes.find_syntax_by_token(language))
             .or_else(|| {
                 source_path
@@ -76,7 +87,7 @@ impl SyntaxHighlighter {
     }
 }
 
-fn language_directive(body: &str) -> Option<&str> {
+pub(crate) fn language_directive(body: &str) -> Option<&str> {
     body.lines().find_map(|line| {
         line.trim_start()
             .strip_prefix("@language")
@@ -99,8 +110,11 @@ mod tests {
 
     #[test]
     fn highlighting_preserves_line_structure_and_whitespace() {
-        let text = SyntaxHighlighter::new()
-            .highlight("fn main() {\n    true\n}\n", Some(Path::new("main.rs")));
+        let text = SyntaxHighlighter::new().highlight_with_language(
+            "fn main() {\n    true\n}\n",
+            Some(Path::new("main.rs")),
+            None,
+        );
         assert_eq!(text.lines.len(), 3);
         assert_eq!(text.lines[1].width(), 8);
     }
