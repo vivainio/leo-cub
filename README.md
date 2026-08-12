@@ -69,9 +69,11 @@ The browser resolves external thin files in memory.
 | `l`, `→`, `Enter` | Expand selected node |
 | `h`, `←` | Collapse selected node |
 | `Home` / `End` | Select the first/last visible node |
+| `PageUp` / `PageDown` | Scroll the selected node's body by one page |
 | `Ctrl-P` | Find a headline incrementally; use `↑`/`↓` to cycle matches |
-| `o` | Open the full external source file at the node sentinel |
+| `o` | Edit the node body in `$VISUAL`/`$EDITOR`; for derived nodes, open the real source at its sentinel |
 | `y` | Toggle syntax highlighting |
+| `?` | Show command help |
 
 ### Outline editing
 
@@ -97,14 +99,17 @@ Use `--no-derived` to display only the hierarchy physically present in the
 `.leo` XML file.
 
 For source navigation, `cub` recognizes common position arguments for Vim,
-Neovim, Nano, Emacs, VS Code, Helix, and Kakoune. Other editors receive the file
-path without a line argument.
+Neovim, Nano, Emacs, VS Code, Microsoft Edit, Helix, and Kakoune. Other editors
+receive the file path without a line argument.
 
 ## Headless commands
 
 ```sh
 cub inspect outline.leo
 cub validate outline.leo
+cub sync outline.leo
+cub sync outline.leo src/main.rs --dry-run
+cub sync outline.leo --gnx ekr.20260811210000.1
 cub diff before.leo after.leo
 cub inspect-derived path/to/derived.py --summary
 cub refresh-derived outline.leo 0 path/to/derived.py --dry-run
