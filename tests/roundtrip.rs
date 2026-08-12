@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
-use leo::{LeoDocument, NodeId, Operation, OperationBatch};
+use leo::{LeoDocument, Node, NodeId, Operation, OperationBatch};
+use std::collections::HashMap;
 
 const SAMPLE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <leo_file><leo_header file_format="2"/><globals custom="keep"/><vnodes>
@@ -29,6 +30,38 @@ fn batch_is_atomic_on_failed_precondition() {
     };
     assert!(outline.apply(&batch).is_err());
     assert_eq!(outline, before);
+}
+
+#[test]
+fn insert_uses_parent_gnx_and_updates_the_shared_clone_subtree() {
+    let mut document = LeoDocument::parse(SAMPLE).unwrap();
+    document
+        .outline
+        .apply(&OperationBatch {
+            operations: vec![Operation::Insert {
+                parent: Some(NodeId::from("b")),
+                index: None,
+                node: Node {
+                    id: NodeId::from("c"),
+                    headline: "Grandchild".into(),
+                    body: "new body".into(),
+                    vnode_attributes: HashMap::new(),
+                    tnode_attributes: HashMap::new(),
+                },
+            }],
+        })
+        .unwrap();
+
+    let rendered = document.to_xml().unwrap();
+    assert!(rendered.contains(r#"<v t="b"><vh>Child</vh>"#));
+    assert_eq!(rendered.matches(r#"<v t="c""#).count(), 1);
+
+    let reparsed = LeoDocument::parse(&rendered).unwrap();
+    assert_eq!(
+        reparsed.outline.roots[0].children[0].children[0].node,
+        NodeId::from("c")
+    );
+    assert!(reparsed.outline.roots[1].children.is_empty());
 }
 
 #[test]

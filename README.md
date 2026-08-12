@@ -51,6 +51,15 @@ From the repository root, install the `cub` command with Cargo:
 cargo install --path .
 ```
 
+Install the bundled local agent skill after installing the command:
+
+```sh
+cub install-skills
+```
+
+This writes `~/.claude/skills/leo-cub/SKILL.md` and overwrites an existing
+copy, so it is safe to rerun after upgrading.
+
 ## TUI
 
 ```sh
