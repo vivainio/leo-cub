@@ -64,16 +64,40 @@ cargo build --no-default-features --features tui
 cub tui outline.leo
 ```
 
-The browser resolves external thin files in memory. Its keys are:
+The browser resolves external thin files in memory.
+
+## TUI keybindings
+
+### Browsing and display
 
 | Key | Action |
 | --- | --- |
 | `j`, `↓` / `k`, `↑` | Select next/previous node |
 | `l`, `→`, `Enter` | Expand selected node |
 | `h`, `←` | Collapse selected node |
+| `Home` / `End` | Select the first/last visible node |
 | `o` | Open the full external source file at the node sentinel |
 | `y` | Toggle syntax highlighting |
-| `q`, `Esc` | Quit |
+
+### Outline editing
+
+| Key | Action |
+| --- | --- |
+| `Ctrl-I` or `Tab` | Insert a new sibling and enter headline editing |
+| `Ctrl-H` or `Backspace` | Edit the selected headline |
+| `Ctrl-↑`, `Ctrl-↓` | Move among siblings |
+| `Ctrl-←`, `Ctrl-→` | Promote or demote the selected node |
+| `Ctrl-S` | Save outline changes |
+| `q` or `Esc` | Quit; press twice to discard unsaved changes |
+
+### Headline editing
+
+| Key | Action |
+| --- | --- |
+| Printable characters | Append to the headline |
+| `Backspace` | Delete the previous character |
+| `Enter` | Accept the headline |
+| `Esc` | Cancel editing; a newly inserted node is removed |
 
 Use `--no-derived` to display only the hierarchy physically present in the
 `.leo` XML file.
@@ -120,7 +144,9 @@ it does not yet write thin derived files, dynamically interpret every
 backups and use `--dry-run` when testing write operations on important outlines.
 
 The TUI overlays derived files without modifying either the outline or external
-source files.
+source files. Derived descendants are read-only in the outline editor; use `o`
+to edit their full external source. Unsaved outline changes require a second
+`q` before they are discarded.
 
 ## License
 
