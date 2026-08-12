@@ -3,7 +3,12 @@ name = "leo-cub"
 version = "0.0.0-dev"
 edition = "2024"
 description = "Automation-safe library and CLI for Leo outline files"
+authors = ["Ville Vainio <vivainio@gmail.com>"]
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/vivainio/leo-cub"
+readme = "README.md"
+keywords = ["leo-editor", "outline", "cli", "tui"]
+categories = ["command-line-utilities", "text-editors"]
 
 [lib]
 name = "leo"

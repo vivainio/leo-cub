@@ -1,0 +1,31 @@
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "leo-cub"
+description = "Automation-safe library and CLI for Leo outline files"
+requires-python = ">=3.10"
+readme = "README.md"
+license = { text = "MIT OR Apache-2.0" }
+authors = [{ name = "Ville Vainio", email = "vivainio@gmail.com" }]
+keywords = ["leo-editor", "outline", "cli", "tui", "automation"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Rust",
+    "Topic :: Text Editors",
+    "Topic :: Utilities",
+]
+dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://github.com/vivainio/leo-cub"
+Repository = "https://github.com/vivainio/leo-cub"
+
+[tool.maturin]
+bindings = "bin"

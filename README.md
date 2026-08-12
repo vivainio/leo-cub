@@ -33,8 +33,15 @@ and exposes transactional operations intended for scripts and AI tools.
 
 ## Install
 
-Download the appropriate archive from the
-[latest GitHub release](https://github.com/vivainio/leo-cub/releases/latest).
+Install the `cub` command from PyPI with
+[pipx](https://pipx.pypa.io/) (recommended for command-line applications):
+
+```sh
+pipx install leo-cub
+```
+
+You can also use `pip install leo-cub`, or download the appropriate archive
+from the [latest GitHub release](https://github.com/vivainio/leo-cub/releases/latest).
 
 ## TUI
 
