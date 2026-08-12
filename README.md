@@ -33,30 +33,8 @@ and exposes transactional operations intended for scripts and AI tools.
 
 ## Install
 
-Build or install with a recent Rust toolchain:
-
-```sh
-cargo install --path .
-cub --help
-```
-
-Prebuilt release binaries are planned for a later release. For now, install
-`cub` from source with Cargo.
-
-The TUI is enabled by default. Library-only consumers can omit terminal
-dependencies:
-
-```sh
-cargo build --no-default-features
-```
-
-Syntax highlighting is powered by the pure-Rust
-[`syntect`](https://github.com/trishume/syntect) library. It is enabled by the
-default `syntax` Cargo feature and can be omitted while retaining the TUI:
-
-```sh
-cargo build --no-default-features --features tui
-```
+Download the appropriate archive from the
+[latest GitHub release](https://github.com/vivainio/leo-cub/releases/latest).
 
 ## TUI
 
