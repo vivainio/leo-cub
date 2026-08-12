@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use leo::{LeoDocument, NodeId, Operation, OperationBatch};
 
 const SAMPLE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -27,4 +29,24 @@ fn batch_is_atomic_on_failed_precondition() {
     };
     assert!(outline.apply(&batch).is_err());
     assert_eq!(outline, before);
+}
+
+#[test]
+fn project_outline_parses_validates_and_round_trips() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("leo-cub.leo");
+    let document = LeoDocument::open(path).unwrap();
+
+    assert!(document.outline.validate().is_empty());
+    assert!(!document.outline.nodes.is_empty());
+    assert!(!document.outline.roots.is_empty());
+
+    let rendered = document.to_xml().unwrap();
+    assert!(rendered.contains("<leo_header"));
+    assert!(rendered.contains("<globals"));
+    assert!(rendered.contains("<preferences"));
+    assert!(rendered.contains("<find_panel_settings"));
+
+    let reparsed = LeoDocument::parse(&rendered).unwrap();
+    assert_eq!(reparsed.outline, document.outline);
+    assert!(reparsed.outline.validate().is_empty());
 }
