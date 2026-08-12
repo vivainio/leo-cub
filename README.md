@@ -115,6 +115,12 @@ receive the file path without a line argument.
 
 ```sh
 cub inspect outline.leo
+cub inspect outline.leo src/main.rs
+cub inspect outline.leo --gnx ekr.20260811210000.1
+cub inspect outline.leo --position 0/2/1
+cub inspect outline.leo --search 'render_(compact|json)'
+cub inspect outline.leo --search TODO --search FIXME
+cub inspect outline.leo src/main.rs --format json
 cub validate outline.leo
 cub sync outline.leo
 cub sync outline.leo src/main.rs --dry-run
@@ -123,6 +129,15 @@ cub diff before.leo after.leo
 cub inspect-derived path/to/derived.py --summary
 cub apply outline.leo operations.json --dry-run
 ```
+
+`inspect` uses a compact text format containing position paths, GNXs,
+headlines, and bodies. Repeated clone content is shown as `=GNX`. Use
+`--format json` for structured output in scripts.
+`--search` accepts a Rust regular expression and searches headlines and body
+lines. Search results include line-numbered excerpts with two surrounding lines
+instead of printing entire matching bodies. Repeat `--search` to match any of
+several expressions. Thin external files are scanned first and reconstructed
+only when they may contain a search or GNX match.
 
 An operation batch is a JSON object:
 
