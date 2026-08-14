@@ -45,6 +45,7 @@ struct App {
     path: PathBuf,
     expanded: HashSet<PositionId>,
     selected: usize,
+    outline_scroll: usize,
     body_scroll: usize,
     body_page_size: usize,
     body_scroll_max: usize,
@@ -88,6 +89,7 @@ impl App {
             path,
             expanded,
             selected: 0,
+            outline_scroll: 0,
             body_scroll: 0,
             body_page_size: 1,
             body_scroll_max: 0,
@@ -811,65 +813,53 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
             } else {
                 String::new()
             };
-            ListItem::new(Line::from(vec![
-                Span::raw("  ".repeat(row.depth)),
-                Span::raw(marker),
-                Span::raw(
-                    app.input
-                        .as_ref()
-                        .filter(|input| input.node == row.node)
-                        .map_or(node.headline.as_str(), |input| input.value.as_str()),
-                ),
-                Span::raw(
-                    app.input
-                        .as_ref()
-                        .filter(|input| input.node == row.node)
-                        .map_or("", |_| "▏"),
-                ),
-                Span::styled(clone, Style::default().fg(Color::DarkGray)),
-            ]))
+            let input = app.input.as_ref().filter(|input| input.node == row.node);
+            let headline = input.map_or(node.headline.as_str(), |input| input.value.as_str());
+            let mut spans = vec![Span::raw("  ".repeat(row.depth)), Span::raw(marker)];
+            spans.extend(headline_spans(headline));
+            spans.push(Span::raw(input.map_or("", |_| "▏")));
+            spans.push(Span::styled(clone, Style::default().fg(Color::DarkGray)));
+            ListItem::new(Line::from(spans))
         })
         .collect();
-    let mut state = ListState::default().with_selected((!rows.is_empty()).then_some(app.selected));
+    let outline_page_size = usize::from(columns[0].height.saturating_sub(2)).max(1);
+    let outline_context = 2.min(outline_page_size.saturating_sub(1) / 2);
+    if app.selected.saturating_sub(outline_context) < app.outline_scroll {
+        app.outline_scroll = app.selected.saturating_sub(outline_context);
+    } else if app.selected + outline_context >= app.outline_scroll + outline_page_size {
+        app.outline_scroll = app.selected + outline_context + 1 - outline_page_size;
+    }
+    app.outline_scroll = app
+        .outline_scroll
+        .min(rows.len().saturating_sub(outline_page_size));
+    let mut state = ListState::default()
+        .with_selected((!rows.is_empty()).then_some(app.selected))
+        .with_offset(app.outline_scroll);
     frame.render_stateful_widget(
         List::new(items)
             .block(Block::default().title(" Outline ").borders(Borders::ALL))
+            .scroll_padding(outline_context)
             .highlight_style(
                 Style::default()
                     .bg(Color::Blue)
-                    .fg(Color::White)
                     .add_modifier(Modifier::BOLD),
             ),
         columns[0],
         &mut state,
     );
+    app.outline_scroll = state.offset();
 
     let node_block = Block::default().title(" Node ").borders(Borders::ALL);
     let node_area = node_block.inner(columns[1]);
     frame.render_widget(node_block, columns[1]);
     if let Some(row) = rows.get(app.selected) {
-        let node = &app.document.outline.nodes[&row.node];
-        let metadata = Text::from(vec![
-            Line::styled(
-                node.headline.clone(),
-                Style::default().add_modifier(Modifier::BOLD),
-            ),
-            Line::from(format!("GNX: {}", node.id.0)),
-            Line::from(format!("Position: {}", row.position.0)),
-        ]);
-        let node_rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(4), Constraint::Min(0)])
-            .split(node_area);
-        frame.render_widget(Paragraph::new(metadata), node_rows[0]);
-
         let body = body_text(app, row);
-        app.body_page_size = usize::from(node_rows[1].height).max(1);
+        app.body_page_size = usize::from(node_area.height).max(1);
         app.body_scroll_max = body.lines.len().saturating_sub(app.body_page_size);
         app.body_scroll = app.body_scroll.min(app.body_scroll_max);
         frame.render_widget(
             Paragraph::new(body).scroll((app.body_scroll.min(u16::MAX as usize) as u16, 0)),
-            node_rows[1],
+            node_area,
         );
     }
     frame.render_widget(
@@ -904,10 +894,11 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
                     .find(|row| &row.position == position)
                     .expect("matched position exists");
                 let marker = if index == find.active { "› " } else { "  " };
-                Line::from(format!(
-                    "{marker}{}",
-                    app.document.outline.nodes[&row.node].headline
-                ))
+                let mut spans = vec![Span::raw(marker)];
+                spans.extend(headline_spans(
+                    &app.document.outline.nodes[&row.node].headline,
+                ));
+                Line::from(spans)
             },
         ));
         frame.render_widget(Clear, area);
@@ -923,6 +914,69 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
     if app.help {
         draw_help(frame);
     }
+}
+
+fn headline_spans(headline: &str) -> Vec<Span<'_>> {
+    let leading = headline.len() - headline.trim_start().len();
+    let trimmed = &headline[leading..];
+    if let Some(contents) = trimmed
+        .strip_prefix("<<")
+        .and_then(|section| section.strip_suffix(">>"))
+    {
+        let mut spans = Vec::with_capacity(4);
+        if leading > 0 {
+            spans.push(Span::raw(&headline[..leading]));
+        }
+        let marker_style = Style::default().fg(Color::Cyan);
+        spans.push(Span::styled("<<", marker_style));
+        spans.push(Span::raw(contents));
+        spans.push(Span::styled(">>", marker_style));
+        return spans;
+    }
+
+    let directive_len = trimmed.find(char::is_whitespace).unwrap_or(trimmed.len());
+    let directive = &trimmed[..directive_len];
+    if !directive.starts_with('@') || directive.len() == 1 {
+        return vec![Span::raw(headline)];
+    }
+
+    let mut spans = Vec::with_capacity(3);
+    if leading > 0 {
+        spans.push(Span::raw(&headline[..leading]));
+    }
+    spans.push(Span::styled(directive, Style::default().fg(Color::Cyan)));
+    let remainder = &trimmed[directive_len..];
+    if !remainder.is_empty() {
+        let filename = matches!(
+            directive,
+            "@asis"
+                | "@auto"
+                | "@auto-md"
+                | "@auto-markdown"
+                | "@clean"
+                | "@edit"
+                | "@file"
+                | "@file-thin"
+                | "@nosent"
+                | "@path"
+                | "@thin"
+        );
+        if filename {
+            let whitespace = remainder.len() - remainder.trim_start().len();
+            if whitespace > 0 {
+                spans.push(Span::raw(&remainder[..whitespace]));
+            }
+            if whitespace < remainder.len() {
+                spans.push(Span::styled(
+                    &remainder[whitespace..],
+                    Style::default().fg(Color::Yellow),
+                ));
+            }
+        } else {
+            spans.push(Span::raw(remainder));
+        }
+    }
+    spans
 }
 
 fn controls() -> &'static str {
@@ -1432,6 +1486,42 @@ mod tests {
         assert_eq!(thin_filename("@file \"src/main.rs\""), Some("src/main.rs"));
         assert_eq!(thin_filename("@clean src/main.rs"), None);
         assert_eq!(thin_filename("ordinary"), None);
+    }
+
+    #[test]
+    fn highlights_headline_directives_and_filenames() {
+        let spans = headline_spans("@auto src/main.rs");
+        assert_eq!(spans.len(), 3);
+        assert_eq!(spans[0].content, "@auto");
+        assert_eq!(spans[0].style.fg, Some(Color::Cyan));
+        assert_eq!(spans[1].content, " ");
+        assert_eq!(spans[1].style.fg, None);
+        assert_eq!(spans[2].content, "src/main.rs");
+        assert_eq!(spans[2].style.fg, Some(Color::Yellow));
+    }
+
+    #[test]
+    fn highlights_other_directives_without_treating_arguments_as_files() {
+        let spans = headline_spans("@language rust");
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].style.fg, Some(Color::Cyan));
+        assert_eq!(spans[1].content, " rust");
+        assert_eq!(spans[1].style.fg, None);
+        assert_eq!(headline_spans("ordinary headline").len(), 1);
+    }
+
+    #[test]
+    fn highlights_section_reference_markers() {
+        let spans = headline_spans("  <<head contents>>");
+        assert_eq!(spans.len(), 4);
+        assert_eq!(spans[0].content, "  ");
+        assert_eq!(spans[1].content, "<<");
+        assert_eq!(spans[1].style.fg, Some(Color::Cyan));
+        assert_eq!(spans[2].content, "head contents");
+        assert_eq!(spans[2].style.fg, None);
+        assert_eq!(spans[3].content, ">>");
+        assert_eq!(spans[3].style.fg, Some(Color::Cyan));
+        assert_eq!(headline_spans("<<unfinished").len(), 1);
     }
 
     #[test]
