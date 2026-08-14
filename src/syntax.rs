@@ -76,7 +76,15 @@ impl SyntaxHighlighter {
     ) -> &'a SyntaxReference {
         language_directive(body)
             .or(inherited_language)
-            .and_then(|language| self.syntaxes.find_syntax_by_token(language))
+            .and_then(|language| {
+                let token = match language {
+                    // Syntect's default syntax bundle has no TypeScript entry.
+                    // JavaScript is a useful baseline until one is bundled.
+                    "typescript" | "tsx" => "javascript",
+                    language => language,
+                };
+                self.syntaxes.find_syntax_by_token(token)
+            })
             .or_else(|| {
                 source_path
                     .and_then(Path::extension)
@@ -117,5 +125,20 @@ mod tests {
         );
         assert_eq!(text.lines.len(), 3);
         assert_eq!(text.lines[1].width(), 8);
+    }
+
+    #[test]
+    fn bundled_syntaxes_cover_static_auto_languages() {
+        let highlighter = SyntaxHighlighter::new();
+        for (path, language) in [
+            ("x.cs", "csharp"),
+            ("x.go", "go"),
+            ("x.js", "javascript"),
+            ("x.ts", "typescript"),
+            ("x.tsx", "typescript"),
+        ] {
+            let syntax = highlighter.syntax_for("", Some(Path::new(path)), Some(language));
+            assert_ne!(syntax.name, "Plain Text", "{path} / {language}");
+        }
     }
 }
