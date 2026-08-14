@@ -11,7 +11,7 @@ use regex::Regex;
 use serde::Serialize;
 use thiserror::Error;
 
-use crate::{DerivedFile, NodeId, Outline, Position, PositionId};
+use crate::{AutoFile, DerivedFile, NodeId, Outline, Position, PositionId};
 
 #[derive(Clone, Copy, Debug)]
 pub enum InspectSelector<'a> {
@@ -30,6 +30,8 @@ pub enum InspectError {
     NoFile(String),
     #[error("failed to parse derived file {path}: {message}")]
     Derived { path: PathBuf, message: String },
+    #[error("failed to parse @auto file {path}: {message}")]
+    Auto { path: PathBuf, message: String },
 }
 
 pub enum ExternalFilter<'a> {
@@ -46,7 +48,11 @@ pub fn load_matching_external_files(
     filter: ExternalFilter<'_>,
 ) -> Result<usize, InspectError> {
     let jobs = external_jobs(outline, outline_path);
-    let mut cache: HashMap<PathBuf, Option<DerivedFile>> = HashMap::new();
+    enum Loaded {
+        Derived(DerivedFile),
+        Auto(AutoFile),
+    }
+    let mut cache: HashMap<(PathBuf, NodeId), Option<Loaded>> = HashMap::new();
     let mut loaded = 0;
     for job in jobs {
         let path_matches = match filter {
@@ -58,7 +64,8 @@ pub fn load_matching_external_files(
         if !path_matches {
             continue;
         }
-        if !cache.contains_key(&job.path) {
+        let cache_key = (job.path.clone(), job.root.clone());
+        if !cache.contains_key(&cache_key) {
             let parsed = match fs::read_to_string(&job.path) {
                 Ok(source) => {
                     let content_matches = match filter {
@@ -67,31 +74,56 @@ pub fn load_matching_external_files(
                                 .lines()
                                 .any(|line| raw_line_might_match(line, pattern))
                         }),
-                        ExternalFilter::Gnx(gnx) => source.contains(gnx),
+                        ExternalFilter::Gnx(gnx) => {
+                            job.directive == "@auto" || source.contains(gnx)
+                        }
                         ExternalFilter::File(_) => true,
                     };
                     if content_matches {
-                        Some(DerivedFile::parse(&source).map_err(|error| {
-                            InspectError::Derived {
-                                path: job.path.clone(),
-                                message: error.to_string(),
-                            }
-                        })?)
+                        if job.directive == "@auto" {
+                            Some(Loaded::Auto(
+                                AutoFile::parse(&job.path, job.root.clone(), &source).map_err(
+                                    |error| InspectError::Auto {
+                                        path: job.path.clone(),
+                                        message: error.to_string(),
+                                    },
+                                )?,
+                            ))
+                        } else {
+                            Some(Loaded::Derived(DerivedFile::parse(&source).map_err(
+                                |error| InspectError::Derived {
+                                    path: job.path.clone(),
+                                    message: error.to_string(),
+                                },
+                            )?))
+                        }
                     } else {
                         None
                     }
                 }
                 Err(_) => None,
             };
-            cache.insert(job.path.clone(), parsed);
+            cache.insert(cache_key.clone(), parsed);
         }
-        if let Some(derived) = cache.get(&job.path).and_then(Option::as_ref) {
-            derived
-                .merge_into(outline, &job.position)
-                .map_err(|error| InspectError::Derived {
-                    path: job.path.clone(),
-                    message: error.to_string(),
-                })?;
+        if let Some(expansion) = cache.get(&cache_key).and_then(Option::as_ref) {
+            match expansion {
+                Loaded::Derived(derived) => {
+                    derived
+                        .merge_into(outline, &job.position)
+                        .map_err(|error| InspectError::Derived {
+                            path: job.path.clone(),
+                            message: error.to_string(),
+                        })?
+                }
+                Loaded::Auto(auto) => {
+                    if !auto.merge_into(outline, &job.position) {
+                        return Err(InspectError::Auto {
+                            path: job.path.clone(),
+                            message: "auto root position disappeared".to_owned(),
+                        });
+                    }
+                }
+            }
             loaded += 1;
         }
     }
@@ -111,6 +143,8 @@ fn raw_line_might_match(line: &str, pattern: &Regex) -> bool {
 struct ExternalJob {
     position: PositionId,
     path: PathBuf,
+    directive: String,
+    root: NodeId,
 }
 
 fn external_jobs(outline: &Outline, outline_path: &Path) -> Vec<ExternalJob> {
@@ -148,6 +182,8 @@ fn external_jobs(outline: &Outline, outline_path: &Path) -> Vec<ExternalJob> {
                 jobs.push(ExternalJob {
                     position: PositionId(id.clone()),
                     path,
+                    directive: directive.to_owned(),
+                    root: position.node.clone(),
                 });
             }
             visit(outline, &position.children, &id, base, &paths, jobs);
@@ -439,9 +475,12 @@ fn external_filename(headline: &str) -> Option<&str> {
 
 fn external_file(headline: &str) -> Option<(&str, &str)> {
     let (directive, filename) = headline.trim().split_once(char::is_whitespace)?;
-    matches!(directive, "@file" | "@thin" | "@file-thin" | "@clean")
-        .then(|| (directive, strip_path_cruft(filename)))
-        .filter(|(_, filename)| !filename.is_empty())
+    matches!(
+        directive,
+        "@file" | "@thin" | "@file-thin" | "@clean" | "@auto"
+    )
+    .then(|| (directive, strip_path_cruft(filename)))
+    .filter(|(_, filename)| !filename.is_empty())
 }
 
 fn path_directive(text: &str) -> Option<String> {
@@ -637,6 +676,60 @@ mod tests {
         load_matching_external_files(&mut by_gnx, &outline_path, ExternalFilter::Gnx("target"))
             .unwrap();
         assert!(select_subtrees(&by_gnx, InspectSelector::Gnx("target")).is_ok());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn lazily_expands_auto_files_with_tree_sitter() {
+        let root = NodeId("auto-root".into());
+        let mut outline = Outline {
+            nodes: [(
+                root.clone(),
+                Node {
+                    id: root.clone(),
+                    headline: "@auto child.py".into(),
+                    body: String::new(),
+                    vnode_attributes: HashMap::new(),
+                    tnode_attributes: HashMap::new(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            roots: vec![Position {
+                node: root.clone(),
+                children: vec![],
+            }],
+        };
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("cub-auto-inspect-{unique}"));
+        fs::create_dir(&directory).unwrap();
+        fs::write(
+            directory.join("child.py"),
+            "class Target:\n    def needle(self):\n        pass\n",
+        )
+        .unwrap();
+
+        let count = load_matching_external_files(
+            &mut outline,
+            &directory.join("outline.leo"),
+            ExternalFilter::File("child.py"),
+        )
+        .unwrap();
+
+        assert_eq!(count, 1);
+        assert_eq!(
+            outline.nodes[&root].body,
+            "@others\n@language python\n@tabwidth -4\n"
+        );
+        let class = &outline.roots[0].children[0];
+        assert_eq!(outline.nodes[&class.node].headline, "class Target");
+        assert_eq!(
+            outline.nodes[&class.children[0].node].headline,
+            "Target.needle"
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 }

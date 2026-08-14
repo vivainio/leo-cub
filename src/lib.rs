@@ -1,5 +1,6 @@
 //! Clone-aware, automation-safe manipulation of Leo XML outlines.
 
+mod auto;
 mod clean;
 mod derived;
 mod import;
@@ -9,6 +10,7 @@ mod operation;
 mod sync;
 mod xml;
 
+pub use auto::{AutoError, AutoFile};
 pub use clean::propagate_clean_changes;
 pub use derived::{DerivedFile, SentinelError};
 pub use import::{ImportError, ImportItem, ImportMode, ImportOptions, ImportReport, import_files};
