@@ -122,6 +122,8 @@ cub inspect outline.leo --search 'render_(compact|json)'
 cub inspect outline.leo --search TODO --search FIXME
 cub inspect outline.leo src/main.rs --format json
 cub validate outline.leo
+cub import outline.leo src --recursive --mode auto --paths
+cub import outline.leo README.md --mode edit --no-paths
 cub sync outline.leo
 cub sync outline.leo src/main.rs --dry-run
 cub sync outline.leo --gnx ekr.20260811210000.1
@@ -129,6 +131,12 @@ cub diff before.leo after.leo
 cub inspect-derived path/to/derived.py --summary
 cub apply outline.leo operations.json --dry-run
 ```
+
+`import` creates Leo external-file nodes in `auto`, `edit`, or `clean` mode.
+Directory imports are recursive only with `--recursive` and preserve their
+layout with `@path` nodes by default. Use `--no-paths` to put all imported
+files directly below the destination, `--parent GNX` to choose that destination,
+and `--dry-run` to validate without saving.
 
 `inspect` uses a compact text format containing position paths, GNXs,
 headlines, and bodies. Repeated clone content is shown as `=GNX`. Use

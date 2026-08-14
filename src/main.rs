@@ -1,9 +1,9 @@
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use leo::{
-    DerivedFile, ExternalFilter, InspectSelector, LeoDocument, OperationBatch, PositionId,
-    load_matching_external_files, render_compact, render_search_compact, search_outline,
-    select_subtrees, sync_document,
+    DerivedFile, ExternalFilter, ImportMode, ImportOptions, InspectSelector, LeoDocument, NodeId,
+    OperationBatch, PositionId, import_files, load_matching_external_files, render_compact,
+    render_search_compact, search_outline, select_subtrees, sync_document,
 };
 use regex::Regex;
 use std::{fs, path::PathBuf};
@@ -26,6 +26,24 @@ enum InspectFormat {
     #[default]
     Compact,
     Json,
+}
+
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+enum CliImportMode {
+    #[default]
+    Auto,
+    Edit,
+    Clean,
+}
+
+impl From<CliImportMode> for ImportMode {
+    fn from(value: CliImportMode) -> Self {
+        match value {
+            CliImportMode::Auto => Self::Auto,
+            CliImportMode::Edit => Self::Edit,
+            CliImportMode::Clean => Self::Clean,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -59,6 +77,30 @@ enum Command {
     },
     Validate {
         file: PathBuf,
+    },
+    /// Import files as @auto, @edit, or @clean nodes.
+    Import {
+        /// Outline to modify.
+        file: PathBuf,
+        /// Files or directories to import.
+        #[arg(required = true)]
+        inputs: Vec<PathBuf>,
+        #[arg(long, value_enum, default_value_t)]
+        mode: CliImportMode,
+        /// Import directories recursively.
+        #[arg(long)]
+        recursive: bool,
+        /// Preserve directory structure using @path nodes.
+        #[arg(long, conflicts_with = "no_paths")]
+        paths: bool,
+        /// Import files directly below the destination.
+        #[arg(long, conflicts_with = "paths")]
+        no_paths: bool,
+        /// Insert below the node with this GNX instead of at the root.
+        #[arg(long)]
+        parent: Option<String>,
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Apply a transactional JSON operation batch to an outline.
     #[command(after_help = r#"OPERATIONS FORMAT:
@@ -176,6 +218,39 @@ fn main() -> Result<()> {
             if !errors.is_empty() {
                 bail!("outline is invalid")
             }
+        }
+        Command::Import {
+            file,
+            inputs,
+            mode,
+            recursive,
+            paths,
+            no_paths,
+            parent,
+            dry_run,
+        } => {
+            let mut document = LeoDocument::open(&file)?;
+            let has_directory = inputs.iter().any(|path| path.is_dir());
+            let report = import_files(
+                &mut document,
+                &file,
+                &inputs,
+                &ImportOptions {
+                    mode: mode.into(),
+                    recursive,
+                    paths: if no_paths {
+                        false
+                    } else {
+                        paths || has_directory
+                    },
+                    parent: parent.map(NodeId),
+                    dry_run,
+                },
+            )?;
+            if !dry_run && report.imported > 0 {
+                document.save(&file)?;
+            }
+            println!("{}", serde_json::to_string_pretty(&report)?);
         }
         Command::Apply {
             file,
