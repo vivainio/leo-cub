@@ -2,6 +2,7 @@
 
 mod clean;
 mod derived;
+mod import;
 mod inspect;
 mod model;
 mod operation;
@@ -10,6 +11,7 @@ mod xml;
 
 pub use clean::propagate_clean_changes;
 pub use derived::{DerivedFile, SentinelError};
+pub use import::{ImportError, ImportItem, ImportMode, ImportOptions, ImportReport, import_files};
 pub use inspect::{
     ExternalFilter, InspectError, InspectSelector, SearchExcerpt, SearchMatch,
     load_matching_external_files, render_compact, render_search_compact, search_outline,
