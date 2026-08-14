@@ -10,7 +10,7 @@
     <v t="ekr.20260812052904.1"><vh> Recursive import script</vh></v>
   </v>
   <v t="ekr.20260812053055.2"><vh>leo-cub/src</vh>
-    <v t="ekr.20260812053055.3"><vh>@clean src/derived.rs</vh>
+    <v t="ekr.20260812053055.3"><vh>@auto src/derived.rs</vh>
       <v t="ekr.20260812053055.4"><vh>struct DerivedFile</vh></v>
       <v t="ekr.20260812053055.5"><vh>enum SentinelError</vh></v>
       <v t="ekr.20260812053055.6"><vh>impl DerivedFile</vh>
@@ -29,16 +29,16 @@
         <v t="ekr.20260812053055.18"><vh>fn visit</vh></v>
       </v>
     </v>
-    <v t="ekr.20260812053055.19"><vh>@clean src/lib.rs</vh></v>
-    <v t="None.20260812210606.3"><vh>@clean src/sync.rs</vh></v>
-    <v t="None.20260812205242.3"><vh>@clean src/clean.rs</vh></v>
-    <v t="ekr.20260812053055.20"><vh>@clean src/main.rs</vh>
+    <v t="ekr.20260812053055.19"><vh>@auto src/lib.rs</vh></v>
+    <v t="None.20260812210606.3"><vh>@auto src/sync.rs</vh></v>
+    <v t="None.20260812205242.3"><vh>@auto src/clean.rs</vh></v>
+    <v t="ekr.20260812053055.20"><vh>@auto src/main.rs</vh>
       <v t="ekr.20260812053055.21"><vh>struct Cli</vh></v>
       <v t="ekr.20260812053055.22"><vh>enum Command</vh></v>
       <v t="ekr.20260812053055.23"><vh>fn main</vh></v>
       <v t="ekr.20260812053055.24"><vh>fn count_positions</vh></v>
     </v>
-    <v t="ekr.20260812053055.25"><vh>@clean src/model.rs</vh>
+    <v t="ekr.20260812053055.25"><vh>@auto src/model.rs</vh>
       <v t="ekr.20260812053055.26"><vh>impl From for NodeId</vh>
         <v t="ekr.20260812053055.33"><vh>fn from</vh></v>
       </v>
@@ -55,7 +55,7 @@
       </v>
       <v t="ekr.20260812053055.32"><vh>fn parse_path</vh></v>
     </v>
-    <v t="ekr.20260812053055.38"><vh>@clean src/operation.rs</vh>
+    <v t="ekr.20260812053055.38"><vh>@auto src/operation.rs</vh>
       <v t="ekr.20260812053055.39"><vh>enum Target</vh></v>
       <v t="ekr.20260812053055.40"><vh>enum Operation</vh></v>
       <v t="ekr.20260812053055.41"><vh>struct OperationBatch</vh></v>
@@ -68,7 +68,7 @@
       <v t="ekr.20260812053055.45"><vh>fn set_text</vh></v>
       <v t="ekr.20260812053055.46"><vh>fn positions</vh></v>
     </v>
-    <v t="ekr.20260812053055.49"><vh>@clean src/syntax.rs</vh>
+    <v t="ekr.20260812053055.49"><vh>@auto src/syntax.rs</vh>
       <v t="ekr.20260812053055.50"><vh>unnamed use</vh></v>
       <v t="ekr.20260812053055.51"><vh>unnamed use</vh></v>
       <v t="ekr.20260812053055.52"><vh>struct SyntaxHighlighter</vh></v>
@@ -83,7 +83,7 @@
         <v t="ekr.20260812053055.60"><vh>fn highlighting_preserves_line_structure_and_whitespace</vh></v>
       </v>
     </v>
-    <v t="ekr.20260812053055.61"><vh>@clean src/tui.rs</vh>
+    <v t="ekr.20260812053055.61"><vh>@auto src/tui.rs</vh>
       <v t="ekr.20260812053055.62"><vh>unnamed use</vh></v>
       <v t="ekr.20260812053055.63"><vh>unnamed use</vh></v>
       <v t="ekr.20260812053055.64"><vh>unnamed use</vh></v>
@@ -147,7 +147,7 @@
         <v t="ekr.20260812053055.116"><vh>fn restores_external_children_before_serializing</vh></v>
       </v>
     </v>
-    <v t="ekr.20260812053055.118"><vh>@clean src/xml.rs</vh>
+    <v t="ekr.20260812053055.118"><vh>@auto src/xml.rs</vh>
       <v t="ekr.20260812053055.119"><vh>unnamed use</vh></v>
       <v t="ekr.20260812053055.120"><vh>enum LeoXmlError</vh></v>
       <v t="ekr.20260812053055.121"><vh>struct LeoDocument</vh></v>
