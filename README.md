@@ -80,6 +80,7 @@ The browser resolves external thin files in memory.
 | `Home` / `End` | Select the first/last visible node |
 | `PageUp` / `PageDown` | Scroll the selected node's body by one page |
 | `f` | Toggle a full-width body pane |
+| `Shift-F` | Toggle a full-width outline pane |
 | `↑` / `↓` in full-width mode | Scroll the body vertically by one line |
 | `←` / `→` in full-width mode | Scroll the body horizontally |
 | `Ctrl-P` | Find a headline incrementally; use `↑`/`↓` to cycle matches |

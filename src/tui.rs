@@ -52,6 +52,7 @@ struct App {
     body_horizontal_scroll: usize,
     body_horizontal_scroll_max: usize,
     body_full_width: bool,
+    outline_full_width: bool,
     help: bool,
     status: String,
     input: Option<HeadlineInput>,
@@ -103,6 +104,7 @@ impl App {
             body_horizontal_scroll: 0,
             body_horizontal_scroll_max: 0,
             body_full_width: false,
+            outline_full_width: false,
             help: false,
             status,
             input: None,
@@ -360,10 +362,21 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
             KeyCode::Char('o') => open_selected(terminal, app),
             KeyCode::Char('f') => {
                 app.body_full_width = !app.body_full_width;
+                app.outline_full_width = false;
                 app.status = if app.body_full_width {
                     "body pane expanded to full width"
                 } else {
                     "outline pane restored"
+                }
+                .into();
+            }
+            KeyCode::Char('F') => {
+                app.outline_full_width = !app.outline_full_width;
+                app.body_full_width = false;
+                app.status = if app.outline_full_width {
+                    "outline pane expanded to full width"
+                } else {
+                    "body pane restored"
                 }
                 .into();
             }
@@ -916,6 +929,11 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
             .direction(Direction::Horizontal)
             .constraints([Constraint::Length(0), Constraint::Percentage(100)])
             .split(areas[0])
+    } else if app.outline_full_width {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(100), Constraint::Length(0)])
+            .split(areas[0])
     } else {
         Layout::default()
             .direction(Direction::Horizontal)
@@ -981,30 +999,33 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
     }
     app.outline_scroll = state.offset();
 
-    let node_block = Block::default().title(" Node ").borders(Borders::ALL);
-    let node_area = node_block.inner(columns[1]);
-    frame.render_widget(node_block, columns[1]);
-    if let Some(row) = rows.get(app.selected) {
-        let body = body_text(app, row);
-        app.body_page_size = usize::from(node_area.height).max(1);
-        app.body_scroll_max = body.lines.len().saturating_sub(app.body_page_size);
-        app.body_horizontal_scroll_max = body.width().saturating_sub(usize::from(node_area.width));
-        app.body_scroll = app.body_scroll.min(app.body_scroll_max);
-        app.body_horizontal_scroll = app
-            .body_horizontal_scroll
-            .min(app.body_horizontal_scroll_max);
-        frame.render_widget(
-            Paragraph::new(body).scroll((
-                app.body_scroll.min(u16::MAX as usize) as u16,
-                app.body_horizontal_scroll.min(u16::MAX as usize) as u16,
-            )),
-            node_area,
-        );
+    if !app.outline_full_width {
+        let node_block = Block::default().title(" Node ").borders(Borders::ALL);
+        let node_area = node_block.inner(columns[1]);
+        frame.render_widget(node_block, columns[1]);
+        if let Some(row) = rows.get(app.selected) {
+            let body = body_text(app, row);
+            app.body_page_size = usize::from(node_area.height).max(1);
+            app.body_scroll_max = body.lines.len().saturating_sub(app.body_page_size);
+            app.body_horizontal_scroll_max =
+                body.width().saturating_sub(usize::from(node_area.width));
+            app.body_scroll = app.body_scroll.min(app.body_scroll_max);
+            app.body_horizontal_scroll = app
+                .body_horizontal_scroll
+                .min(app.body_horizontal_scroll_max);
+            frame.render_widget(
+                Paragraph::new(body).scroll((
+                    app.body_scroll.min(u16::MAX as usize) as u16,
+                    app.body_horizontal_scroll.min(u16::MAX as usize) as u16,
+                )),
+                node_area,
+            );
+        }
     }
     frame.render_widget(
         Paragraph::new(format!(
             "{}   [{}]",
-            controls(app.body_full_width),
+            controls(app.body_full_width, app.outline_full_width),
             app.status
         ))
         .style(Style::default().fg(Color::DarkGray)),
@@ -1055,7 +1076,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
         );
     }
     if app.help {
-        draw_help(frame, app.body_full_width);
+        draw_help(frame, app.body_full_width, app.outline_full_width);
     }
 }
 
@@ -1130,20 +1151,23 @@ fn headline_spans(headline: &str) -> Vec<Span<'_>> {
     spans
 }
 
-fn controls(body_full_width: bool) -> &'static str {
+fn controls(body_full_width: bool, outline_full_width: bool) -> &'static str {
     if body_full_width {
         #[cfg(feature = "syntax")]
-        return "? help  arrows scroll  PgUp/PgDn page  f outline  o open/edit  Ctrl-P find  Ctrl-R reload  Ctrl-S save  y syntax  q quit";
+        return "? help  arrows scroll  PgUp/PgDn page  f split  F outline  o open/edit  Ctrl-P find  Ctrl-R reload  Ctrl-S save  y syntax  q quit";
         #[cfg(not(feature = "syntax"))]
-        return "? help  arrows scroll  PgUp/PgDn page  f outline  o open/edit  Ctrl-P find  Ctrl-R reload  Ctrl-S save  q quit";
+        return "? help  arrows scroll  PgUp/PgDn page  f split  F outline  o open/edit  Ctrl-P find  Ctrl-R reload  Ctrl-S save  q quit";
+    }
+    if outline_full_width {
+        return "? help  arrows navigate  F split view  o open/edit  Ctrl-P find  Ctrl-I new  Ctrl-H rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  q quit";
     }
     #[cfg(feature = "syntax")]
-    return "? help  arrows navigate  PgUp/PgDn body  f full width  o open/edit  Ctrl-P find  Ctrl-I new  Ctrl-H rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  y syntax  q quit";
+    return "? help  arrows navigate  PgUp/PgDn body  f body  F outline  o open/edit  Ctrl-P find  Ctrl-I new  Ctrl-H rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  y syntax  q quit";
     #[cfg(not(feature = "syntax"))]
-    "? help  arrows navigate  PgUp/PgDn body  f full width  o open/edit  Ctrl-P find  Ctrl-I new  Ctrl-H rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  q quit"
+    "? help  arrows navigate  PgUp/PgDn body  f body  F outline  o open/edit  Ctrl-P find  Ctrl-I new  Ctrl-H rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  q quit"
 }
 
-fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool) {
+fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full_width: bool) {
     let width = frame.area().width.saturating_sub(4).min(72);
     let height = frame.area().height.saturating_sub(2).min(20);
     let area = Rect::new(
@@ -1157,11 +1181,21 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool) {
             Line::from("↑/↓              Scroll body vertically"),
             Line::from("←/→              Scroll body horizontally"),
             Line::from("PageUp/PageDown  Scroll body by one page"),
-            Line::from("f                Restore outline pane"),
+            Line::from("f                Restore split view"),
+            Line::from("Shift-F          Show full-width outline"),
             Line::from("Ctrl-P           Find a headline"),
             Line::from("Ctrl-R           Reload from disk"),
             Line::from("Ctrl-S           Save"),
             Line::from("o                Edit body, or open derived source"),
+        ]
+    } else if outline_full_width {
+        vec![
+            Line::from("↑/↓              Select previous/next node"),
+            Line::from("←/→              Collapse/expand node"),
+            Line::from("Enter            Expand node"),
+            Line::from("Home/End         Select first/last visible node"),
+            Line::from("Shift-F          Restore split view"),
+            Line::from("f                Show full-width body"),
         ]
     } else {
         vec![
@@ -1169,8 +1203,9 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool) {
             Line::from("←/→              Collapse/expand node"),
             Line::from("Enter            Expand node"),
             Line::from("Home/End         Select first/last visible node"),
+            Line::from("f                Show full-width body"),
+            Line::from("Shift-F          Show full-width outline"),
             Line::from("PageUp/PageDown  Scroll the body pane"),
-            Line::from("f                Expand body pane to full width"),
             Line::from("Ctrl-P           Find a headline"),
             Line::from("Ctrl-I or Tab    Insert a sibling"),
             Line::from("Ctrl-H/Backspace Rename the headline"),
