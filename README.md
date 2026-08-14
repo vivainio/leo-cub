@@ -27,7 +27,8 @@ and exposes transactional operations intended for scripts and AI tools.
 - Reconstruct `@file`, `@thin`, and `@file-thin` hierarchies and bodies.
 - Resolve ancestor `@path` directives in the TUI.
 - Browse outlines with a small Ratatui interface.
-- Highlight node bodies with Syntect, using `@language` or source extensions.
+- Highlight node bodies with Syntect, using `@language`, `@rst` ancestors, or
+  source extensions, including bundled reStructuredText syntax support.
 - Open a derived node's full source file at its sentinel line using `$VISUAL` or
   `$EDITOR`.
 
@@ -66,7 +67,10 @@ copy, so it is safe to rerun after upgrading.
 cub tui outline.leo
 ```
 
-The browser resolves external thin files in memory.
+The browser resolves external thin files in memory. Outline headlines highlight
+Leo directives, external-file names, and section-reference markers. A red `*`
+marks each node changed since the outline was loaded or last saved; saving or
+reloading clears the markers.
 
 ## TUI keybindings
 
@@ -138,10 +142,11 @@ cub apply outline.leo operations.json --dry-run
 ```
 
 `import` creates Leo external-file nodes in `auto`, `edit`, or `clean` mode.
-Markdown, Python, and Rust `@auto` files are expanded transiently with
-Tree-sitter when they are loaded by `inspect` or the TUI; the generated tree is
-not stored in the `.leo` file. Markdown also supports Leo's `@auto-md` and
-`@auto-markdown` headlines and `leo-noheader` markers.
+Markdown, Python, Rust, C#, Go, JavaScript/JSX, and TypeScript/TSX `@auto` files
+are expanded transiently with Tree-sitter when they are loaded by `inspect` or
+the TUI; the generated tree is not stored in the `.leo` file. Unsupported
+source types remain available as a plain root node. Markdown also supports
+Leo's `@auto-md` and `@auto-markdown` headlines and `leo-noheader` markers.
 Directory imports are recursive only with `--recursive` and preserve their
 layout with `@path` nodes by default. Use `--no-paths` to put all imported
 files directly below the destination, `--parent GNX` to choose that destination,
