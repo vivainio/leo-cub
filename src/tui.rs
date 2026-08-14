@@ -16,7 +16,7 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use leo::{DerivedFile, LeoDocument, NodeId, Outline, Position, PositionId};
+use leo::{AutoFile, DerivedFile, LeoDocument, NodeId, Outline, Position, PositionId};
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
@@ -32,6 +32,12 @@ struct Row {
     node: NodeId,
     depth: usize,
     has_children: bool,
+}
+
+#[derive(Default)]
+struct OriginalExternalState {
+    children: HashMap<NodeId, Vec<Position>>,
+    bodies: HashMap<NodeId, String>,
 }
 
 struct App {
@@ -51,7 +57,7 @@ struct App {
     source_locations: HashMap<PositionId, SourceLocation>,
     source_nodes: HashMap<NodeId, SourceLocation>,
     derived_nodes: HashSet<NodeId>,
-    derived_roots: HashMap<NodeId, Vec<Position>>,
+    original_external: OriginalExternalState,
     #[cfg(feature = "syntax")]
     syntax: crate::syntax::SyntaxHighlighter,
     #[cfg(feature = "syntax")]
@@ -68,7 +74,7 @@ impl App {
         source_locations: HashMap<PositionId, SourceLocation>,
         source_nodes: HashMap<NodeId, SourceLocation>,
         derived_nodes: HashSet<NodeId>,
-        derived_roots: HashMap<NodeId, Vec<Position>>,
+        original_external: OriginalExternalState,
     ) -> Self {
         let expanded = document
             .outline
@@ -94,7 +100,7 @@ impl App {
             source_locations,
             source_nodes,
             derived_nodes,
-            derived_roots,
+            original_external,
             #[cfg(feature = "syntax")]
             syntax: crate::syntax::SyntaxHighlighter::new(),
             #[cfg(feature = "syntax")]
@@ -213,7 +219,8 @@ enum MoveDirection {
 
 pub fn run(path: PathBuf, load_derived: bool) -> Result<()> {
     let mut document = LeoDocument::open(&path)?;
-    let (status, source_locations, source_nodes, derived_nodes, derived_roots) = if load_derived {
+    let (status, source_locations, source_nodes, derived_nodes, original_external) = if load_derived
+    {
         let report = load_derived_files(&mut document.outline, &path);
         let status = if report.errors.is_empty() {
             format!("loaded {} derived file(s)", report.loaded)
@@ -230,7 +237,10 @@ pub fn run(path: PathBuf, load_derived: bool) -> Result<()> {
             report.locations,
             report.node_locations,
             report.derived_nodes,
-            report.original_children,
+            OriginalExternalState {
+                children: report.original_children,
+                bodies: report.original_bodies,
+            },
         )
     } else {
         (
@@ -238,7 +248,7 @@ pub fn run(path: PathBuf, load_derived: bool) -> Result<()> {
             HashMap::new(),
             HashMap::new(),
             HashSet::new(),
-            HashMap::new(),
+            OriginalExternalState::default(),
         )
     };
     let mut app = App::new(
@@ -248,7 +258,7 @@ pub fn run(path: PathBuf, load_derived: bool) -> Result<()> {
         source_locations,
         source_nodes,
         derived_nodes,
-        derived_roots,
+        original_external,
     );
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -647,7 +657,11 @@ fn move_selected(app: &mut App, direction: MoveDirection) {
 
 fn save(app: &mut App) {
     let mut persisted = app.document.clone();
-    restore_derived_children(&mut persisted.outline.roots, &app.derived_roots);
+    restore_external_state(
+        &mut persisted.outline,
+        &app.original_external.children,
+        &app.original_external.bodies,
+    );
     let referenced = referenced_nodes(&persisted.outline.roots);
     persisted
         .outline
@@ -660,6 +674,19 @@ fn save(app: &mut App) {
             app.status = format!("saved {}", app.path.display());
         }
         Err(error) => app.status = format!("save failed: {error}"),
+    }
+}
+
+fn restore_external_state(
+    outline: &mut Outline,
+    children: &HashMap<NodeId, Vec<Position>>,
+    bodies: &HashMap<NodeId, String>,
+) {
+    restore_derived_children(&mut outline.roots, children);
+    for (id, body) in bodies {
+        if let Some(node) = outline.nodes.get_mut(id) {
+            node.body.clone_from(body);
+        }
     }
 }
 
@@ -1004,11 +1031,14 @@ struct LoadReport {
     node_locations: HashMap<NodeId, SourceLocation>,
     derived_nodes: HashSet<NodeId>,
     original_children: HashMap<NodeId, Vec<Position>>,
+    original_bodies: HashMap<NodeId, String>,
 }
 
 struct DerivedJob {
     position: PositionId,
     path: PathBuf,
+    auto: bool,
+    root: NodeId,
 }
 
 #[derive(Clone)]
@@ -1024,8 +1054,7 @@ fn load_derived_files(outline: &mut Outline, outline_path: &Path) -> LoadReport 
         let label = job.path.display().to_string();
         let result = fs::read_to_string(&job.path)
             .map_err(|error| error.to_string())
-            .and_then(|source| DerivedFile::parse(&source).map_err(|error| error.to_string()))
-            .and_then(|derived| {
+            .and_then(|source| {
                 let root_node = outline
                     .position(&job.position)
                     .map(|position| position.node.clone())
@@ -1034,44 +1063,74 @@ fn load_derived_files(outline: &mut Outline, outline_path: &Path) -> LoadReport 
                     .position(&job.position)
                     .map(|position| position.children.clone())
                     .unwrap_or_default();
-                derived
-                    .merge_into(outline, &job.position)
-                    .map_err(|error| error.to_string())?;
-                for (derived_position, line) in &derived.locations {
-                    let suffix = derived_position
-                        .0
-                        .strip_prefix("0")
-                        .unwrap_or(&derived_position.0);
-                    let position = PositionId(format!("{}{}", job.position.0, suffix));
-                    report.locations.insert(
-                        position,
-                        SourceLocation {
-                            path: job.path.clone(),
-                            line: *line,
-                        },
-                    );
-                    if let Some(position) = derived.outline.position(derived_position) {
+                let original_body = outline.nodes[&root_node].body.clone();
+                if job.auto {
+                    let auto = AutoFile::parse(&job.path, job.root.clone(), &source)
+                        .map_err(|error| error.to_string())?;
+                    if !auto.merge_into(outline, &job.position) {
+                        return Err("auto root position disappeared".to_owned());
+                    }
+                    for (id, line) in &auto.locations {
                         report
                             .node_locations
-                            .entry(position.node.clone())
+                            .entry(id.clone())
                             .or_insert(SourceLocation {
                                 path: job.path.clone(),
                                 line: *line,
                             });
                     }
+                    report.derived_nodes.extend(
+                        auto.outline
+                            .nodes
+                            .keys()
+                            .filter(|id| **id != auto.root)
+                            .cloned(),
+                    );
+                } else {
+                    let derived = DerivedFile::parse(&source).map_err(|error| error.to_string())?;
+                    derived
+                        .merge_into(outline, &job.position)
+                        .map_err(|error| error.to_string())?;
+                    for (derived_position, line) in &derived.locations {
+                        let suffix = derived_position
+                            .0
+                            .strip_prefix("0")
+                            .unwrap_or(&derived_position.0);
+                        let position = PositionId(format!("{}{}", job.position.0, suffix));
+                        report.locations.insert(
+                            position,
+                            SourceLocation {
+                                path: job.path.clone(),
+                                line: *line,
+                            },
+                        );
+                        if let Some(position) = derived.outline.position(derived_position) {
+                            report
+                                .node_locations
+                                .entry(position.node.clone())
+                                .or_insert(SourceLocation {
+                                    path: job.path.clone(),
+                                    line: *line,
+                                });
+                        }
+                    }
+                    report.derived_nodes.extend(
+                        derived
+                            .outline
+                            .nodes
+                            .keys()
+                            .filter(|id| **id != derived.root)
+                            .cloned(),
+                    );
                 }
                 report
                     .original_children
                     .entry(root_node)
                     .or_insert(original_children);
-                report.derived_nodes.extend(
-                    derived
-                        .outline
-                        .nodes
-                        .keys()
-                        .filter(|id| **id != derived.root)
-                        .cloned(),
-                );
+                report
+                    .original_bodies
+                    .entry(job.root.clone())
+                    .or_insert(original_body);
                 Ok(())
             });
         match result {
@@ -1239,7 +1298,7 @@ fn derived_jobs(outline: &Outline, outline_path: &Path) -> Vec<DerivedJob> {
             {
                 paths.push(path);
             }
-            if let Some(filename) = thin_filename(&node.headline) {
+            if let Some((auto, filename)) = derived_filename(&node.headline) {
                 let mut path = base.to_path_buf();
                 for component in inherited_paths {
                     path.push(component);
@@ -1248,6 +1307,8 @@ fn derived_jobs(outline: &Outline, outline_path: &Path) -> Vec<DerivedJob> {
                 jobs.push(DerivedJob {
                     position: PositionId(position_id.clone()),
                     path,
+                    auto,
+                    root: position.node.clone(),
                 });
             }
             visit(
@@ -1266,18 +1327,26 @@ fn derived_jobs(outline: &Outline, outline_path: &Path) -> Vec<DerivedJob> {
     jobs
 }
 
-fn thin_filename(headline: &str) -> Option<&str> {
+fn derived_filename(headline: &str) -> Option<(bool, &str)> {
     let (directive, filename) = headline.trim().split_once(char::is_whitespace)?;
-    matches!(directive, "@file" | "@thin" | "@file-thin")
-        .then(|| strip_path_cruft(filename))
-        .filter(|filename| !filename.is_empty())
+    matches!(directive, "@file" | "@thin" | "@file-thin" | "@auto")
+        .then(|| (directive == "@auto", strip_path_cruft(filename)))
+        .filter(|(_, filename)| !filename.is_empty())
+}
+
+#[cfg(test)]
+fn thin_filename(headline: &str) -> Option<&str> {
+    derived_filename(headline).and_then(|(auto, filename)| (!auto).then_some(filename))
 }
 
 fn external_filename(headline: &str) -> Option<&str> {
     let (directive, filename) = headline.trim().split_once(char::is_whitespace)?;
-    matches!(directive, "@file" | "@thin" | "@file-thin" | "@clean")
-        .then(|| strip_path_cruft(filename))
-        .filter(|filename| !filename.is_empty())
+    matches!(
+        directive,
+        "@file" | "@thin" | "@file-thin" | "@clean" | "@auto"
+    )
+    .then(|| strip_path_cruft(filename))
+    .filter(|filename| !filename.is_empty())
 }
 
 fn path_directive(text: &str) -> Option<String> {
@@ -1327,7 +1396,7 @@ mod tests {
             HashMap::new(),
             HashMap::new(),
             HashSet::new(),
-            HashMap::new(),
+            OriginalExternalState::default(),
         )
     }
 
@@ -1480,5 +1549,33 @@ mod tests {
         let originals = HashMap::from([(NodeId::from("file"), Vec::new())]);
         restore_derived_children(&mut roots, &originals);
         assert!(roots[0].children.is_empty());
+    }
+
+    #[test]
+    fn restores_auto_root_body_before_serializing() {
+        let mut outline = Outline {
+            nodes: [(
+                NodeId::from("file"),
+                leo::Node {
+                    id: NodeId::from("file"),
+                    headline: "@auto x.py".into(),
+                    body: "generated @others body".into(),
+                    vnode_attributes: HashMap::new(),
+                    tnode_attributes: HashMap::new(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            roots: vec![Position {
+                node: NodeId::from("file"),
+                children: vec![],
+            }],
+        };
+        restore_external_state(
+            &mut outline,
+            &HashMap::new(),
+            &HashMap::from([(NodeId::from("file"), String::new())]),
+        );
+        assert!(outline.nodes[&NodeId::from("file")].body.is_empty());
     }
 }

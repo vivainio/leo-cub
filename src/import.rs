@@ -241,7 +241,13 @@ fn build_spec(
                 Node {
                     id: id.clone(),
                     headline: headline.clone(),
-                    body,
+                    // Leo reconstructs @auto bodies and descendants from the
+                    // external source when the outline is loaded.
+                    body: if mode == ImportMode::Auto {
+                        String::new()
+                    } else {
+                        body
+                    },
                     vnode_attributes: HashMap::new(),
                     tnode_attributes: HashMap::new(),
                 },
@@ -452,6 +458,29 @@ mod tests {
         assert_eq!(report.items[0].headline, "@clean src/nested/note.txt");
         assert_eq!(report.path_nodes, 0);
         assert_eq!(document.outline, before);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn auto_import_defers_source_expansion_until_load() {
+        let dir = temp_dir("auto-deferred");
+        let source = dir.join("sample.py");
+        fs::write(&source, "def f():\n    pass\n").unwrap();
+        let mut document = LeoDocument::parse(SAMPLE).unwrap();
+        let report = import_files(
+            &mut document,
+            &dir.join("project.leo"),
+            &[source],
+            &ImportOptions {
+                mode: ImportMode::Auto,
+                recursive: false,
+                paths: false,
+                parent: None,
+                dry_run: false,
+            },
+        )
+        .unwrap();
+        assert!(document.outline.nodes[&report.items[0].gnx].body.is_empty());
         fs::remove_dir_all(dir).unwrap();
     }
 }
