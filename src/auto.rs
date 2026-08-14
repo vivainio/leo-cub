@@ -2,8 +2,9 @@
 
 use std::{collections::HashMap, path::Path};
 
+use streaming_iterator::StreamingIterator;
 use thiserror::Error;
-use tree_sitter::{Language, Node as TsNode, Parser};
+use tree_sitter::{Language, Node as TsNode, Parser, Query, QueryCursor};
 
 use crate::{Node, NodeId, Outline, Position};
 
@@ -15,6 +16,8 @@ pub enum AutoError {
     Grammar(&'static str),
     #[error("Tree-sitter did not produce a syntax tree")]
     Parse,
+    #[error("invalid {0} outline query: {1}")]
+    Query(&'static str, String),
 }
 
 /// An in-memory `@auto` expansion. It is never serialized into the `.leo` file.
@@ -30,6 +33,17 @@ enum Flavor {
     Markdown,
     Python,
     Rust,
+    Static(&'static StaticLanguage),
+}
+
+struct StaticLanguage {
+    query: &'static str,
+    prefixes: &'static [(&'static str, &'static str)],
+}
+
+#[derive(Debug)]
+struct StaticMatch {
+    name: String,
 }
 
 #[derive(Debug)]
@@ -77,7 +91,11 @@ impl AutoFile {
             if matches!(directive, Some("@auto-md" | "@auto-markdown")) {
                 (Flavor::Markdown, tree_sitter_md::LANGUAGE.into(), "md")
             } else {
-                language_for(path)?
+                match language_for(path) {
+                    Ok(language) => language,
+                    Err(AutoError::Unsupported(_)) => return Ok(parse_plain(root, source)),
+                    Err(error) => return Err(error),
+                }
             };
         let mut parser = Parser::new();
         parser
@@ -86,6 +104,16 @@ impl AutoFile {
         let tree = parser.parse(source, None).ok_or(AutoError::Parse)?;
         if matches!(flavor, Flavor::Markdown) {
             return parse_markdown(tree.root_node(), root, source);
+        }
+        if let Flavor::Static(config) = flavor {
+            return parse_static(
+                tree.root_node(),
+                root,
+                source,
+                &language,
+                language_name,
+                config,
+            );
         }
         let line_starts = line_starts(source);
         let line_count = line_starts.len();
@@ -169,6 +197,160 @@ impl AutoFile {
         target.nodes.retain(|id, _| referenced.contains(id));
         true
     }
+}
+
+/// Leo's fallback for an `@auto` file without an importer: keep the complete
+/// external file in the root node instead of inventing an outline structure.
+fn parse_plain(root: NodeId, source: &str) -> AutoFile {
+    let mut outline = Outline::default();
+    outline.nodes.insert(
+        root.clone(),
+        Node {
+            id: root.clone(),
+            headline: String::new(),
+            body: source.to_owned(),
+            vnode_attributes: HashMap::new(),
+            tnode_attributes: HashMap::new(),
+        },
+    );
+    outline.roots.push(Position {
+        node: root.clone(),
+        children: Vec::new(),
+    });
+    AutoFile {
+        outline,
+        root,
+        locations: HashMap::new(),
+    }
+}
+
+fn parse_static(
+    syntax_root: TsNode<'_>,
+    root: NodeId,
+    source: &str,
+    language: &Language,
+    language_name: &'static str,
+    config: &'static StaticLanguage,
+) -> Result<AutoFile, AutoError> {
+    let query = Query::new(language, config.query)
+        .map_err(|error| AutoError::Query(language_name, error.to_string()))?;
+    let capture_names = query.capture_names();
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(&query, syntax_root, source.as_bytes());
+    let mut structural = HashMap::new();
+    while let Some(query_match) = matches.next() {
+        let mut node = None;
+        let mut name = None;
+        for capture in query_match.captures {
+            match capture_names[capture.index as usize] {
+                "leo.node" => node = Some(capture.node),
+                "leo.name" => {
+                    name = capture
+                        .node
+                        .utf8_text(source.as_bytes())
+                        .ok()
+                        .map(str::to_owned)
+                }
+                _ => {}
+            }
+        }
+        if let (Some(node), Some(name)) = (node, name) {
+            structural.insert((node.start_byte(), node.end_byte()), StaticMatch { name });
+        }
+    }
+
+    let starts = line_starts(source);
+    let line_count = starts.len();
+    let mut blocks = find_static_blocks(syntax_root, line_count, config, &structural);
+    assign_owned_starts(&mut blocks, 0);
+    let preamble_end = blocks.first().map_or(0, |block| block.syntax_start);
+    if let Some(first) = blocks.first_mut() {
+        first.start = preamble_end;
+    }
+
+    let mut outline = Outline::default();
+    let mut locations = HashMap::new();
+    let children = Builder {
+        nodes: &mut outline.nodes,
+        locations: &mut locations,
+        root: &root,
+        source,
+        starts: &starts,
+    }
+    .build(&blocks, "", None);
+    let mut body = if children.is_empty() {
+        source.to_owned()
+    } else {
+        let tail_start = blocks.last().map_or(0, |block| block.end);
+        let mut body = slice_lines(source, &starts, 0, preamble_end).to_owned();
+        body.push_str("@others\n");
+        body.push_str(slice_lines(source, &starts, tail_start, line_count));
+        body
+    };
+    if !body.is_empty() && !body.ends_with('\n') {
+        body.push('\n');
+    }
+    body.push_str(&format!("@language {language_name}\n@tabwidth -4\n"));
+    outline.nodes.insert(
+        root.clone(),
+        Node {
+            id: root.clone(),
+            headline: String::new(),
+            body,
+            vnode_attributes: HashMap::new(),
+            tnode_attributes: HashMap::new(),
+        },
+    );
+    outline.roots.push(Position {
+        node: root.clone(),
+        children,
+    });
+    move_leading_blank_lines(&mut outline);
+    Ok(AutoFile {
+        outline,
+        root,
+        locations,
+    })
+}
+
+fn find_static_blocks(
+    parent: TsNode<'_>,
+    line_count: usize,
+    config: &StaticLanguage,
+    structural: &HashMap<(usize, usize), StaticMatch>,
+) -> Vec<Block> {
+    let mut cursor = parent.walk();
+    let mut blocks = Vec::new();
+    for child in parent.named_children(&mut cursor) {
+        if let Some(item) = structural.get(&(child.start_byte(), child.end_byte())) {
+            let syntax_start = child.start_position().row;
+            let end_pos = child.end_position();
+            let end = (end_pos.row + usize::from(end_pos.column > 0)).min(line_count);
+            let container = child.child_by_field_name("body").unwrap_or(child);
+            // The body's opening delimiter belongs to the declaration node,
+            // including languages such as C# that put `{` on its own line.
+            let body_start = (container.start_position().row + 1).min(end);
+            let children = find_static_blocks(container, line_count, config, structural);
+            let prefix = config
+                .prefixes
+                .iter()
+                .find_map(|(kind, prefix)| (*kind == child.kind()).then_some(*prefix))
+                .unwrap_or(child.kind());
+            blocks.push(Block {
+                kind: prefix.to_owned(),
+                name: item.name.clone(),
+                syntax_start,
+                body_start,
+                start: syntax_start,
+                end,
+                class_docstring: false,
+                children,
+            });
+        } else {
+            blocks.extend(find_static_blocks(child, line_count, config, structural));
+        }
+    }
+    blocks
 }
 
 fn parse_markdown(
@@ -521,6 +703,82 @@ fn move_leading_blank_lines(outline: &mut Outline) {
     visit(&mut outline.nodes, &children);
 }
 
+const C_SHARP: StaticLanguage = StaticLanguage {
+    query: r#"
+        (namespace_declaration name: (_) @leo.name) @leo.node
+        (class_declaration name: (_) @leo.name) @leo.node
+        (struct_declaration name: (_) @leo.name) @leo.node
+        (interface_declaration name: (_) @leo.name) @leo.node
+        (enum_declaration name: (_) @leo.name) @leo.node
+        (record_declaration name: (_) @leo.name) @leo.node
+        (method_declaration name: (_) @leo.name) @leo.node
+        (constructor_declaration name: (_) @leo.name) @leo.node
+    "#,
+    prefixes: &[
+        ("namespace_declaration", "namespace"),
+        ("class_declaration", "class"),
+        ("struct_declaration", "struct"),
+        ("interface_declaration", "interface"),
+        ("enum_declaration", "enum"),
+        ("record_declaration", "record"),
+        ("method_declaration", "method"),
+        ("constructor_declaration", "constructor"),
+    ],
+};
+
+const JAVASCRIPT: StaticLanguage = StaticLanguage {
+    query: r#"
+        (class_declaration name: (_) @leo.name) @leo.node
+        (function_declaration name: (_) @leo.name) @leo.node
+        (generator_function_declaration name: (_) @leo.name) @leo.node
+        (method_definition name: (_) @leo.name) @leo.node
+    "#,
+    prefixes: &[
+        ("class_declaration", "class"),
+        ("function_declaration", "function"),
+        ("generator_function_declaration", "function"),
+        ("method_definition", "method"),
+    ],
+};
+
+const TYPESCRIPT: StaticLanguage = StaticLanguage {
+    query: r#"
+        (class_declaration name: (_) @leo.name) @leo.node
+        (abstract_class_declaration name: (_) @leo.name) @leo.node
+        (interface_declaration name: (_) @leo.name) @leo.node
+        (enum_declaration name: (_) @leo.name) @leo.node
+        (type_alias_declaration name: (_) @leo.name) @leo.node
+        (internal_module name: (_) @leo.name) @leo.node
+        (function_declaration name: (_) @leo.name) @leo.node
+        (generator_function_declaration name: (_) @leo.name) @leo.node
+        (method_definition name: (_) @leo.name) @leo.node
+    "#,
+    prefixes: &[
+        ("class_declaration", "class"),
+        ("abstract_class_declaration", "abstract class"),
+        ("interface_declaration", "interface"),
+        ("enum_declaration", "enum"),
+        ("type_alias_declaration", "type"),
+        ("internal_module", "namespace"),
+        ("function_declaration", "function"),
+        ("generator_function_declaration", "function"),
+        ("method_definition", "method"),
+    ],
+};
+
+const GO: StaticLanguage = StaticLanguage {
+    query: r#"
+        (type_spec name: (_) @leo.name) @leo.node
+        (function_declaration name: (_) @leo.name) @leo.node
+        (method_declaration name: (_) @leo.name) @leo.node
+    "#,
+    prefixes: &[
+        ("type_spec", "type"),
+        ("function_declaration", "func"),
+        ("method_declaration", "method"),
+    ],
+};
+
 fn language_for(path: &Path) -> Result<(Flavor, Language, &'static str), AutoError> {
     let extension = path
         .extension()
@@ -535,6 +793,27 @@ fn language_for(path: &Path) -> Result<(Flavor, Language, &'static str), AutoErr
         )),
         "md" | "rmd" => Ok((Flavor::Markdown, tree_sitter_md::LANGUAGE.into(), "md")),
         "rs" => Ok((Flavor::Rust, tree_sitter_rust::LANGUAGE.into(), "rust")),
+        "cs" => Ok((
+            Flavor::Static(&C_SHARP),
+            tree_sitter_c_sharp::LANGUAGE.into(),
+            "csharp",
+        )),
+        "go" => Ok((Flavor::Static(&GO), tree_sitter_go::LANGUAGE.into(), "go")),
+        "js" | "jsx" | "mjs" | "cjs" => Ok((
+            Flavor::Static(&JAVASCRIPT),
+            tree_sitter_javascript::LANGUAGE.into(),
+            "javascript",
+        )),
+        "ts" | "mts" | "cts" => Ok((
+            Flavor::Static(&TYPESCRIPT),
+            tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+            "typescript",
+        )),
+        "tsx" => Ok((
+            Flavor::Static(&TYPESCRIPT),
+            tree_sitter_typescript::LANGUAGE_TSX.into(),
+            "typescript",
+        )),
         extension => Err(AutoError::Unsupported(extension.to_owned())),
     }
 }
@@ -844,6 +1123,49 @@ mod tests {
                 (1, "Last header: no text".into(), String::new()),
             ]
         );
+    }
+
+    #[test]
+    fn unsupported_languages_fall_back_to_a_plain_root_node() {
+        let source = "package:\n  name: leo\n";
+        let auto = AutoFile::parse(Path::new("meta.yaml"), NodeId::from("root"), source).unwrap();
+        assert_eq!(rows(&auto), vec![(0, String::new(), source.to_owned())]);
+        assert!(auto.locations.is_empty());
+    }
+
+    #[test]
+    fn query_languages_create_structural_outlines() {
+        let cases = [
+            (
+                "x.cs",
+                "namespace N { class C { C() {} void M() {} } }\n",
+                vec!["namespace N", "class C", "constructor C", "method M"],
+            ),
+            (
+                "x.js",
+                "class C { m() {} }\nfunction f() {}\n",
+                vec!["class C", "method m", "function f"],
+            ),
+            (
+                "x.ts",
+                "interface I { m(): void }\ntype T = string;\nfunction f(): void {}\n",
+                vec!["interface I", "type T", "function f"],
+            ),
+            (
+                "x.go",
+                "package p\ntype S struct{}\nfunc (S) M() {}\nfunc F() {}\n",
+                vec!["type S", "method M", "func F"],
+            ),
+        ];
+        for (path, source, expected) in cases {
+            let auto = AutoFile::parse(Path::new(path), NodeId::from("root"), source).unwrap();
+            let headlines = rows(&auto)
+                .into_iter()
+                .skip(1)
+                .map(|(_, headline, _)| headline)
+                .collect::<Vec<_>>();
+            assert_eq!(headlines, expected, "{path}");
+        }
     }
 
     #[test]
