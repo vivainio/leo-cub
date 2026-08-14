@@ -49,12 +49,18 @@ struct App {
     body_scroll: usize,
     body_page_size: usize,
     body_scroll_max: usize,
+    body_horizontal_scroll: usize,
+    body_horizontal_scroll_max: usize,
+    body_full_width: bool,
     help: bool,
     status: String,
     input: Option<HeadlineInput>,
     find: Option<FindInput>,
     dirty: bool,
+    dirty_nodes: HashSet<NodeId>,
     quit_armed: bool,
+    reload_armed: bool,
+    load_derived: bool,
     source_locations: HashMap<PositionId, SourceLocation>,
     source_nodes: HashMap<NodeId, SourceLocation>,
     derived_nodes: HashSet<NodeId>,
@@ -76,6 +82,7 @@ impl App {
         source_nodes: HashMap<NodeId, SourceLocation>,
         derived_nodes: HashSet<NodeId>,
         original_external: OriginalExternalState,
+        load_derived: bool,
     ) -> Self {
         let expanded = document
             .outline
@@ -93,12 +100,18 @@ impl App {
             body_scroll: 0,
             body_page_size: 1,
             body_scroll_max: 0,
+            body_horizontal_scroll: 0,
+            body_horizontal_scroll_max: 0,
+            body_full_width: false,
             help: false,
             status,
             input: None,
             find: None,
             dirty: false,
+            dirty_nodes: HashSet::new(),
             quit_armed: false,
+            reload_armed: false,
+            load_derived,
             source_locations,
             source_nodes,
             derived_nodes,
@@ -159,6 +172,7 @@ impl App {
         if selected != self.selected {
             self.selected = selected;
             self.body_scroll = 0;
+            self.body_horizontal_scroll = 0;
         }
     }
 
@@ -168,6 +182,20 @@ impl App {
             .body_scroll
             .saturating_add_signed(pages.saturating_mul(amount as isize))
             .min(self.body_scroll_max);
+    }
+
+    fn scroll_body_lines(&mut self, lines: isize) {
+        self.body_scroll = self
+            .body_scroll
+            .saturating_add_signed(lines)
+            .min(self.body_scroll_max);
+    }
+
+    fn scroll_body_horizontal(&mut self, columns: isize) {
+        self.body_horizontal_scroll = self
+            .body_horizontal_scroll
+            .saturating_add_signed(columns)
+            .min(self.body_horizontal_scroll_max);
     }
 
     fn toggle(&mut self, expand: bool) {
@@ -261,6 +289,7 @@ pub fn run(path: PathBuf, load_derived: bool) -> Result<()> {
         source_nodes,
         derived_nodes,
         original_external,
+        load_derived,
     );
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -307,6 +336,7 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
                 KeyCode::Char('p') => start_find(app),
+                KeyCode::Char('r') => reload(app),
                 KeyCode::Char('s') => save(app),
                 KeyCode::Char('i') | KeyCode::Tab => insert_headline(app),
                 KeyCode::Char('h') | KeyCode::Backspace => edit_headline(app),
@@ -328,6 +358,15 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
                 app.status = "unsaved changes; press q again to discard, or Ctrl-S to save".into();
             }
             KeyCode::Char('o') => open_selected(terminal, app),
+            KeyCode::Char('f') => {
+                app.body_full_width = !app.body_full_width;
+                app.status = if app.body_full_width {
+                    "body pane expanded to full width"
+                } else {
+                    "outline pane restored"
+                }
+                .into();
+            }
             KeyCode::Tab => insert_headline(app),
             KeyCode::Backspace => edit_headline(app),
             #[cfg(feature = "syntax")]
@@ -338,17 +377,23 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
                     if app.syntax_enabled { "on" } else { "off" }
                 );
             }
-            KeyCode::Down | KeyCode::Char('j') => app.move_selection(1),
-            KeyCode::Up | KeyCode::Char('k') => app.move_selection(-1),
-            KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => app.toggle(true),
-            KeyCode::Left | KeyCode::Char('h') => app.toggle(false),
+            KeyCode::Down if app.body_full_width => app.scroll_body_lines(1),
+            KeyCode::Up if app.body_full_width => app.scroll_body_lines(-1),
+            KeyCode::Down => app.move_selection(1),
+            KeyCode::Up => app.move_selection(-1),
+            KeyCode::Right if app.body_full_width => app.scroll_body_horizontal(4),
+            KeyCode::Left if app.body_full_width => app.scroll_body_horizontal(-4),
+            KeyCode::Right | KeyCode::Enter => app.toggle(true),
+            KeyCode::Left => app.toggle(false),
             KeyCode::Home => {
                 app.selected = 0;
                 app.body_scroll = 0;
+                app.body_horizontal_scroll = 0;
             }
             KeyCode::End => {
                 app.selected = app.rows().len().saturating_sub(1);
                 app.body_scroll = 0;
+                app.body_horizontal_scroll = 0;
             }
             KeyCode::PageUp => app.scroll_body(-1),
             KeyCode::PageDown => app.scroll_body(1),
@@ -490,6 +535,7 @@ fn handle_headline_input(app: &mut App, key: KeyEvent) {
                 .get_mut(&input.node)
                 .expect("edited node exists")
                 .headline = headline;
+            app.dirty_nodes.insert(input.node.clone());
             app.input = None;
             app.dirty = true;
             app.quit_armed = false;
@@ -652,6 +698,7 @@ fn move_selected(app: &mut App, direction: MoveDirection) {
         }
     };
     app.dirty = true;
+    app.dirty_nodes.insert(row.node);
     app.quit_armed = false;
     select_position(app, &target);
     app.status = "node moved (Ctrl-S to save)".into();
@@ -672,11 +719,85 @@ fn save(app: &mut App) {
     match persisted.save(&app.path) {
         Ok(()) => {
             app.dirty = false;
+            app.dirty_nodes.clear();
             app.quit_armed = false;
+            app.reload_armed = false;
             app.status = format!("saved {}", app.path.display());
         }
         Err(error) => app.status = format!("save failed: {error}"),
     }
+}
+
+fn reload(app: &mut App) {
+    if app.dirty && !app.reload_armed {
+        app.reload_armed = true;
+        app.status =
+            "unsaved changes; press Ctrl-R again to discard and reload, or Ctrl-S to save".into();
+        return;
+    }
+
+    let selected_node = app.selected_row().map(|row| row.node);
+    let mut document = match LeoDocument::open(&app.path) {
+        Ok(document) => document,
+        Err(error) => {
+            app.status = format!("reload failed: {error}");
+            return;
+        }
+    };
+    let (source_locations, source_nodes, derived_nodes, original_external, derived_status) =
+        if app.load_derived {
+            let report = load_derived_files(&mut document.outline, &app.path);
+            let status = if report.errors.is_empty() {
+                format!("loaded {} derived file(s)", report.loaded)
+            } else {
+                format!(
+                    "loaded {}; {} error(s): {}",
+                    report.loaded,
+                    report.errors.len(),
+                    report.errors.join(" | ")
+                )
+            };
+            (
+                report.locations,
+                report.node_locations,
+                report.derived_nodes,
+                OriginalExternalState {
+                    children: report.original_children,
+                    bodies: report.original_bodies,
+                },
+                status,
+            )
+        } else {
+            (
+                HashMap::new(),
+                HashMap::new(),
+                HashSet::new(),
+                OriginalExternalState::default(),
+                "derived files disabled".to_owned(),
+            )
+        };
+
+    app.document = document;
+    app.source_locations = source_locations;
+    app.source_nodes = source_nodes;
+    app.derived_nodes = derived_nodes;
+    app.original_external = original_external;
+    app.dirty = false;
+    app.dirty_nodes.clear();
+    app.quit_armed = false;
+    app.reload_armed = false;
+    app.body_scroll = 0;
+    app.body_horizontal_scroll = 0;
+    #[cfg(feature = "syntax")]
+    app.highlight_cache.clear();
+    if let Some(node) = selected_node {
+        if let Some(index) = app.rows().iter().position(|row| row.node == node) {
+            app.selected = index;
+        } else {
+            app.selected = app.selected.min(app.rows().len().saturating_sub(1));
+        }
+    }
+    app.status = format!("reloaded {} ({derived_status})", app.path.display());
 }
 
 fn restore_external_state(
@@ -768,6 +889,7 @@ fn select_position(app: &mut App, id: &PositionId) {
     if let Some(index) = app.rows().iter().position(|row| &row.position == id) {
         if index != app.selected {
             app.body_scroll = 0;
+            app.body_horizontal_scroll = 0;
         }
         app.selected = index;
     }
@@ -789,10 +911,17 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(4), Constraint::Length(1)])
         .split(frame.area());
-    let columns = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
-        .split(areas[0]);
+    let columns = if app.body_full_width {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Length(0), Constraint::Percentage(100)])
+            .split(areas[0])
+    } else {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
+            .split(areas[0])
+    };
     let rows = app.rows();
     let items: Vec<_> = rows
         .iter()
@@ -816,6 +945,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
             let input = app.input.as_ref().filter(|input| input.node == row.node);
             let headline = input.map_or(node.headline.as_str(), |input| input.value.as_str());
             let mut spans = vec![Span::raw("  ".repeat(row.depth)), Span::raw(marker)];
+            spans.push(dirty_marker(app.dirty_nodes.contains(&row.node)));
             spans.extend(headline_spans(headline));
             spans.push(Span::raw(input.map_or("", |_| "▏")));
             spans.push(Span::styled(clone, Style::default().fg(Color::DarkGray)));
@@ -835,18 +965,20 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
     let mut state = ListState::default()
         .with_selected((!rows.is_empty()).then_some(app.selected))
         .with_offset(app.outline_scroll);
-    frame.render_stateful_widget(
-        List::new(items)
-            .block(Block::default().title(" Outline ").borders(Borders::ALL))
-            .scroll_padding(outline_context)
-            .highlight_style(
-                Style::default()
-                    .bg(Color::Blue)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        columns[0],
-        &mut state,
-    );
+    if !app.body_full_width {
+        frame.render_stateful_widget(
+            List::new(items)
+                .block(Block::default().title(" Outline ").borders(Borders::ALL))
+                .scroll_padding(outline_context)
+                .highlight_style(
+                    Style::default()
+                        .bg(Color::Blue)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            columns[0],
+            &mut state,
+        );
+    }
     app.outline_scroll = state.offset();
 
     let node_block = Block::default().title(" Node ").borders(Borders::ALL);
@@ -856,15 +988,26 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
         let body = body_text(app, row);
         app.body_page_size = usize::from(node_area.height).max(1);
         app.body_scroll_max = body.lines.len().saturating_sub(app.body_page_size);
+        app.body_horizontal_scroll_max = body.width().saturating_sub(usize::from(node_area.width));
         app.body_scroll = app.body_scroll.min(app.body_scroll_max);
+        app.body_horizontal_scroll = app
+            .body_horizontal_scroll
+            .min(app.body_horizontal_scroll_max);
         frame.render_widget(
-            Paragraph::new(body).scroll((app.body_scroll.min(u16::MAX as usize) as u16, 0)),
+            Paragraph::new(body).scroll((
+                app.body_scroll.min(u16::MAX as usize) as u16,
+                app.body_horizontal_scroll.min(u16::MAX as usize) as u16,
+            )),
             node_area,
         );
     }
     frame.render_widget(
-        Paragraph::new(format!("{}   [{}]", controls(), app.status))
-            .style(Style::default().fg(Color::DarkGray)),
+        Paragraph::new(format!(
+            "{}   [{}]",
+            controls(app.body_full_width),
+            app.status
+        ))
+        .style(Style::default().fg(Color::DarkGray)),
         areas[1],
     );
     if let Some(find) = &app.find {
@@ -912,7 +1055,15 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
         );
     }
     if app.help {
-        draw_help(frame);
+        draw_help(frame, app.body_full_width);
+    }
+}
+
+fn dirty_marker(dirty: bool) -> Span<'static> {
+    if dirty {
+        Span::styled("* ", Style::default().fg(Color::LightRed))
+    } else {
+        Span::raw("  ")
     }
 }
 
@@ -979,14 +1130,20 @@ fn headline_spans(headline: &str) -> Vec<Span<'_>> {
     spans
 }
 
-fn controls() -> &'static str {
+fn controls(body_full_width: bool) -> &'static str {
+    if body_full_width {
+        #[cfg(feature = "syntax")]
+        return "? help  arrows scroll  PgUp/PgDn page  f outline  o open/edit  Ctrl-P find  Ctrl-R reload  Ctrl-S save  y syntax  q quit";
+        #[cfg(not(feature = "syntax"))]
+        return "? help  arrows scroll  PgUp/PgDn page  f outline  o open/edit  Ctrl-P find  Ctrl-R reload  Ctrl-S save  q quit";
+    }
     #[cfg(feature = "syntax")]
-    return "? help  PgUp/PgDn body  o open/edit  Ctrl-P find  Ctrl-I new  Ctrl-H rename  Ctrl-↑↓←→ move  Ctrl-S save  y syntax  q quit";
+    return "? help  arrows navigate  PgUp/PgDn body  f full width  o open/edit  Ctrl-P find  Ctrl-I new  Ctrl-H rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  y syntax  q quit";
     #[cfg(not(feature = "syntax"))]
-    "? help  PgUp/PgDn body  o open/edit  Ctrl-P find  Ctrl-I new  Ctrl-H rename  Ctrl-↑↓←→ move  Ctrl-S save  q quit"
+    "? help  arrows navigate  PgUp/PgDn body  f full width  o open/edit  Ctrl-P find  Ctrl-I new  Ctrl-H rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  q quit"
 }
 
-fn draw_help(frame: &mut ratatui::Frame<'_>) {
+fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool) {
     let width = frame.area().width.saturating_sub(4).min(72);
     let height = frame.area().height.saturating_sub(2).min(20);
     let area = Rect::new(
@@ -995,27 +1152,44 @@ fn draw_help(frame: &mut ratatui::Frame<'_>) {
         width,
         height,
     );
-    let lines = vec![
-        Line::from("↑/↓ or k/j       Select previous/next node"),
-        Line::from("←/→ or h/l       Collapse/expand node"),
-        Line::from("Enter            Expand node"),
-        Line::from("Home/End         Select first/last visible node"),
-        Line::from("PageUp/PageDown  Scroll the body pane"),
-        Line::from("Ctrl-P           Find a headline"),
-        Line::from("Ctrl-I or Tab    Insert a sibling"),
-        Line::from("Ctrl-H/Backspace Rename the headline"),
-        Line::from("Ctrl-↑↓←→        Move/promote/demote node"),
-        Line::from("Ctrl-S           Save"),
-        Line::from("o                Edit body, or open derived source"),
-        #[cfg(feature = "syntax")]
-        Line::from("y                Toggle syntax highlighting"),
+    let mut lines = if body_full_width {
+        vec![
+            Line::from("↑/↓              Scroll body vertically"),
+            Line::from("←/→              Scroll body horizontally"),
+            Line::from("PageUp/PageDown  Scroll body by one page"),
+            Line::from("f                Restore outline pane"),
+            Line::from("Ctrl-P           Find a headline"),
+            Line::from("Ctrl-R           Reload from disk"),
+            Line::from("Ctrl-S           Save"),
+            Line::from("o                Edit body, or open derived source"),
+        ]
+    } else {
+        vec![
+            Line::from("↑/↓              Select previous/next node"),
+            Line::from("←/→              Collapse/expand node"),
+            Line::from("Enter            Expand node"),
+            Line::from("Home/End         Select first/last visible node"),
+            Line::from("PageUp/PageDown  Scroll the body pane"),
+            Line::from("f                Expand body pane to full width"),
+            Line::from("Ctrl-P           Find a headline"),
+            Line::from("Ctrl-I or Tab    Insert a sibling"),
+            Line::from("Ctrl-H/Backspace Rename the headline"),
+            Line::from("Ctrl-↑↓←→        Move/promote/demote node"),
+            Line::from("Ctrl-R           Reload from disk"),
+            Line::from("Ctrl-S           Save"),
+            Line::from("o                Edit body, or open derived source"),
+        ]
+    };
+    #[cfg(feature = "syntax")]
+    lines.push(Line::from("y                Toggle syntax highlighting"));
+    lines.extend([
         Line::from("q or Esc         Quit"),
         Line::from(""),
         Line::styled(
             "Press ?, q, or Esc to close",
             Style::default().fg(Color::DarkGray),
         ),
-    ];
+    ]);
     frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(lines).block(
@@ -1240,9 +1414,11 @@ fn open_selected(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mu
                 .get_mut(&row.node)
                 .expect("edited node exists")
                 .body = body;
+            app.dirty_nodes.insert(row.node);
             #[cfg(feature = "syntax")]
             app.highlight_cache.clear();
             app.body_scroll = 0;
+            app.body_horizontal_scroll = 0;
             app.dirty = true;
             app.quit_armed = false;
             app.status = "body changed (Ctrl-S to save)".into();
@@ -1477,6 +1653,7 @@ mod tests {
             HashMap::new(),
             HashSet::new(),
             OriginalExternalState::default(),
+            false,
         )
     }
 
@@ -1498,6 +1675,61 @@ mod tests {
         assert_eq!(spans[1].style.fg, None);
         assert_eq!(spans[2].content, "src/main.rs");
         assert_eq!(spans[2].style.fg, Some(Color::Yellow));
+    }
+
+    #[test]
+    fn shows_a_colored_asterisk_only_for_dirty_nodes() {
+        let dirty = dirty_marker(true);
+        assert_eq!(dirty.content, "* ");
+        assert_eq!(dirty.style.fg, Some(Color::LightRed));
+
+        let clean = dirty_marker(false);
+        assert_eq!(clean.content, "  ");
+        assert_eq!(clean.style.fg, None);
+    }
+
+    #[test]
+    fn reload_requires_confirmation_before_discarding_changes() {
+        let mut app = editing_app();
+        app.dirty = true;
+        app.dirty_nodes.insert(NodeId("a".into()));
+
+        reload(&mut app);
+
+        assert!(app.dirty);
+        assert!(app.reload_armed);
+        assert!(app.dirty_nodes.contains(&NodeId("a".into())));
+        assert!(app.status.contains("press Ctrl-R again"));
+    }
+
+    #[test]
+    fn reload_replaces_the_document_and_clears_dirty_state() {
+        let path = env::temp_dir().join(format!(
+            "leo-cub-reload-{}-{}.leo",
+            std::process::id(),
+            fresh_node_id().0
+        ));
+        let disk_document = LeoDocument::parse(
+            r#"<leo_file><vnodes><v t="a"><vh>From disk</vh></v></vnodes><tnodes><t tx="a"></t></tnodes></leo_file>"#,
+        )
+        .unwrap();
+        disk_document.save(&path).unwrap();
+
+        let mut app = editing_app();
+        app.path.clone_from(&path);
+        app.dirty = true;
+        app.dirty_nodes.insert(NodeId("a".into()));
+        app.reload_armed = true;
+        reload(&mut app);
+
+        assert_eq!(
+            app.document.outline.nodes[&NodeId("a".into())].headline,
+            "From disk"
+        );
+        assert!(!app.dirty);
+        assert!(!app.reload_armed);
+        assert!(app.dirty_nodes.is_empty());
+        fs::remove_file(path).unwrap();
     }
 
     #[test]
@@ -1623,6 +1855,36 @@ mod tests {
         assert_eq!(app.body_scroll, 14);
         app.scroll_body(-2);
         assert_eq!(app.body_scroll, 0);
+    }
+
+    #[test]
+    fn scrolls_body_by_lines_and_stays_in_bounds() {
+        let mut app = editing_app();
+        app.body_scroll_max = 3;
+
+        app.scroll_body_lines(1);
+        assert_eq!(app.body_scroll, 1);
+        app.scroll_body_lines(10);
+        assert_eq!(app.body_scroll, 3);
+        app.scroll_body_lines(-1);
+        assert_eq!(app.body_scroll, 2);
+        app.scroll_body_lines(-10);
+        assert_eq!(app.body_scroll, 0);
+    }
+
+    #[test]
+    fn scrolls_body_horizontally_and_stays_in_bounds() {
+        let mut app = editing_app();
+        app.body_horizontal_scroll_max = 10;
+
+        app.scroll_body_horizontal(4);
+        assert_eq!(app.body_horizontal_scroll, 4);
+        app.scroll_body_horizontal(20);
+        assert_eq!(app.body_horizontal_scroll, 10);
+        app.scroll_body_horizontal(-4);
+        assert_eq!(app.body_horizontal_scroll, 6);
+        app.scroll_body_horizontal(-20);
+        assert_eq!(app.body_horizontal_scroll, 0);
     }
 
     #[test]
