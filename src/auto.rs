@@ -681,16 +681,13 @@ fn move_leading_blank_lines(outline: &mut Outline) {
         for index in 1..positions.len() {
             let current = positions[index].node.clone();
             let previous = positions[index - 1].node.clone();
-            loop {
-                let Some(first_len) = nodes[&current]
-                    .body
-                    .split_inclusive('\n')
-                    .next()
-                    .filter(|line| line.trim().is_empty())
-                    .map(str::len)
-                else {
-                    break;
-                };
+            while let Some(first_len) = nodes[&current]
+                .body
+                .split_inclusive('\n')
+                .next()
+                .filter(|line| line.trim().is_empty())
+                .map(str::len)
+            {
                 nodes.get_mut(&current).unwrap().body.drain(..first_len);
                 nodes.get_mut(&previous).unwrap().body.push('\n');
             }
