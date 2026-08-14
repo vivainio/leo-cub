@@ -74,11 +74,14 @@ The browser resolves external thin files in memory.
 
 | Key | Action |
 | --- | --- |
-| `j`, `↓` / `k`, `↑` | Select next/previous node |
-| `l`, `→`, `Enter` | Expand selected node |
-| `h`, `←` | Collapse selected node |
+| `↓` / `↑` | Select next/previous node |
+| `→`, `Enter` | Expand selected node |
+| `←` | Collapse selected node |
 | `Home` / `End` | Select the first/last visible node |
 | `PageUp` / `PageDown` | Scroll the selected node's body by one page |
+| `f` | Toggle a full-width body pane |
+| `↑` / `↓` in full-width mode | Scroll the body vertically by one line |
+| `←` / `→` in full-width mode | Scroll the body horizontally |
 | `Ctrl-P` | Find a headline incrementally; use `↑`/`↓` to cycle matches |
 | `o` | Edit the node body in `$VISUAL`/`$EDITOR`; for derived nodes, open the real source at its sentinel |
 | `y` | Toggle syntax highlighting |
@@ -92,6 +95,7 @@ The browser resolves external thin files in memory.
 | `Ctrl-H` or `Backspace` | Edit the selected headline |
 | `Ctrl-↑`, `Ctrl-↓` | Move among siblings |
 | `Ctrl-←`, `Ctrl-→` | Promote or demote the selected node |
+| `Ctrl-R` | Reload from disk; press twice to discard unsaved changes |
 | `Ctrl-S` | Save outline changes |
 | `q` or `Esc` | Quit; press twice to discard unsaved changes |
 
