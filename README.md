@@ -133,9 +133,10 @@ cub apply outline.leo operations.json --dry-run
 ```
 
 `import` creates Leo external-file nodes in `auto`, `edit`, or `clean` mode.
-Python and Rust `@auto` files are expanded transiently with Tree-sitter when
-they are loaded by `inspect` or the TUI; the generated tree is not stored in
-the `.leo` file.
+Markdown, Python, and Rust `@auto` files are expanded transiently with
+Tree-sitter when they are loaded by `inspect` or the TUI; the generated tree is
+not stored in the `.leo` file. Markdown also supports Leo's `@auto-md` and
+`@auto-markdown` headlines and `leo-noheader` markers.
 Directory imports are recursive only with `--recursive` and preserve their
 layout with `@path` nodes by default. Use `--no-paths` to put all imported
 files directly below the destination, `--parent GNX` to choose that destination,

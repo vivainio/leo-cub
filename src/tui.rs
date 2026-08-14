@@ -1038,6 +1038,7 @@ struct DerivedJob {
     position: PositionId,
     path: PathBuf,
     auto: bool,
+    directive: String,
     root: NodeId,
 }
 
@@ -1065,8 +1066,13 @@ fn load_derived_files(outline: &mut Outline, outline_path: &Path) -> LoadReport 
                     .unwrap_or_default();
                 let original_body = outline.nodes[&root_node].body.clone();
                 if job.auto {
-                    let auto = AutoFile::parse(&job.path, job.root.clone(), &source)
-                        .map_err(|error| error.to_string())?;
+                    let auto = AutoFile::parse_with_directive(
+                        &job.path,
+                        job.root.clone(),
+                        &source,
+                        Some(&job.directive),
+                    )
+                    .map_err(|error| error.to_string())?;
                     if !auto.merge_into(outline, &job.position) {
                         return Err("auto root position disappeared".to_owned());
                     }
@@ -1298,7 +1304,7 @@ fn derived_jobs(outline: &Outline, outline_path: &Path) -> Vec<DerivedJob> {
             {
                 paths.push(path);
             }
-            if let Some((auto, filename)) = derived_filename(&node.headline) {
+            if let Some((auto, directive, filename)) = derived_filename(&node.headline) {
                 let mut path = base.to_path_buf();
                 for component in inherited_paths {
                     path.push(component);
@@ -1308,6 +1314,7 @@ fn derived_jobs(outline: &Outline, outline_path: &Path) -> Vec<DerivedJob> {
                     position: PositionId(position_id.clone()),
                     path,
                     auto,
+                    directive: directive.to_owned(),
                     root: position.node.clone(),
                 });
             }
@@ -1327,23 +1334,32 @@ fn derived_jobs(outline: &Outline, outline_path: &Path) -> Vec<DerivedJob> {
     jobs
 }
 
-fn derived_filename(headline: &str) -> Option<(bool, &str)> {
+fn derived_filename(headline: &str) -> Option<(bool, &str, &str)> {
     let (directive, filename) = headline.trim().split_once(char::is_whitespace)?;
-    matches!(directive, "@file" | "@thin" | "@file-thin" | "@auto")
-        .then(|| (directive == "@auto", strip_path_cruft(filename)))
-        .filter(|(_, filename)| !filename.is_empty())
+    matches!(
+        directive,
+        "@file" | "@thin" | "@file-thin" | "@auto" | "@auto-md" | "@auto-markdown"
+    )
+    .then(|| {
+        (
+            directive.starts_with("@auto"),
+            directive,
+            strip_path_cruft(filename),
+        )
+    })
+    .filter(|(_, _, filename)| !filename.is_empty())
 }
 
 #[cfg(test)]
 fn thin_filename(headline: &str) -> Option<&str> {
-    derived_filename(headline).and_then(|(auto, filename)| (!auto).then_some(filename))
+    derived_filename(headline).and_then(|(auto, _, filename)| (!auto).then_some(filename))
 }
 
 fn external_filename(headline: &str) -> Option<&str> {
     let (directive, filename) = headline.trim().split_once(char::is_whitespace)?;
     matches!(
         directive,
-        "@file" | "@thin" | "@file-thin" | "@clean" | "@auto"
+        "@file" | "@thin" | "@file-thin" | "@clean" | "@auto" | "@auto-md" | "@auto-markdown"
     )
     .then(|| strip_path_cruft(filename))
     .filter(|filename| !filename.is_empty())

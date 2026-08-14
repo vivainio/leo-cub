@@ -27,6 +27,7 @@ pub struct AutoFile {
 
 #[derive(Clone, Copy)]
 enum Flavor {
+    Markdown,
     Python,
     Rust,
 }
@@ -43,14 +44,49 @@ struct Block {
     children: Vec<Block>,
 }
 
+#[derive(Debug)]
+struct MarkdownEvent {
+    level: usize,
+    name: String,
+    start: usize,
+    body_start: usize,
+    noheader: bool,
+}
+
+#[derive(Debug)]
+struct MarkdownBlock {
+    level: usize,
+    name: String,
+    body: String,
+    line: usize,
+    children: Vec<usize>,
+}
+
 impl AutoFile {
     pub fn parse(path: &Path, root: NodeId, source: &str) -> Result<Self, AutoError> {
-        let (flavor, language, language_name) = language_for(path)?;
+        Self::parse_with_directive(path, root, source, None)
+    }
+
+    pub fn parse_with_directive(
+        path: &Path,
+        root: NodeId,
+        source: &str,
+        directive: Option<&str>,
+    ) -> Result<Self, AutoError> {
+        let (flavor, language, language_name) =
+            if matches!(directive, Some("@auto-md" | "@auto-markdown")) {
+                (Flavor::Markdown, tree_sitter_md::LANGUAGE.into(), "md")
+            } else {
+                language_for(path)?
+            };
         let mut parser = Parser::new();
         parser
             .set_language(&language)
             .map_err(|_| AutoError::Grammar(language_name))?;
         let tree = parser.parse(source, None).ok_or(AutoError::Parse)?;
+        if matches!(flavor, Flavor::Markdown) {
+            return parse_markdown(tree.root_node(), root, source);
+        }
         let line_starts = line_starts(source);
         let line_count = line_starts.len();
         let mut blocks = find_blocks(tree.root_node(), flavor, source, line_count);
@@ -135,6 +171,304 @@ impl AutoFile {
     }
 }
 
+fn parse_markdown(
+    syntax_root: TsNode<'_>,
+    root: NodeId,
+    source: &str,
+) -> Result<AutoFile, AutoError> {
+    let starts = line_starts(source);
+    let mut events = Vec::new();
+    collect_markdown_events(syntax_root, source, &starts, &mut events);
+    collect_leo_markdown_extensions(source, &mut events);
+    events.sort_by_key(|event| event.start);
+    events.dedup_by_key(|event| event.start);
+
+    let mut blocks = Vec::<MarkdownBlock>::new();
+    let mut roots = Vec::new();
+    let mut stack = Vec::<usize>::new();
+    if !source.is_empty() && events.first().is_none_or(|event| event.start > 0) {
+        let end = events.first().map_or(starts.len(), |event| event.start);
+        blocks.push(MarkdownBlock {
+            level: 1,
+            name: "!Declarations".to_owned(),
+            body: slice_lines(source, &starts, 0, end).to_owned(),
+            line: 1,
+            children: vec![],
+        });
+        roots.push(0);
+    }
+    for (event_index, event) in events.iter().enumerate() {
+        let body_end = events
+            .get(event_index + 1)
+            .map_or(starts.len(), |next| next.start);
+        stack.truncate(event.level.saturating_sub(1));
+        while stack.len() < event.level.saturating_sub(1) {
+            let level = stack.len() + 1;
+            let placeholder = blocks.len();
+            blocks.push(MarkdownBlock {
+                level,
+                name: format!("placeholder level {level}"),
+                body: String::new(),
+                line: event.start + 1,
+                children: vec![],
+            });
+            attach_markdown_block(&mut blocks, &mut roots, &stack, placeholder);
+            stack.push(placeholder);
+        }
+        let index = blocks.len();
+        let mut body = if event.noheader {
+            String::from("@noheader\n")
+        } else {
+            String::new()
+        };
+        body.push_str(slice_lines(source, &starts, event.body_start, body_end));
+        blocks.push(MarkdownBlock {
+            level: event.level,
+            name: event.name.clone(),
+            body,
+            line: event.start + 1,
+            children: vec![],
+        });
+        attach_markdown_block(&mut blocks, &mut roots, &stack, index);
+        stack.push(index);
+    }
+
+    let mut outline = Outline::default();
+    let mut locations = HashMap::new();
+    let positions = roots
+        .into_iter()
+        .map(|index| markdown_position(index, &blocks, &root, &mut outline.nodes, &mut locations))
+        .collect();
+    outline.nodes.insert(
+        root.clone(),
+        Node {
+            id: root.clone(),
+            headline: String::new(),
+            body: "@language md\n@tabwidth -4\n".to_owned(),
+            vnode_attributes: HashMap::new(),
+            tnode_attributes: HashMap::new(),
+        },
+    );
+    outline.roots.push(Position {
+        node: root.clone(),
+        children: positions,
+    });
+    Ok(AutoFile {
+        outline,
+        root,
+        locations,
+    })
+}
+
+/// Supplement CommonMark's syntax tree with Leo-specific Markdown rules.
+/// Leo accepts `#Heading` without a separating space and intentionally treats
+/// only backtick fences as code fences.
+fn collect_leo_markdown_extensions(source: &str, events: &mut Vec<MarkdownEvent>) {
+    let lines = source.split_inclusive('\n').collect::<Vec<_>>();
+    let mut in_backtick_fence = false;
+    let mut index = 0;
+    while index < lines.len() {
+        let line = lines[index];
+        if line.starts_with("```") {
+            in_backtick_fence = !in_backtick_fence;
+            index += 1;
+            continue;
+        }
+        if in_backtick_fence {
+            index += 1;
+            continue;
+        }
+        if let Some((level, name)) = noheader_marker(line) {
+            events.push(MarkdownEvent {
+                level,
+                name,
+                start: index,
+                body_start: index + 1,
+                noheader: true,
+            });
+        } else {
+            let hashes = line.bytes().take_while(|byte| *byte == b'#').count();
+            let name = line[hashes..].trim();
+            if line.ends_with('\n') && hashes > 0 && !name.is_empty() {
+                events.push(MarkdownEvent {
+                    level: hashes,
+                    name: name.to_owned(),
+                    start: index,
+                    body_start: index + 1,
+                    noheader: false,
+                });
+            } else if index + 1 < lines.len() {
+                let underline = lines[index + 1].trim();
+                if !line.trim().is_empty()
+                    && underline.len() >= 4
+                    && (underline.bytes().all(|byte| byte == b'=')
+                        || underline.bytes().all(|byte| byte == b'-'))
+                {
+                    events.push(MarkdownEvent {
+                        level: usize::from(underline.starts_with('-')) + 1,
+                        name: line.trim().to_owned(),
+                        start: index,
+                        body_start: index + 2,
+                        noheader: false,
+                    });
+                    index += 1;
+                }
+            }
+        }
+        index += 1;
+    }
+}
+
+fn attach_markdown_block(
+    blocks: &mut [MarkdownBlock],
+    roots: &mut Vec<usize>,
+    stack: &[usize],
+    index: usize,
+) {
+    if let Some(parent) = stack.last() {
+        blocks[*parent].children.push(index);
+    } else {
+        roots.push(index);
+    }
+}
+
+fn markdown_position(
+    index: usize,
+    blocks: &[MarkdownBlock],
+    root: &NodeId,
+    nodes: &mut HashMap<NodeId, Node>,
+    locations: &mut HashMap<NodeId, usize>,
+) -> Position {
+    let block = &blocks[index];
+    let id = NodeId(format!(
+        "{}::auto-md:{}:{}",
+        root.0, block.line, block.level
+    ));
+    let children = block
+        .children
+        .iter()
+        .map(|child| markdown_position(*child, blocks, root, nodes, locations))
+        .collect();
+    nodes.insert(
+        id.clone(),
+        Node {
+            id: id.clone(),
+            headline: block.name.clone(),
+            body: block.body.clone(),
+            vnode_attributes: HashMap::new(),
+            tnode_attributes: HashMap::new(),
+        },
+    );
+    locations.insert(id.clone(), block.line);
+    Position { node: id, children }
+}
+
+fn collect_markdown_events(
+    node: TsNode<'_>,
+    source: &str,
+    starts: &[usize],
+    events: &mut Vec<MarkdownEvent>,
+) {
+    if node.kind() == "fenced_code_block" || node.start_position().column > 0 {
+        return;
+    }
+    match node.kind() {
+        "atx_heading" => {
+            let row = node.start_position().row;
+            let line = slice_lines(source, starts, row, row + 1);
+            if line.ends_with('\n') {
+                let hashes = line.bytes().take_while(|byte| *byte == b'#').count();
+                let name = line[hashes..].trim().to_owned();
+                if hashes > 0 && !name.is_empty() {
+                    events.push(MarkdownEvent {
+                        level: hashes,
+                        name,
+                        start: row,
+                        body_start: node.end_position().row,
+                        noheader: false,
+                    });
+                }
+            }
+            return;
+        }
+        "setext_heading" => {
+            let row = node.start_position().row;
+            let underline_row = node.end_position().row.saturating_sub(1);
+            let title = slice_lines(source, starts, row, row + 1).trim();
+            let underline = slice_lines(source, starts, underline_row, underline_row + 1).trim();
+            if underline.len() >= 4
+                && !title.is_empty()
+                && underline.bytes().all(|byte| matches!(byte, b'=' | b'-'))
+            {
+                events.push(MarkdownEvent {
+                    level: usize::from(underline.starts_with('-')) + 1,
+                    name: title.to_owned(),
+                    start: row,
+                    body_start: underline_row + 1,
+                    noheader: false,
+                });
+            }
+            return;
+        }
+        "html_block" => {
+            let row = node.start_position().row;
+            let text = slice_lines(source, starts, row, node.end_position().row);
+            if let Some((level, name)) = noheader_marker(text) {
+                events.push(MarkdownEvent {
+                    level,
+                    name,
+                    start: row,
+                    body_start: node.end_position().row,
+                    noheader: true,
+                });
+            }
+            return;
+        }
+        _ => {}
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_markdown_events(child, source, starts, events);
+    }
+}
+
+fn noheader_marker(text: &str) -> Option<(usize, String)> {
+    let text = text.trim();
+    let inner = text.strip_prefix("<!--")?.strip_suffix("-->")?.trim();
+    let rest = inner.strip_prefix("leo-noheader level=")?;
+    let (level, headline) = rest.split_once(" headline=")?;
+    Some((level.parse().ok()?, percent_decode(headline.trim())))
+}
+
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut result = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && index + 2 < bytes.len()
+            && let (Some(high), Some(low)) =
+                (hex_value(bytes[index + 1]), hex_value(bytes[index + 2]))
+        {
+            result.push(high * 16 + low);
+            index += 3;
+        } else {
+            result.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8_lossy(&result).into_owned()
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
 fn root_preamble_end(flavor: Flavor, source: &str, blocks: &[Block]) -> usize {
     let Some(first) = blocks.first() else {
         return 0;
@@ -188,16 +522,18 @@ fn move_leading_blank_lines(outline: &mut Outline) {
 }
 
 fn language_for(path: &Path) -> Result<(Flavor, Language, &'static str), AutoError> {
-    match path
+    let extension = path
         .extension()
         .and_then(|s| s.to_str())
         .unwrap_or_default()
-    {
+        .to_ascii_lowercase();
+    match extension.as_str() {
         "py" | "pyw" => Ok((
             Flavor::Python,
             tree_sitter_python::LANGUAGE.into(),
             "python",
         )),
+        "md" | "rmd" => Ok((Flavor::Markdown, tree_sitter_md::LANGUAGE.into(), "md")),
         "rs" => Ok((Flavor::Rust, tree_sitter_rust::LANGUAGE.into(), "rust")),
         extension => Err(AutoError::Unsupported(extension.to_owned())),
     }
@@ -471,6 +807,87 @@ fn referenced_nodes(positions: &[Position]) -> std::collections::HashSet<NodeId>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rows(auto: &AutoFile) -> Vec<(usize, String, String)> {
+        fn visit(
+            outline: &Outline,
+            positions: &[Position],
+            depth: usize,
+            rows: &mut Vec<(usize, String, String)>,
+        ) {
+            for position in positions {
+                let node = &outline.nodes[&position.node];
+                rows.push((depth, node.headline.clone(), node.body.clone()));
+                visit(outline, &position.children, depth + 1, rows);
+            }
+        }
+        let mut result = Vec::new();
+        visit(&auto.outline, &auto.outline.roots, 0, &mut result);
+        result
+    }
+
+    #[test]
+    fn markdown_matches_leo_heading_hierarchy_and_bodies() {
+        let source = "Decl line.\n# Header\n\nAfter header text\n\n## Subheader\n\nNot an underline\n\n----------------\n\nAfter subheader text\n\n# Last header: no text\n";
+        let auto = AutoFile::parse(Path::new("x.md"), NodeId::from("root"), source).unwrap();
+        assert_eq!(
+            rows(&auto),
+            vec![
+                (0, String::new(), "@language md\n@tabwidth -4\n".into()),
+                (1, "!Declarations".into(), "Decl line.\n".into()),
+                (1, "Header".into(), "\nAfter header text\n\n".into()),
+                (
+                    2,
+                    "Subheader".into(),
+                    "\nNot an underline\n\n----------------\n\nAfter subheader text\n\n".into(),
+                ),
+                (1, "Last header: no text".into(), String::new()),
+            ]
+        );
+    }
+
+    #[test]
+    fn markdown_matches_leo_fences_setext_and_noheader_nodes() {
+        let source = "Top\n====\n\n```python\n# not a heading\n```\n<!-- leo-noheader level=2 headline=Hidden%20child -->\nbody\n#### Deep\ntail\n";
+        let auto = AutoFile::parse(Path::new("x.Rmd"), NodeId::from("root"), source).unwrap();
+        assert_eq!(
+            rows(&auto),
+            vec![
+                (0, String::new(), "@language md\n@tabwidth -4\n".into()),
+                (
+                    1,
+                    "Top".into(),
+                    "\n```python\n# not a heading\n```\n".into()
+                ),
+                (2, "Hidden child".into(), "@noheader\nbody\n".into()),
+                (3, "placeholder level 3".into(), String::new()),
+                (4, "Deep".into(), "tail\n".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn markdown_matches_leo_non_commonmark_headings_and_plain_documents() {
+        let source = "#Header\nbody\n~~~\n#Heading inside tilde fence\n~~~\n";
+        let auto = AutoFile::parse(Path::new("x.md"), NodeId::from("root"), source).unwrap();
+        let result = rows(&auto);
+        assert_eq!(result[1].1, "Header");
+        assert_eq!(result[2].1, "Heading inside tilde fence");
+
+        let plain = AutoFile::parse(
+            Path::new("x.md"),
+            NodeId::from("plain"),
+            "just text\nmore text\n",
+        )
+        .unwrap();
+        assert_eq!(
+            rows(&plain),
+            vec![
+                (0, String::new(), "@language md\n@tabwidth -4\n".into()),
+                (1, "!Declarations".into(), "just text\nmore text\n".into()),
+            ]
+        );
+    }
 
     #[test]
     fn expands_nested_python_blocks() {
