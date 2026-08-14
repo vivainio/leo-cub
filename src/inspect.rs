@@ -75,19 +75,25 @@ pub fn load_matching_external_files(
                                 .any(|line| raw_line_might_match(line, pattern))
                         }),
                         ExternalFilter::Gnx(gnx) => {
-                            job.directive == "@auto" || source.contains(gnx)
+                            job.directive.starts_with("@auto") || source.contains(gnx)
                         }
                         ExternalFilter::File(_) => true,
                     };
                     if content_matches {
-                        if job.directive == "@auto" {
+                        if job.directive.starts_with("@auto") {
                             Some(Loaded::Auto(
-                                AutoFile::parse(&job.path, job.root.clone(), &source).map_err(
-                                    |error| InspectError::Auto {
+                                AutoFile::parse_with_directive(
+                                    &job.path,
+                                    job.root.clone(),
+                                    &source,
+                                    Some(&job.directive),
+                                )
+                                .map_err(|error| {
+                                    InspectError::Auto {
                                         path: job.path.clone(),
                                         message: error.to_string(),
-                                    },
-                                )?,
+                                    }
+                                })?,
                             ))
                         } else {
                             Some(Loaded::Derived(DerivedFile::parse(&source).map_err(
@@ -477,7 +483,7 @@ fn external_file(headline: &str) -> Option<(&str, &str)> {
     let (directive, filename) = headline.trim().split_once(char::is_whitespace)?;
     matches!(
         directive,
-        "@file" | "@thin" | "@file-thin" | "@clean" | "@auto"
+        "@file" | "@thin" | "@file-thin" | "@clean" | "@auto" | "@auto-md" | "@auto-markdown"
     )
     .then(|| (directive, strip_path_cruft(filename)))
     .filter(|(_, filename)| !filename.is_empty())
@@ -729,6 +735,50 @@ mod tests {
         assert_eq!(
             outline.nodes[&class.children[0].node].headline,
             "Target.needle"
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn recognizes_and_expands_auto_md_directives() {
+        let root = NodeId("md-root".into());
+        let mut outline = Outline {
+            nodes: [(
+                root.clone(),
+                Node {
+                    id: root.clone(),
+                    headline: "@auto-md notes.txt".into(),
+                    body: String::new(),
+                    vnode_attributes: HashMap::new(),
+                    tnode_attributes: HashMap::new(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            roots: vec![Position {
+                node: root,
+                children: vec![],
+            }],
+        };
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("cub-auto-md-{unique}"));
+        fs::create_dir(&directory).unwrap();
+        fs::write(directory.join("notes.txt"), "# Notes\nbody\n").unwrap();
+        assert_eq!(
+            load_matching_external_files(
+                &mut outline,
+                &directory.join("outline.leo"),
+                ExternalFilter::File("notes.txt"),
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            outline.nodes[&outline.roots[0].children[0].node].headline,
+            "Notes"
         );
         fs::remove_dir_all(directory).unwrap();
     }

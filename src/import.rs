@@ -81,7 +81,10 @@ pub fn import_files(
         return Err(ImportError::ParentNotFound(parent.0.clone()));
     }
 
-    let outline_dir = outline_path.parent().unwrap_or_else(|| Path::new("."));
+    let outline_dir = outline_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
     let mut specs = Vec::new();
     for input in inputs {
         let metadata = fs::metadata(input).map_err(|source| ImportError::Io {
