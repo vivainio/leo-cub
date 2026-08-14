@@ -7,7 +7,7 @@ use ratatui::{
 use syntect::{
     easy::HighlightLines,
     highlighting::{FontStyle, ThemeSet},
-    parsing::{SyntaxReference, SyntaxSet},
+    parsing::{SyntaxDefinition, SyntaxReference, SyntaxSet},
 };
 
 pub struct SyntaxHighlighter {
@@ -17,8 +17,17 @@ pub struct SyntaxHighlighter {
 
 impl SyntaxHighlighter {
     pub fn new() -> Self {
+        let mut syntaxes = SyntaxSet::load_defaults_newlines().into_builder();
+        syntaxes.add(
+            SyntaxDefinition::load_from_str(
+                include_str!("../syntaxes/reStructuredText.sublime-syntax"),
+                true,
+                Some("reStructuredText"),
+            )
+            .expect("bundled reStructuredText syntax must be valid"),
+        );
         Self {
-            syntaxes: SyntaxSet::load_defaults_newlines(),
+            syntaxes: syntaxes.build(),
             themes: ThemeSet::load_defaults(),
         }
     }
@@ -139,6 +148,18 @@ mod tests {
         ] {
             let syntax = highlighter.syntax_for("", Some(Path::new(path)), Some(language));
             assert_ne!(syntax.name, "Plain Text", "{path} / {language}");
+        }
+    }
+
+    #[test]
+    fn bundled_syntaxes_cover_restructured_text() {
+        let highlighter = SyntaxHighlighter::new();
+        for (path, language) in [("x.rst", "rst"), ("x.rest", "restructuredtext")] {
+            let by_extension = highlighter.syntax_for("", Some(Path::new(path)), None);
+            assert_eq!(by_extension.name, "reStructuredText", "{path}");
+
+            let by_language = highlighter.syntax_for("", None, Some(language));
+            assert_eq!(by_language.name, "reStructuredText", "{language}");
         }
     }
 }
