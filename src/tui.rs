@@ -1012,6 +1012,9 @@ fn syntax_context(outline: &Outline, position: &PositionId) -> (Option<String>, 
             break;
         };
         let node = &outline.nodes[&position.node];
+        if is_rst_headline(&node.headline) {
+            language = Some("rst".to_owned());
+        }
         if let Some(value) = crate::syntax::language_directive(&node.body) {
             language = Some(value.to_owned());
         }
@@ -1021,6 +1024,13 @@ fn syntax_context(outline: &Outline, position: &PositionId) -> (Option<String>, 
     }
 
     (language, source_path)
+}
+
+#[cfg(feature = "syntax")]
+fn is_rst_headline(headline: &str) -> bool {
+    headline
+        .strip_prefix("@rst")
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
 }
 
 #[derive(Default)]
@@ -1442,6 +1452,21 @@ mod tests {
         let (language, path) = syntax_context(&document.outline, &PositionId("0/0".into()));
         assert_eq!(language.as_deref(), Some("rust"));
         assert_eq!(path.as_deref(), Some(Path::new("src/main.rs")));
+    }
+
+    #[test]
+    fn inherits_restructured_text_from_rst_ancestor() {
+        let document = LeoDocument::parse(
+            r#"<leo_file><vnodes><v t="a"><vh>@rst foo.html</vh><v t="b"><vh>child</vh></v></v></vnodes><tnodes><t tx="a"></t><t tx="b">**strong**</t></tnodes></leo_file>"#,
+        )
+        .unwrap();
+        let (language, path) = syntax_context(&document.outline, &PositionId("0/0".into()));
+        assert_eq!(language.as_deref(), Some("rst"));
+        assert_eq!(path, None);
+
+        assert!(is_rst_headline("@rst foo.html"));
+        assert!(is_rst_headline("@rst"));
+        assert!(!is_rst_headline("@rst3 foo.html"));
     }
 
     #[test]
