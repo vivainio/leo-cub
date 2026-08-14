@@ -75,6 +75,7 @@ struct App {
 }
 
 impl App {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         document: LeoDocument,
         path: PathBuf,
