@@ -88,6 +88,7 @@ reloading clears the markers.
 | Key | Action |
 | --- | --- |
 | `↓` / `↑` | Select next/previous node |
+| `Shift-↓` / `Shift-↑` | Extend or shrink a contiguous multi-node selection |
 | `→`, `Enter` | Expand selected node |
 | `←` | Collapse selected node |
 | `Home` / `End` | Select the first/last visible node |
@@ -107,8 +108,12 @@ reloading clears the markers.
 | --- | --- |
 | `Ctrl-I` or `Tab` | Insert a new sibling and enter headline editing |
 | `Ctrl-H` or `Backspace` | Edit the selected headline |
-| `Ctrl-↑`, `Ctrl-↓` | Move among siblings |
-| `Ctrl-←`, `Ctrl-→` | Promote or demote the selected node |
+| `c` | Copy the selected tree |
+| `x` | Cut the selected tree |
+| `v` | Paste an independent copy with fresh node identities |
+| `Shift-V` | Paste as clones, retaining node identities |
+| `Ctrl-↑`, `Ctrl-↓` | Move the selected node or multi-selection among siblings |
+| `Ctrl-←`, `Ctrl-→` | Promote or demote the selected node or multi-selection |
 | `Ctrl-R` | Reload from disk; press twice to discard unsaved changes |
 | `Ctrl-S` | Save outline changes |
 | `q` or `Esc` | Quit; press twice to discard unsaved changes |

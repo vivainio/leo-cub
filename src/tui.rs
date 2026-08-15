@@ -6,8 +6,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     process::Command,
-    time::Duration,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::Result;
@@ -45,6 +44,7 @@ struct App {
     path: PathBuf,
     expanded: HashSet<PositionId>,
     selected: usize,
+    selection_anchor: Option<usize>,
     outline_scroll: usize,
     body_scroll: usize,
     body_page_size: usize,
@@ -55,12 +55,14 @@ struct App {
     outline_full_width: bool,
     help: bool,
     status: String,
+    flash: Option<(String, Instant)>,
     input: Option<HeadlineInput>,
     find: Option<FindInput>,
     dirty: bool,
     dirty_nodes: HashSet<NodeId>,
     quit_armed: bool,
     reload_armed: bool,
+    clipboard: Option<ClipboardTree>,
     load_derived: bool,
     source_locations: HashMap<PositionId, SourceLocation>,
     source_nodes: HashMap<NodeId, SourceLocation>,
@@ -98,6 +100,7 @@ impl App {
             path,
             expanded,
             selected: 0,
+            selection_anchor: None,
             outline_scroll: 0,
             body_scroll: 0,
             body_page_size: 1,
@@ -108,12 +111,14 @@ impl App {
             outline_full_width: false,
             help: false,
             status,
+            flash: None,
             input: None,
             find: None,
             dirty: false,
             dirty_nodes: HashSet::new(),
             quit_armed: false,
             reload_armed: false,
+            clipboard: None,
             load_derived,
             source_locations,
             source_nodes,
@@ -166,6 +171,11 @@ impl App {
     }
 
     fn move_selection(&mut self, delta: isize) {
+        self.selection_anchor = None;
+        self.extend_selection(delta);
+    }
+
+    fn extend_selection(&mut self, delta: isize) {
         let len = self.rows().len();
         if len == 0 {
             self.selected = 0;
@@ -218,6 +228,14 @@ impl App {
         self.rows().get(self.selected).cloned()
     }
 
+    fn selected_rows(&self) -> Vec<Row> {
+        let rows = self.rows();
+        let anchor = self.selection_anchor.unwrap_or(self.selected);
+        let start = anchor.min(self.selected);
+        let end = anchor.max(self.selected).min(rows.len().saturating_sub(1));
+        rows.get(start..=end).unwrap_or_default().to_vec()
+    }
+
     fn editable(&mut self, row: &Row) -> bool {
         if self.derived_nodes.contains(&row.node) {
             self.status = "derived descendants are read-only; press o to edit the source".into();
@@ -242,6 +260,12 @@ struct FindInput {
     matches: Vec<PositionId>,
     active: usize,
     original: Option<PositionId>,
+}
+
+#[derive(Clone)]
+struct ClipboardTree {
+    roots: Vec<Position>,
+    nodes: HashMap<NodeId, leo::Node>,
 }
 
 #[derive(Clone, Copy)]
@@ -354,6 +378,18 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
             continue;
         }
         match key.code {
+            KeyCode::Char('c') if key.modifiers.is_empty() => copy_selected(app),
+            KeyCode::Char('x') if key.modifiers.is_empty() => cut_selected(app),
+            KeyCode::Char('v') if key.modifiers.is_empty() => paste_tree(app, false),
+            KeyCode::Char('V') if key.modifiers == KeyModifiers::SHIFT => paste_tree(app, true),
+            KeyCode::Up if key.modifiers == KeyModifiers::SHIFT => {
+                app.selection_anchor.get_or_insert(app.selected);
+                app.extend_selection(-1);
+            }
+            KeyCode::Down if key.modifiers == KeyModifiers::SHIFT => {
+                app.selection_anchor.get_or_insert(app.selected);
+                app.extend_selection(1);
+            }
             KeyCode::Char('?') => app.help = true,
             KeyCode::Char('q') | KeyCode::Esc => {
                 if !app.dirty || app.quit_armed {
@@ -399,14 +435,22 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
             KeyCode::Up => app.move_selection(-1),
             KeyCode::Right if app.body_full_width => app.scroll_body_horizontal(4),
             KeyCode::Left if app.body_full_width => app.scroll_body_horizontal(-4),
-            KeyCode::Right | KeyCode::Enter => app.toggle(true),
-            KeyCode::Left => app.toggle(false),
+            KeyCode::Right | KeyCode::Enter => {
+                app.selection_anchor = None;
+                app.toggle(true);
+            }
+            KeyCode::Left => {
+                app.selection_anchor = None;
+                app.toggle(false);
+            }
             KeyCode::Home => {
+                app.selection_anchor = None;
                 app.selected = 0;
                 app.body_scroll = 0;
                 app.body_horizontal_scroll = 0;
             }
             KeyCode::End => {
+                app.selection_anchor = None;
                 app.selected = app.rows().len().saturating_sub(1);
                 app.body_scroll = 0;
                 app.body_horizontal_scroll = 0;
@@ -711,7 +755,194 @@ fn insert_headline(app: &mut App) {
     app.status = "new headline: type a name, Enter accepts, Esc cancels".into();
 }
 
+fn copy_selected(app: &mut App) {
+    let rows = selected_tree_roots(app);
+    if rows.is_empty() {
+        return;
+    }
+    let roots: Vec<_> = rows
+        .iter()
+        .filter_map(|row| app.document.outline.position(&row.position).cloned())
+        .collect();
+    let ids = referenced_nodes(&roots);
+    let nodes = ids
+        .into_iter()
+        .filter_map(|id| {
+            app.document
+                .outline
+                .nodes
+                .get(&id)
+                .cloned()
+                .map(|node| (id, node))
+        })
+        .collect();
+    let count = roots.len();
+    app.clipboard = Some(ClipboardTree { roots, nodes });
+    app.status = format!(
+        "{count} tree{} copied; v pastes a copy, Shift-V pastes clones",
+        if count == 1 { "" } else { "s" }
+    );
+}
+
+fn cut_selected(app: &mut App) {
+    let mut rows = selected_tree_roots(app);
+    if rows.is_empty() {
+        return;
+    }
+    if rows.iter().any(|row| {
+        app.derived_nodes.contains(&row.node) || position_contains_derived(app, &row.position)
+    }) {
+        app.status = "external derived subtrees cannot be cut".into();
+        return;
+    }
+    copy_selected(app);
+    rows.sort_by_key(|row| path_indices(&row.position));
+    for row in rows.iter().rev() {
+        remove_position(&mut app.document.outline, &row.position);
+    }
+    let referenced = referenced_nodes(&app.document.outline.roots);
+    app.document
+        .outline
+        .nodes
+        .retain(|id, _| referenced.contains(id));
+    app.dirty = true;
+    app.quit_armed = false;
+    app.selected = app.selected.min(app.rows().len().saturating_sub(1));
+    app.selection_anchor = None;
+    app.status = format!(
+        "{} tree{} cut; v pastes copies, Shift-V retains identities (Ctrl-S to save)",
+        rows.len(),
+        if rows.len() == 1 { "" } else { "s" }
+    );
+}
+
+fn paste_tree(app: &mut App, as_clone: bool) {
+    let Some(clipboard) = app.clipboard.clone() else {
+        app.status = "tree clipboard is empty".into();
+        return;
+    };
+    let (parent, insert_at) = if let Some(row) = app.selected_row() {
+        if !app.editable(&row) || position_contains_derived(app, &row.position) {
+            app.status = "cannot paste beside an external derived subtree".into();
+            return;
+        }
+        let Some((parent, index)) = split_position(&row.position) else {
+            return;
+        };
+        (parent, index + 1)
+    } else {
+        (None, 0)
+    };
+    if as_clone
+        && parent.as_ref().is_some_and(|parent| {
+            app.document
+                .outline
+                .position(parent)
+                .is_some_and(|position| clipboard.nodes.contains_key(&position.node))
+        })
+    {
+        app.status = "cannot paste a clone inside its own tree".into();
+        return;
+    }
+    if as_clone {
+        for (id, node) in &clipboard.nodes {
+            app.document
+                .outline
+                .nodes
+                .entry(id.clone())
+                .or_insert_with(|| node.clone());
+        }
+        let Some(siblings) = children_mut(&mut app.document.outline, parent.as_ref()) else {
+            return;
+        };
+        let count = clipboard.roots.len();
+        siblings.splice(insert_at..insert_at, clipboard.roots);
+        let target = join_position(parent.as_ref(), insert_at);
+        app.dirty = true;
+        app.quit_armed = false;
+        select_position(app, &target);
+        app.status = format!("{count} tree(s) pasted as clones (Ctrl-S to save)");
+        app.flash = Some((format!("PASTED {count} TREE(S) AS CLONES"), Instant::now()));
+        return;
+    }
+    let mut ids = HashMap::new();
+    for old in clipboard.nodes.keys() {
+        let mut id = fresh_node_id();
+        while app.document.outline.nodes.contains_key(&id) || ids.values().any(|v| v == &id) {
+            id = fresh_node_id();
+        }
+        ids.insert(old.clone(), id);
+    }
+    let remap = |position: &Position, remap: &HashMap<NodeId, NodeId>| -> Position {
+        fn visit(position: &Position, remap: &HashMap<NodeId, NodeId>) -> Position {
+            Position {
+                node: remap[&position.node].clone(),
+                children: position
+                    .children
+                    .iter()
+                    .map(|child| visit(child, remap))
+                    .collect(),
+            }
+        }
+        visit(position, remap)
+    };
+    let pasted: Vec<_> = clipboard
+        .roots
+        .iter()
+        .map(|root| remap(root, &ids))
+        .collect();
+    for (old, mut node) in clipboard.nodes {
+        let id = ids[&old].clone();
+        node.id.clone_from(&id);
+        app.document.outline.nodes.insert(id, node);
+    }
+    let Some(siblings) = children_mut(&mut app.document.outline, parent.as_ref()) else {
+        return;
+    };
+    let count = pasted.len();
+    siblings.splice(insert_at..insert_at, pasted);
+    let target = join_position(parent.as_ref(), insert_at);
+    app.dirty = true;
+    app.quit_armed = false;
+    select_position(app, &target);
+    app.status = format!("{count} tree(s) pasted (Ctrl-S to save)");
+    app.flash = Some((
+        format!("PASTED {count} INDEPENDENT TREE(S)"),
+        Instant::now(),
+    ));
+}
+
+fn selected_tree_roots(app: &App) -> Vec<Row> {
+    let rows = app.selected_rows();
+    let selected: HashSet<_> = rows.iter().map(|row| row.position.0.clone()).collect();
+    rows.into_iter()
+        .filter(|row| {
+            let mut path = row.position.0.as_str();
+            while let Some((parent, _)) = path.rsplit_once('/') {
+                if selected.contains(parent) {
+                    return false;
+                }
+                path = parent;
+            }
+            true
+        })
+        .collect()
+}
+
+fn path_indices(position: &PositionId) -> Vec<usize> {
+    position
+        .0
+        .split('/')
+        .filter_map(|part| part.parse().ok())
+        .collect()
+}
+
 fn move_selected(app: &mut App, direction: MoveDirection) {
+    let selected = selected_tree_roots(app);
+    if selected.len() > 1 {
+        move_selected_block(app, direction, selected);
+        return;
+    }
     let Some(row) = app.selected_row() else {
         return;
     };
@@ -785,6 +1016,104 @@ fn move_selected(app: &mut App, direction: MoveDirection) {
     app.quit_armed = false;
     select_position(app, &target);
     app.status = "node moved (Ctrl-S to save)".into();
+}
+
+fn move_selected_block(app: &mut App, direction: MoveDirection, rows: Vec<Row>) {
+    if rows.iter().any(|row| {
+        app.derived_nodes.contains(&row.node) || position_contains_derived(app, &row.position)
+    }) {
+        app.status = "external derived subtrees cannot be moved".into();
+        return;
+    }
+    let locations: Vec<_> = rows
+        .iter()
+        .filter_map(|row| split_position(&row.position))
+        .collect();
+    if locations.len() != rows.len()
+        || locations
+            .iter()
+            .any(|(parent, _)| parent != &locations[0].0)
+        || locations.windows(2).any(|pair| pair[1].1 != pair[0].1 + 1)
+    {
+        app.status = "multi-node moves require consecutive siblings".into();
+        return;
+    }
+    let parent = locations[0].0.clone();
+    let start = locations[0].1;
+    let count = rows.len();
+    let (first, last) = match direction {
+        MoveDirection::Up => {
+            let Some(insert_at) = start.checked_sub(1) else {
+                app.status = "selection is already at the edge".into();
+                return;
+            };
+            let siblings = children_mut(&mut app.document.outline, parent.as_ref()).unwrap();
+            let block: Vec<_> = siblings.drain(start..start + count).collect();
+            siblings.splice(insert_at..insert_at, block);
+            (
+                join_position(parent.as_ref(), insert_at),
+                join_position(parent.as_ref(), insert_at + count - 1),
+            )
+        }
+        MoveDirection::Down => {
+            let siblings = children_mut(&mut app.document.outline, parent.as_ref()).unwrap();
+            if start + count >= siblings.len() {
+                app.status = "selection is already at the edge".into();
+                return;
+            }
+            let block: Vec<_> = siblings.drain(start..start + count).collect();
+            let insert_at = start + 1;
+            siblings.splice(insert_at..insert_at, block);
+            (
+                join_position(parent.as_ref(), insert_at),
+                join_position(parent.as_ref(), insert_at + count - 1),
+            )
+        }
+        MoveDirection::Right => {
+            let Some(previous) = start.checked_sub(1) else {
+                app.status = "no previous sibling to become parent".into();
+                return;
+            };
+            let siblings = children_mut(&mut app.document.outline, parent.as_ref()).unwrap();
+            let block: Vec<_> = siblings.drain(start..start + count).collect();
+            let child_index = siblings[previous].children.len();
+            siblings[previous].children.extend(block);
+            let parent_path = join_position(parent.as_ref(), previous);
+            app.expanded.insert(parent_path.clone());
+            (
+                join_position(Some(&parent_path), child_index),
+                join_position(Some(&parent_path), child_index + count - 1),
+            )
+        }
+        MoveDirection::Left => {
+            let Some(parent_id) = parent else {
+                app.status = "top-level nodes cannot be promoted".into();
+                return;
+            };
+            let Some((grandparent, parent_index)) = split_position(&parent_id) else {
+                return;
+            };
+            let block = {
+                let siblings = children_mut(&mut app.document.outline, Some(&parent_id)).unwrap();
+                siblings.drain(start..start + count).collect::<Vec<_>>()
+            };
+            let insert_at = parent_index + 1;
+            let siblings = children_mut(&mut app.document.outline, grandparent.as_ref()).unwrap();
+            siblings.splice(insert_at..insert_at, block);
+            (
+                join_position(grandparent.as_ref(), insert_at),
+                join_position(grandparent.as_ref(), insert_at + count - 1),
+            )
+        }
+    };
+    app.dirty = true;
+    app.dirty_nodes.extend(rows.into_iter().map(|row| row.node));
+    app.quit_armed = false;
+    select_position(app, &first);
+    let first_index = app.selected;
+    select_position(app, &last);
+    app.selection_anchor = Some(first_index);
+    app.status = format!("{count} nodes moved (Ctrl-S to save)");
 }
 
 fn save(app: &mut App) {
@@ -969,6 +1298,7 @@ fn remove_position(outline: &mut Outline, id: &PositionId) -> Option<Position> {
 }
 
 fn select_position(app: &mut App, id: &PositionId) {
+    app.selection_anchor = None;
     if let Some(index) = app.rows().iter().position(|row| &row.position == id) {
         if index != app.selected {
             app.body_scroll = 0;
@@ -1011,9 +1341,13 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
             .split(areas[0])
     };
     let rows = app.rows();
+    let selection_anchor = app.selection_anchor.unwrap_or(app.selected);
+    let selection_start = selection_anchor.min(app.selected);
+    let selection_end = selection_anchor.max(app.selected);
     let items: Vec<_> = rows
         .iter()
-        .map(|row| {
+        .enumerate()
+        .map(|(index, row)| {
             let node = &app.document.outline.nodes[&row.node];
             let marker = if row.has_children {
                 if app.expanded.contains(&row.position) {
@@ -1026,7 +1360,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
             };
             let clone_count = clone_count(&app.document.outline, &row.node);
             let clone = if clone_count > 1 {
-                format!(" ×{clone_count}")
+                format!(" ⧉×{clone_count}")
             } else {
                 String::new()
             };
@@ -1047,8 +1381,22 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
             } else {
                 spans.extend(headline_spans(&node.headline));
             }
-            spans.push(Span::styled(clone, Style::default().fg(Color::DarkGray)));
-            ListItem::new(Line::from(spans))
+            spans.push(Span::styled(
+                clone,
+                Style::default()
+                    .fg(Color::LightMagenta)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            let item = ListItem::new(Line::from(spans));
+            if (selection_start..=selection_end).contains(&index) && index != app.selected {
+                item.style(
+                    Style::default()
+                        .bg(Color::DarkGray)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                item
+            }
         })
         .collect();
     let outline_page_size = usize::from(columns[0].height.saturating_sub(2)).max(1);
@@ -1103,15 +1451,33 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
             );
         }
     }
-    frame.render_widget(
-        Paragraph::new(format!(
-            "{}   [{}]",
-            controls(app.body_full_width, app.outline_full_width),
-            app.status
-        ))
-        .style(Style::default().fg(Color::DarkGray)),
-        areas[1],
-    );
+    let flash = app
+        .flash
+        .as_ref()
+        .filter(|(_, shown)| shown.elapsed() < Duration::from_secs(2))
+        .map(|(message, _)| message.clone());
+    if flash.is_none() {
+        app.flash = None;
+    }
+    let mut status = vec![Span::styled(
+        format!(
+            "{}   [",
+            controls(app.body_full_width, app.outline_full_width)
+        ),
+        Style::default().fg(Color::DarkGray),
+    )];
+    status.push(Span::styled(
+        flash.as_deref().unwrap_or(&app.status),
+        if flash.is_some() {
+            Style::default()
+                .fg(Color::LightYellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        },
+    ));
+    status.push(Span::styled("]", Style::default().fg(Color::DarkGray)));
+    frame.render_widget(Paragraph::new(Line::from(status)), areas[1]);
     if let Some(find) = &app.find {
         let width = frame.area().width.saturating_sub(4).min(72);
         let shown = find.matches.len().min(5);
@@ -1235,22 +1601,22 @@ fn headline_spans(headline: &str) -> Vec<Span<'_>> {
 fn controls(body_full_width: bool, outline_full_width: bool) -> &'static str {
     if body_full_width {
         #[cfg(feature = "syntax")]
-        return "? help  arrows scroll  PgUp/PgDn page  f split  F outline  o open/edit  Ctrl-P find  Ctrl-R reload  Ctrl-S save  y syntax  q quit";
+        return "? help  arrows scroll  c/x/v/V tree  f split  F outline  o open/edit  Ctrl-P find  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  y syntax  q quit";
         #[cfg(not(feature = "syntax"))]
-        return "? help  arrows scroll  PgUp/PgDn page  f split  F outline  o open/edit  Ctrl-P find  Ctrl-R reload  Ctrl-S save  q quit";
+        return "? help  arrows scroll  c/x/v/V tree  f split  F outline  o open/edit  Ctrl-P find  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  q quit";
     }
     if outline_full_width {
-        return "? help  arrows navigate  F split view  o open/edit  Ctrl-P find  Ctrl-I new  Ctrl-H rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  q quit";
+        return "? help  arrows navigate  c/x/v/V tree  F split view  o open/edit  Ctrl-P find  Ctrl-I new  Ctrl-H rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  q quit";
     }
     #[cfg(feature = "syntax")]
-    return "? help  arrows navigate  PgUp/PgDn body  f body  F outline  o open/edit  Ctrl-P find  Ctrl-I new  Ctrl-H rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  y syntax  q quit";
+    return "? help  arrows navigate  PgUp/PgDn body  c/x/v/V tree  f body  F outline  o open/edit  Ctrl-P find  Ctrl-I new  Ctrl-H rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  y syntax  q quit";
     #[cfg(not(feature = "syntax"))]
-    "? help  arrows navigate  PgUp/PgDn body  f body  F outline  o open/edit  Ctrl-P find  Ctrl-I new  Ctrl-H rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  q quit"
+    "? help  arrows navigate  PgUp/PgDn body  c/x/v/V tree  f body  F outline  o open/edit  Ctrl-P find  Ctrl-I new  Ctrl-H rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  q quit"
 }
 
 fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full_width: bool) {
     let width = frame.area().width.saturating_sub(4).min(72);
-    let height = frame.area().height.saturating_sub(2).min(20);
+    let height = frame.area().height.saturating_sub(2).min(30);
     let area = Rect::new(
         frame.area().x + (frame.area().width.saturating_sub(width)) / 2,
         frame.area().y + (frame.area().height.saturating_sub(height)) / 2,
@@ -1260,10 +1626,16 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full
     let mut lines = if body_full_width {
         vec![
             Line::from("↑/↓              Scroll body vertically"),
+            Line::from("Shift-↑/↓        Extend tree selection"),
             Line::from("←/→              Scroll body horizontally"),
             Line::from("PageUp/PageDown  Scroll body by one page"),
             Line::from("f                Restore split view"),
             Line::from("Shift-F          Show full-width outline"),
+            Line::from("c/x              Copy/cut selected trees"),
+            Line::from("v / Shift-V      Paste copy / paste clone"),
+            Line::from("Ctrl-I or Tab    Insert a sibling"),
+            Line::from("Ctrl-H/Backspace Rename the headline"),
+            Line::from("Ctrl-↑↓←→        Move selected tree(s)"),
             Line::from("Ctrl-P           Find a headline"),
             Line::from("Ctrl-R           Reload from disk"),
             Line::from("Ctrl-S           Save"),
@@ -1272,15 +1644,25 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full
     } else if outline_full_width {
         vec![
             Line::from("↑/↓              Select previous/next node"),
+            Line::from("Shift-↑/↓        Extend tree selection"),
             Line::from("←/→              Collapse/expand node"),
             Line::from("Enter            Expand node"),
             Line::from("Home/End         Select first/last visible node"),
             Line::from("Shift-F          Restore split view"),
             Line::from("f                Show full-width body"),
+            Line::from("c/x/v/V          Copy/cut/paste/clone"),
+            Line::from("Ctrl-P           Find a headline"),
+            Line::from("Ctrl-I or Tab    Insert a sibling"),
+            Line::from("Ctrl-H/Backspace Rename the headline"),
+            Line::from("Ctrl-↑↓←→        Move selected tree(s)"),
+            Line::from("Ctrl-R           Reload from disk"),
+            Line::from("Ctrl-S           Save"),
+            Line::from("o                Edit body, or open derived source"),
         ]
     } else {
         vec![
             Line::from("↑/↓              Select previous/next node"),
+            Line::from("Shift-↑/↓        Extend tree selection"),
             Line::from("←/→              Collapse/expand node"),
             Line::from("Enter            Expand node"),
             Line::from("Home/End         Select first/last visible node"),
@@ -1290,7 +1672,10 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full
             Line::from("Ctrl-P           Find a headline"),
             Line::from("Ctrl-I or Tab    Insert a sibling"),
             Line::from("Ctrl-H/Backspace Rename the headline"),
-            Line::from("Ctrl-↑↓←→        Move/promote/demote node"),
+            Line::from("c                Copy selected tree"),
+            Line::from("x                Cut selected tree"),
+            Line::from("v / Shift-V      Paste copy / paste clone"),
+            Line::from("Ctrl-↑↓←→        Move selected tree(s)"),
             Line::from("Ctrl-R           Reload from disk"),
             Line::from("Ctrl-S           Save"),
             Line::from("o                Edit body, or open derived source"),
@@ -2128,5 +2513,108 @@ mod tests {
             &HashMap::from([(NodeId::from("file"), String::new())]),
         );
         assert!(outline.nodes[&NodeId::from("file")].body.is_empty());
+    }
+
+    #[test]
+    fn normal_paste_creates_an_independent_tree() {
+        let mut app = editing_app();
+        copy_selected(&mut app);
+        paste_tree(&mut app, false);
+
+        assert_eq!(app.document.outline.roots.len(), 2);
+        assert_ne!(
+            app.document.outline.roots[0].node,
+            app.document.outline.roots[1].node
+        );
+        assert_ne!(
+            app.document.outline.roots[0].children[0].node,
+            app.document.outline.roots[1].children[0].node
+        );
+        assert_eq!(app.document.outline.nodes.len(), 6);
+        assert!(app.dirty);
+        assert_eq!(
+            app.flash.as_ref().map(|(message, _)| message.as_str()),
+            Some("PASTED 1 INDEPENDENT TREE(S)")
+        );
+    }
+
+    #[test]
+    fn paste_as_clone_retains_node_identities() {
+        let mut app = editing_app();
+        copy_selected(&mut app);
+        paste_tree(&mut app, true);
+
+        assert_eq!(app.document.outline.roots.len(), 2);
+        assert_eq!(app.document.outline.roots[0], app.document.outline.roots[1]);
+        assert_eq!(clone_count(&app.document.outline, &NodeId::from("a")), 2);
+        assert_eq!(app.document.outline.nodes.len(), 3);
+    }
+
+    #[test]
+    fn multi_selection_copies_and_cuts_sibling_trees() {
+        let mut app = editing_app();
+        app.selected = 1;
+        app.selection_anchor = Some(1);
+        app.extend_selection(1);
+
+        let selected = selected_tree_roots(&app);
+        assert_eq!(
+            selected
+                .iter()
+                .map(|row| row.node.0.as_str())
+                .collect::<Vec<_>>(),
+            vec!["b", "c"]
+        );
+        copy_selected(&mut app);
+        assert_eq!(app.clipboard.as_ref().unwrap().roots.len(), 2);
+
+        cut_selected(&mut app);
+        assert!(app.document.outline.roots[0].children.is_empty());
+        assert_eq!(app.document.outline.nodes.len(), 1);
+        assert!(app.selection_anchor.is_none());
+    }
+
+    #[test]
+    fn control_arrows_move_a_multi_selection_as_a_block() {
+        let mut app = editing_app();
+        app.selected = 1;
+        app.selection_anchor = Some(1);
+        app.extend_selection(1);
+
+        move_selected(&mut app, MoveDirection::Left);
+        assert_eq!(
+            app.document
+                .outline
+                .roots
+                .iter()
+                .map(|position| position.node.0.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "b", "c"]
+        );
+        assert_eq!(selected_tree_roots(&app).len(), 2);
+
+        move_selected(&mut app, MoveDirection::Right);
+        assert_eq!(app.document.outline.roots.len(), 1);
+        assert_eq!(
+            app.document.outline.roots[0]
+                .children
+                .iter()
+                .map(|position| position.node.0.as_str())
+                .collect::<Vec<_>>(),
+            vec!["b", "c"]
+        );
+        assert_eq!(selected_tree_roots(&app).len(), 2);
+    }
+
+    #[test]
+    fn cut_removes_the_tree_and_keeps_it_available_to_paste() {
+        let mut app = editing_app();
+        cut_selected(&mut app);
+        assert!(app.document.outline.roots.is_empty());
+        assert!(app.document.outline.nodes.is_empty());
+
+        paste_tree(&mut app, false);
+        assert_eq!(app.document.outline.roots.len(), 1);
+        assert_eq!(app.document.outline.nodes.len(), 3);
     }
 }
