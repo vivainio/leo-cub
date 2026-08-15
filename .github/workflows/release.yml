@@ -119,15 +119,23 @@ jobs:
             # manylinux2014 uses glibc 2.17, where Tree-sitter needs the older
             # feature macro to expose le16toh and be16toh.
             cflags: -D_BSD_SOURCE
+            manylinux: auto
+          - os: ubuntu-24.04
+            target: aarch64-linux-android
+            cflags: ""
+            manylinux: "off"
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             cflags: ""
+            manylinux: auto
           - os: macos-latest
             target: x86_64-apple-darwin
             cflags: ""
+            manylinux: auto
           - os: macos-latest
             target: aarch64-apple-darwin
             cflags: ""
+            manylinux: auto
 
     steps:
       - name: Checkout code
@@ -143,10 +151,12 @@ jobs:
         uses: PyO3/maturin-action@v1
         env:
           CFLAGS: ${{ matrix.cflags }}
+          ANDROID_API_LEVEL: "24"
         with:
           target: ${{ matrix.target }}
           args: --release --locked --out dist
-          manylinux: auto
+          maturin-version: v1.12.4
+          manylinux: ${{ matrix.manylinux }}
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v6
