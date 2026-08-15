@@ -232,6 +232,8 @@ struct HeadlineInput {
     node: NodeId,
     value: String,
     original: String,
+    cursor: usize,
+    selected: bool,
     inserted_position: Option<PositionId>,
 }
 
@@ -571,14 +573,77 @@ fn handle_headline_input(app: &mut App, key: KeyEvent) {
             app.status = "headline edit cancelled".into();
         }
         KeyCode::Backspace => {
-            input.value.pop();
+            if input.selected {
+                input.value.clear();
+                input.cursor = 0;
+                input.selected = false;
+            } else if input.cursor > 0 {
+                let previous = input.value[..input.cursor]
+                    .char_indices()
+                    .next_back()
+                    .map_or(0, |(index, _)| index);
+                input.value.drain(previous..input.cursor);
+                input.cursor = previous;
+            }
+        }
+        KeyCode::Delete => {
+            if input.selected {
+                input.value.clear();
+                input.cursor = 0;
+                input.selected = false;
+            } else if input.cursor < input.value.len() {
+                let next = input.cursor
+                    + input.value[input.cursor..]
+                        .chars()
+                        .next()
+                        .expect("cursor precedes a character")
+                        .len_utf8();
+                input.value.drain(input.cursor..next);
+            }
+        }
+        KeyCode::Left => {
+            if input.selected {
+                input.cursor = 0;
+                input.selected = false;
+            } else if input.cursor > 0 {
+                input.cursor = input.value[..input.cursor]
+                    .char_indices()
+                    .next_back()
+                    .map_or(0, |(index, _)| index);
+            }
+        }
+        KeyCode::Right => {
+            if input.selected {
+                input.cursor = input.value.len();
+                input.selected = false;
+            } else if input.cursor < input.value.len() {
+                input.cursor += input.value[input.cursor..]
+                    .chars()
+                    .next()
+                    .expect("cursor precedes a character")
+                    .len_utf8();
+            }
+        }
+        KeyCode::Home => {
+            input.cursor = 0;
+            input.selected = false;
+        }
+        KeyCode::End => {
+            input.cursor = input.value.len();
+            input.selected = false;
         }
         KeyCode::Char(character)
             if !key
                 .modifiers
                 .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
         {
-            input.value.push(character);
+            if input.selected {
+                input.value.clear();
+                input.cursor = 0;
+                input.selected = false;
+            }
+            input.value.insert(input.cursor, character);
+            input.cursor += character.len_utf8();
         }
         _ => {}
     }
@@ -595,6 +660,8 @@ fn edit_headline(app: &mut App) {
     app.input = Some(HeadlineInput {
         node: row.node,
         value: original.clone(),
+        cursor: original.len(),
+        selected: true,
         original,
         inserted_position: None,
     });
@@ -637,6 +704,8 @@ fn insert_headline(app: &mut App) {
         node: id,
         value: String::new(),
         original: String::new(),
+        cursor: 0,
+        selected: false,
         inserted_position: Some(inserted),
     });
     app.status = "new headline: type a name, Enter accepts, Esc cancels".into();
@@ -962,11 +1031,22 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
                 String::new()
             };
             let input = app.input.as_ref().filter(|input| input.node == row.node);
-            let headline = input.map_or(node.headline.as_str(), |input| input.value.as_str());
             let mut spans = vec![Span::raw("  ".repeat(row.depth)), Span::raw(marker)];
             spans.push(dirty_marker(app.dirty_nodes.contains(&row.node)));
-            spans.extend(headline_spans(headline));
-            spans.push(Span::raw(input.map_or("", |_| "▏")));
+            if let Some(input) = input {
+                if input.selected {
+                    spans.push(Span::styled(
+                        input.value.as_str(),
+                        Style::default().add_modifier(Modifier::REVERSED),
+                    ));
+                } else {
+                    spans.extend(headline_spans(&input.value[..input.cursor]));
+                    spans.push(Span::raw("▏"));
+                    spans.extend(headline_spans(&input.value[input.cursor..]));
+                }
+            } else {
+                spans.extend(headline_spans(&node.headline));
+            }
             spans.push(Span::styled(clone, Style::default().fg(Color::DarkGray)));
             ListItem::new(Line::from(spans))
         })
@@ -1722,6 +1802,48 @@ mod tests {
         let clean = dirty_marker(false);
         assert_eq!(clean.content, "  ");
         assert_eq!(clean.style.fg, None);
+    }
+
+    #[test]
+    fn editing_a_headline_initially_selects_and_replaces_it() {
+        let mut app = editing_app();
+
+        edit_headline(&mut app);
+        assert!(app.input.as_ref().unwrap().selected);
+        handle_headline_input(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('Z'), KeyModifiers::SHIFT),
+        );
+
+        let input = app.input.as_ref().unwrap();
+        assert_eq!(input.value, "Z");
+        assert_eq!(input.cursor, 1);
+        assert!(!input.selected);
+    }
+
+    #[test]
+    fn an_arrow_keeps_the_selected_headline_and_enables_cursor_editing() {
+        let mut app = editing_app();
+        app.document
+            .outline
+            .nodes
+            .get_mut(&NodeId("a".into()))
+            .unwrap()
+            .headline = "Aβ".into();
+
+        edit_headline(&mut app);
+        handle_headline_input(&mut app, KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        handle_headline_input(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('!'), KeyModifiers::NONE),
+        );
+        handle_headline_input(&mut app, KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        handle_headline_input(&mut app, KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+
+        let input = app.input.as_ref().unwrap();
+        assert_eq!(input.value, "!A");
+        assert_eq!(input.cursor, 2);
+        assert!(!input.selected);
     }
 
     #[test]
