@@ -8,6 +8,22 @@ description: Inspect, validate, compare, edit, and synchronize Leo Editor (.leo)
 Use `cub` to work with Leo Editor outlines without manipulating their XML
 directly. Run `cub --help` or `cub <command> --help` for complete options.
 
+## Create outlines and add nodes
+
+```bash
+cub new outline.leo
+cub new notes.leo --headline "Notes"
+cub add outline.leo "Project/Tasks/First task" "Project/Notes"
+```
+
+`add` accepts one or more slash-separated headline paths, reuses shared or
+existing prefixes, and rejects ambiguous duplicate siblings. To import below a
+node, pass either its exact GNX or its unique headline path:
+
+```bash
+cub import outline.leo README.md --parent "Project/Notes"
+```
+
 ## Inspect and validate
 
 ```bash

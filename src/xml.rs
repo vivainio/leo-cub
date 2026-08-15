@@ -1,7 +1,9 @@
 use std::{
     collections::{HashMap, HashSet},
-    fs,
+    fs::{self, OpenOptions},
+    io::Write,
     path::Path,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use quick_xml::{Reader, events::Event};
@@ -28,6 +30,31 @@ pub struct LeoDocument {
 }
 
 impl LeoDocument {
+    /// Create a minimal Leo document containing one root node.
+    pub fn new(headline: impl Into<String>) -> Self {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+        let id = NodeId(format!("cub.{}.{}", now.as_secs(), now.subsec_nanos()));
+        let node = Node {
+            id: id.clone(),
+            headline: headline.into(),
+            body: String::new(),
+            vnode_attributes: HashMap::new(),
+            tnode_attributes: HashMap::new(),
+        };
+        Self {
+            outline: Outline {
+                nodes: HashMap::from([(id.clone(), node)]),
+                roots: vec![Position {
+                    node: id,
+                    children: vec![],
+                }],
+            },
+            original: NEW_DOCUMENT_ENVELOPE.to_owned(),
+        }
+    }
+
     pub fn open(path: impl AsRef<Path>) -> Result<Self, LeoXmlError> {
         Self::parse(&fs::read_to_string(path)?)
     }
@@ -202,7 +229,27 @@ impl LeoDocument {
         fs::rename(tmp, path)?;
         Ok(())
     }
+
+    /// Save a newly created document without replacing an existing file.
+    pub fn save_new(&self, path: impl AsRef<Path>) -> Result<(), LeoXmlError> {
+        let xml = self.to_xml()?;
+        let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+        file.write_all(xml.as_bytes())?;
+        Ok(())
+    }
 }
+
+const NEW_DOCUMENT_ENVELOPE: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<!-- Created by cub: https://github.com/vivainio/leo-cub -->
+<leo_file xmlns:leo="https://leo-editor.github.io/leo-editor/namespaces/leo-python-editor/1.1">
+<leo_header file_format="2"/>
+<globals/>
+<preferences/>
+<find_panel_settings/>
+<vnodes></vnodes>
+<tnodes></tnodes>
+</leo_file>
+"#;
 
 fn attributes(
     e: &quick_xml::events::BytesStart<'_>,
@@ -315,4 +362,38 @@ fn render_tnodes(outline: &Outline) -> String {
     }
     out.push_str("</tnodes>");
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_document_is_valid_and_round_trips() {
+        let document = LeoDocument::new("Project & notes");
+        assert!(document.outline.validate().is_empty());
+
+        let reparsed = LeoDocument::parse(&document.to_xml().unwrap()).unwrap();
+        assert_eq!(reparsed.outline, document.outline);
+        assert_eq!(reparsed.outline.roots.len(), 1);
+        let root = &reparsed.outline.roots[0].node;
+        assert_eq!(reparsed.outline.nodes[root].headline, "Project & notes");
+    }
+
+    #[test]
+    fn save_new_does_not_overwrite() {
+        let path = std::env::temp_dir().join(format!(
+            "cub-new-test-{}-{}.leo",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let document = LeoDocument::new("First");
+        document.save_new(&path).unwrap();
+        assert!(LeoDocument::new("Second").save_new(&path).is_err());
+        assert_eq!(LeoDocument::open(&path).unwrap().outline, document.outline);
+        fs::remove_file(path).unwrap();
+    }
 }

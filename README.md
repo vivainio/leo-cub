@@ -120,9 +120,48 @@ For source navigation, `cub` recognizes common position arguments for Vim,
 Neovim, Nano, Emacs, VS Code, Microsoft Edit, Helix, and Kakoune. Other editors
 receive the file path without a line argument.
 
+## Demo flow
+
+Starting in a project containing `README.md` and a `src/` directory, create a
+new outline with destinations for source code, documentation, and tasks:
+
+```sh
+cub new project.leo --headline "Project"
+cub add project.leo \
+  "Project/Source" \
+  "Project/Documentation" \
+  "Project/Tasks/Backlog"
+```
+
+Import the source tree below `Project/Source`, preserving its directory
+structure, then import the README as an editable node below the documentation
+branch:
+
+```sh
+cub import project.leo src \
+  --recursive --mode auto --paths \
+  --parent "Project/Source"
+cub import project.leo README.md \
+  --mode edit \
+  --parent "Project/Documentation"
+```
+
+Finally, inspect the resulting tree and validate the file:
+
+```sh
+cub inspect project.leo
+cub validate project.leo
+```
+
+`@auto` source nodes are reconstructed from their files when inspected or
+opened, while the `@edit` README node stores its text in the outline.
+
 ## Headless commands
 
 ```sh
+cub new outline.leo
+cub new notes.leo --headline "Notes"
+cub add outline.leo "Project/Tasks/First task" "Project/Notes"
 cub inspect outline.leo
 cub inspect outline.leo src/main.rs
 cub inspect outline.leo --gnx ekr.20260811210000.1
@@ -133,6 +172,7 @@ cub inspect outline.leo src/main.rs --format json
 cub validate outline.leo
 cub import outline.leo src --recursive --mode auto --paths
 cub import outline.leo README.md --mode edit --no-paths
+cub import outline.leo README.md --parent "Project/Notes"
 cub sync outline.leo
 cub sync outline.leo src/main.rs --dry-run
 cub sync outline.leo --gnx ekr.20260811210000.1
@@ -140,6 +180,14 @@ cub diff before.leo after.leo
 cub inspect-derived path/to/derived.py --summary
 cub apply outline.leo operations.json --dry-run
 ```
+
+`new` creates a valid outline with one empty root node. It refuses to overwrite
+an existing file.
+
+`add` creates nodes from slash-separated headline paths and reuses shared or
+existing prefixes. `import --parent` accepts either an exact GNX or a unique
+slash-separated headline path. Paths with duplicate matching siblings are
+rejected as ambiguous.
 
 `import` creates Leo external-file nodes in `auto`, `edit`, or `clean` mode.
 Markdown, Python, Rust, C#, Go, JavaScript/JSX, and TypeScript/TSX `@auto` files
@@ -149,8 +197,8 @@ source types remain available as a plain root node. Markdown also supports
 Leo's `@auto-md` and `@auto-markdown` headlines and `leo-noheader` markers.
 Directory imports are recursive only with `--recursive` and preserve their
 layout with `@path` nodes by default. Use `--no-paths` to put all imported
-files directly below the destination, `--parent GNX` to choose that destination,
-and `--dry-run` to validate without saving.
+files directly below the destination, `--parent GNX_OR_PATH` to choose that
+destination, and `--dry-run` to validate without saving.
 
 `inspect` uses a compact text format containing position paths, GNXs,
 headlines, and bodies. Repeated clone content is shown as `=GNX`. Use

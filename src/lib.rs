@@ -8,6 +8,7 @@ mod inspect;
 mod model;
 mod operation;
 mod sync;
+mod tree;
 mod xml;
 
 pub use auto::{AutoError, AutoFile};
@@ -22,4 +23,5 @@ pub use inspect::{
 pub use model::{Node, NodeId, Outline, Position, PositionId, ValidationError};
 pub use operation::{ApplyError, ApplyReport, Operation, OperationBatch, Target};
 pub use sync::{SyncError, SyncItem, SyncReport, sync_document};
+pub use tree::{AddPathsReport, HeadlinePathError};
 pub use xml::{LeoDocument, LeoXmlError};
