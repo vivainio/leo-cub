@@ -53,16 +53,6 @@ The PyPI release includes an Android API 24 ARM64 wheel suitable for current
 uv tool install leo-cub
 ```
 
-To build the command locally in Termux instead, install the native toolchain
-and build from a repository checkout:
-
-```sh
-pkg install rust clang git
-git clone https://github.com/vivainio/leo-cub.git
-cd leo-cub
-cargo install --path . --locked
-```
-
 ### Installation from source
 
 From the repository root, install the `cub` command with Cargo:
