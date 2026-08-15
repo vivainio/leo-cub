@@ -48,6 +48,21 @@ impl From<CliImportMode> for ImportMode {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Create a new Leo outline without overwriting an existing file.
+    New {
+        file: PathBuf,
+        /// Headline for the initial root node.
+        #[arg(long, default_value = "New Headline")]
+        headline: String,
+    },
+    /// Add nodes using slash-separated headline paths.
+    Add {
+        /// Outline to modify.
+        file: PathBuf,
+        /// Headline paths, for example "Project/Tasks/First task".
+        #[arg(required = true)]
+        paths: Vec<String>,
+    },
     /// Install the bundled skill into ~/.claude/skills.
     InstallSkills,
     /// Browse an outline interactively (read-only).
@@ -96,7 +111,7 @@ enum Command {
         /// Import files directly below the destination.
         #[arg(long, conflicts_with = "paths")]
         no_paths: bool,
-        /// Insert below the node with this GNX instead of at the root.
+        /// Insert below this GNX or slash-separated headline path.
         #[arg(long)]
         parent: Option<String>,
         #[arg(long)]
@@ -154,6 +169,20 @@ EXAMPLE:
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
+        Command::New { file, headline } => {
+            LeoDocument::new(headline)
+                .save_new(&file)
+                .with_context(|| format!("create {}", file.display()))?;
+            println!("{}", file.display());
+        }
+        Command::Add { file, paths } => {
+            let mut document = LeoDocument::open(&file)?;
+            let report = document.outline.add_headline_paths(&paths)?;
+            if report.created > 0 {
+                document.save(&file)?;
+            }
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
         Command::InstallSkills => install::install_skills()?,
         #[cfg(feature = "tui")]
         Command::Tui { file, no_derived } => tui::run(file, !no_derived)?,
@@ -230,6 +259,16 @@ fn main() -> Result<()> {
             dry_run,
         } => {
             let mut document = LeoDocument::open(&file)?;
+            let parent = parent
+                .map(|selector| {
+                    let id = NodeId(selector.clone());
+                    if document.outline.nodes.contains_key(&id) {
+                        Ok(id)
+                    } else {
+                        document.outline.resolve_headline_path(&selector)
+                    }
+                })
+                .transpose()?;
             let has_directory = inputs.iter().any(|path| path.is_dir());
             let report = import_files(
                 &mut document,
@@ -243,7 +282,7 @@ fn main() -> Result<()> {
                     } else {
                         paths || has_directory
                     },
-                    parent: parent.map(NodeId),
+                    parent,
                     dry_run,
                 },
             )?;
