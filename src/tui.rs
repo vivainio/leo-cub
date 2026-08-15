@@ -22,7 +22,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 
 #[derive(Clone)]
@@ -51,6 +51,7 @@ struct App {
     body_scroll_max: usize,
     body_horizontal_scroll: usize,
     body_horizontal_scroll_max: usize,
+    body_wrap: bool,
     body_full_width: bool,
     outline_full_width: bool,
     help: bool,
@@ -107,6 +108,7 @@ impl App {
             body_scroll_max: 0,
             body_horizontal_scroll: 0,
             body_horizontal_scroll_max: 0,
+            body_wrap: false,
             body_full_width: false,
             outline_full_width: false,
             help: false,
@@ -205,10 +207,27 @@ impl App {
     }
 
     fn scroll_body_horizontal(&mut self, columns: isize) {
+        if self.body_wrap {
+            return;
+        }
         self.body_horizontal_scroll = self
             .body_horizontal_scroll
             .saturating_add_signed(columns)
             .min(self.body_horizontal_scroll_max);
+    }
+
+    fn toggle_body_wrap(&mut self) {
+        self.body_wrap = !self.body_wrap;
+        self.body_scroll = 0;
+        self.body_horizontal_scroll = 0;
+        self.status = format!(
+            "word wrap {}",
+            if self.body_wrap {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        );
     }
 
     fn toggle(&mut self, expand: bool) {
@@ -419,6 +438,7 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
                 }
                 .into();
             }
+            KeyCode::Char('W') => app.toggle_body_wrap(),
             KeyCode::Tab => insert_headline(app),
             KeyCode::Backspace => edit_headline(app),
             #[cfg(feature = "syntax")]
@@ -1430,21 +1450,32 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
     app.outline_scroll = state.offset();
 
     if !app.outline_full_width {
-        let node_block = Block::default().title(" Node ").borders(Borders::ALL);
+        let node_block = Block::default()
+            .title(node_title(app.body_wrap))
+            .borders(Borders::ALL);
         let node_area = node_block.inner(columns[1]);
         frame.render_widget(node_block, columns[1]);
         if let Some(row) = rows.get(app.selected) {
             let body = body_text(app, row);
+            let body_width = body.width();
+            let mut paragraph = Paragraph::new(body);
+            if app.body_wrap {
+                paragraph = paragraph.wrap(Wrap { trim: false });
+            }
             app.body_page_size = usize::from(node_area.height).max(1);
-            app.body_scroll_max = body.lines.len().saturating_sub(app.body_page_size);
-            app.body_horizontal_scroll_max =
-                body.width().saturating_sub(usize::from(node_area.width));
+            let body_height = paragraph.line_count(node_area.width);
+            app.body_scroll_max = body_height.saturating_sub(app.body_page_size);
+            app.body_horizontal_scroll_max = if app.body_wrap {
+                0
+            } else {
+                body_width.saturating_sub(usize::from(node_area.width))
+            };
             app.body_scroll = app.body_scroll.min(app.body_scroll_max);
             app.body_horizontal_scroll = app
                 .body_horizontal_scroll
                 .min(app.body_horizontal_scroll_max);
             frame.render_widget(
-                Paragraph::new(body).scroll((
+                paragraph.scroll((
                     app.body_scroll.min(u16::MAX as usize) as u16,
                     app.body_horizontal_scroll.min(u16::MAX as usize) as u16,
                 )),
@@ -1544,6 +1575,10 @@ fn body_marker(has_body: bool) -> Span<'static> {
     }
 }
 
+fn node_title(body_wrap: bool) -> &'static str {
+    if body_wrap { " Node [wrap] " } else { " Node " }
+}
+
 fn headline_spans(headline: &str) -> Vec<Span<'_>> {
     let leading = headline.len() - headline.trim_start().len();
     let trimmed = &headline[leading..];
@@ -1610,17 +1645,17 @@ fn headline_spans(headline: &str) -> Vec<Span<'_>> {
 fn controls(body_full_width: bool, outline_full_width: bool) -> &'static str {
     if body_full_width {
         #[cfg(feature = "syntax")]
-        return "? help  arrows scroll  c/x/v/V tree  f split  F outline  o open/edit  Ctrl-P find  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  y syntax  q quit";
+        return "? help  arrows scroll  W wrap  c/x/v/V tree  f split  F outline  o open/edit  Ctrl-P find  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  y syntax  q quit";
         #[cfg(not(feature = "syntax"))]
-        return "? help  arrows scroll  c/x/v/V tree  f split  F outline  o open/edit  Ctrl-P find  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  q quit";
+        return "? help  arrows scroll  W wrap  c/x/v/V tree  f split  F outline  o open/edit  Ctrl-P find  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  q quit";
     }
     if outline_full_width {
-        return "? help  arrows navigate  c/x/v/V tree  F split view  o open/edit  Ctrl-P find  Ctrl-I new  Ctrl-H rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  q quit";
+        return "? help  arrows navigate  W wrap  c/x/v/V tree  F split view  o open/edit  Ctrl-P find  Ctrl-I new  Ctrl-H rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  q quit";
     }
     #[cfg(feature = "syntax")]
-    return "? help  arrows navigate  PgUp/PgDn body  c/x/v/V tree  f body  F outline  o open/edit  Ctrl-P find  Ctrl-I new  Ctrl-H rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  y syntax  q quit";
+    return "? help  arrows navigate  PgUp/PgDn body  W wrap  c/x/v/V tree  f body  F outline  o open/edit  Ctrl-P find  Ctrl-I new  Ctrl-H rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  y syntax  q quit";
     #[cfg(not(feature = "syntax"))]
-    "? help  arrows navigate  PgUp/PgDn body  c/x/v/V tree  f body  F outline  o open/edit  Ctrl-P find  Ctrl-I new  Ctrl-H rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  q quit"
+    "? help  arrows navigate  PgUp/PgDn body  W wrap  c/x/v/V tree  f body  F outline  o open/edit  Ctrl-P find  Ctrl-I new  Ctrl-H rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  q quit"
 }
 
 fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full_width: bool) {
@@ -1637,6 +1672,7 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full
             Line::from("↑/↓              Scroll body vertically"),
             Line::from("Shift-↑/↓        Extend tree selection"),
             Line::from("←/→              Scroll body horizontally"),
+            Line::from("Shift-W          Toggle body word wrap"),
             Line::from("PageUp/PageDown  Scroll body by one page"),
             Line::from("f                Restore split view"),
             Line::from("Shift-F          Show full-width outline"),
@@ -1659,6 +1695,7 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full
             Line::from("Home/End         Select first/last visible node"),
             Line::from("Shift-F          Restore split view"),
             Line::from("f                Show full-width body"),
+            Line::from("Shift-W          Toggle body word wrap"),
             Line::from("c/x/v/V          Copy/cut/paste/clone"),
             Line::from("Ctrl-P           Find a headline"),
             Line::from("Ctrl-I or Tab    Insert a sibling"),
@@ -1678,6 +1715,7 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full
             Line::from("f                Show full-width body"),
             Line::from("Shift-F          Show full-width outline"),
             Line::from("PageUp/PageDown  Scroll the body pane"),
+            Line::from("Shift-W          Toggle body word wrap"),
             Line::from("Ctrl-P           Find a headline"),
             Line::from("Ctrl-I or Tab    Insert a sibling"),
             Line::from("Ctrl-H/Backspace Rename the headline"),
@@ -2448,6 +2486,30 @@ mod tests {
         assert_eq!(app.body_horizontal_scroll, 6);
         app.scroll_body_horizontal(-20);
         assert_eq!(app.body_horizontal_scroll, 0);
+    }
+
+    #[test]
+    fn toggling_word_wrap_resets_scrolling_and_updates_status() {
+        let mut app = editing_app();
+        app.body_scroll = 3;
+        app.body_horizontal_scroll = 7;
+
+        app.toggle_body_wrap();
+
+        assert!(app.body_wrap);
+        assert_eq!(app.body_scroll, 0);
+        assert_eq!(app.body_horizontal_scroll, 0);
+        assert_eq!(app.status, "word wrap enabled");
+        assert_eq!(node_title(app.body_wrap), " Node [wrap] ");
+
+        app.body_horizontal_scroll_max = 10;
+        app.scroll_body_horizontal(4);
+        assert_eq!(app.body_horizontal_scroll, 0);
+
+        app.toggle_body_wrap();
+        assert!(!app.body_wrap);
+        assert_eq!(app.status, "word wrap disabled");
+        assert_eq!(node_title(app.body_wrap), " Node ");
     }
 
     #[test]
