@@ -117,8 +117,9 @@ reloading clears the markers.
 
 | Key | Action |
 | --- | --- |
-| Printable characters | Append to the headline |
-| `Backspace` | Delete the previous character |
+| Printable characters | Replace the initial selection, or insert at the cursor |
+| `←` / `→`, `Home` / `End` | Keep the headline and position the cursor |
+| `Backspace` / `Delete` | Delete the selection or a character |
 | `Enter` | Accept the headline |
 | `Esc` | Cancel editing; a newly inserted node is removed |
 
