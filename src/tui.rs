@@ -1367,6 +1367,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
             let input = app.input.as_ref().filter(|input| input.node == row.node);
             let mut spans = vec![Span::raw("  ".repeat(row.depth)), Span::raw(marker)];
             spans.push(dirty_marker(app.dirty_nodes.contains(&row.node)));
+            spans.push(body_marker(!node.body.trim().is_empty()));
             if let Some(input) = input {
                 if input.selected {
                     spans.push(Span::styled(
@@ -1530,6 +1531,14 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
 fn dirty_marker(dirty: bool) -> Span<'static> {
     if dirty {
         Span::styled("* ", Style::default().fg(Color::LightRed))
+    } else {
+        Span::raw("  ")
+    }
+}
+
+fn body_marker(has_body: bool) -> Span<'static> {
+    if has_body {
+        Span::styled("· ", Style::default().fg(Color::DarkGray))
     } else {
         Span::raw("  ")
     }
@@ -2187,6 +2196,17 @@ mod tests {
         let clean = dirty_marker(false);
         assert_eq!(clean.content, "  ");
         assert_eq!(clean.style.fg, None);
+    }
+
+    #[test]
+    fn shows_a_subtle_dot_only_for_nodes_with_body_content() {
+        let populated = body_marker(true);
+        assert_eq!(populated.content, "· ");
+        assert_eq!(populated.style.fg, Some(Color::DarkGray));
+
+        let empty = body_marker(false);
+        assert_eq!(empty.content, "  ");
+        assert_eq!(empty.style.fg, None);
     }
 
     #[test]
