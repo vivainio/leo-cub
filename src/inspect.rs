@@ -376,6 +376,165 @@ pub fn render_compact(outline: &Outline) -> String {
     output
 }
 
+/// Render only the outline hierarchy as a Markdown list.
+///
+/// A vnode that occurs more than once is shown at its first occurrence and
+/// later occurrences are marked as clones. Clone descendants are omitted,
+/// matching `render_compact`'s identity-aware rendering.
+pub fn render_outline(outline: &Outline) -> String {
+    render_outline_with_options(outline, None, false, &[])
+}
+
+/// Render an outline with an optional current occurrence and disclosure state.
+pub fn render_outline_with_options(
+    outline: &Outline,
+    current: Option<&PositionId>,
+    collapsed: bool,
+    expanded: &[PositionId],
+) -> String {
+    fn escape_headline(headline: &str) -> String {
+        headline
+            .chars()
+            .flat_map(|character| {
+                if matches!(character, '\\' | '*' | '_' | '[' | ']' | '`') {
+                    vec!['\\', character]
+                } else {
+                    vec![character]
+                }
+            })
+            .collect()
+    }
+
+    fn is_descendant(path: &str, ancestor: &str) -> bool {
+        path == ancestor
+            || path
+                .strip_prefix(ancestor)
+                .is_some_and(|rest| rest.starts_with('/'))
+    }
+
+    fn visit(
+        outline: &Outline,
+        positions: &[Position],
+        parent: &str,
+        depth: usize,
+        emitted: &mut HashSet<NodeId>,
+        output: &mut String,
+        current: Option<&str>,
+        collapsed: bool,
+        expanded: &[PositionId],
+        html_details: bool,
+    ) {
+        for (index, position) in positions.iter().enumerate() {
+            let is_last = index + 1 == positions.len();
+            let path = if parent.is_empty() {
+                index.to_string()
+            } else {
+                format!("{parent}/{index}")
+            };
+            let Some(node) = outline.nodes.get(&position.node) else {
+                writeln!(
+                    output,
+                    "{}- <missing node {}>",
+                    "  ".repeat(depth),
+                    position.node.0
+                )
+                .unwrap();
+                continue;
+            };
+            let indent = "  ".repeat(depth);
+            let is_current = current == Some(path.as_str());
+            let is_ancestor =
+                current.is_some_and(|value| value != path && is_descendant(value, &path));
+            let headline = escape_headline(&node.headline);
+            let headline = if is_current {
+                format!(
+                    r#"<span class="leo-outline__current" data-position="{path}" aria-current="page">{headline}</span>"#
+                )
+            } else if is_ancestor {
+                format!(r#"<span class="leo-outline__ancestor">{headline}</span>"#)
+            } else {
+                headline
+            };
+            let is_clone = !emitted.insert(position.node.clone());
+            if html_details {
+                let item_class = if is_last {
+                    r#" class="leo-outline__last""#
+                } else {
+                    ""
+                };
+                writeln!(output, "{indent}<li{item_class}>").unwrap();
+                if !position.children.is_empty() && !is_clone {
+                    let is_open = !collapsed
+                        || expanded
+                            .iter()
+                            .any(|target| is_descendant(target.0.as_str(), &path))
+                        || current.is_some_and(|value| is_descendant(value, &path));
+                    let open = if is_open { " open" } else { "" };
+                    writeln!(
+                        output,
+                        r#"{indent}  <details class="leo-outline__node" data-position="{path}"{open}>"#
+                    )
+                    .unwrap();
+                    writeln!(output, "{indent}    <summary>{headline}</summary>").unwrap();
+                    writeln!(output, "{indent}    <ul>").unwrap();
+                    visit(
+                        outline,
+                        &position.children,
+                        &path,
+                        depth + 1,
+                        emitted,
+                        output,
+                        current,
+                        collapsed,
+                        expanded,
+                        html_details,
+                    );
+                    writeln!(output, "{indent}    </ul>").unwrap();
+                    writeln!(output, "{indent}  </details>").unwrap();
+                } else {
+                    let suffix = if is_clone { " ↪ clone" } else { "" };
+                    writeln!(output, "{indent}  {headline}{suffix}").unwrap();
+                }
+                writeln!(output, "{indent}</li>").unwrap();
+                continue;
+            }
+            let suffix = if is_clone { " ↪ clone" } else { "" };
+            writeln!(output, "{indent}- {headline}{suffix}").unwrap();
+            if is_clone {
+                continue;
+            }
+            visit(
+                outline,
+                &position.children,
+                &path,
+                depth + 1,
+                emitted,
+                output,
+                current,
+                collapsed,
+                expanded,
+                html_details,
+            );
+        }
+    }
+
+    let mut output = String::new();
+    let html_details = collapsed || !expanded.is_empty();
+    visit(
+        outline,
+        &outline.roots,
+        "",
+        0,
+        &mut HashSet::new(),
+        &mut output,
+        current.map(|value| value.0.as_str()),
+        collapsed,
+        expanded,
+        html_details,
+    );
+    output
+}
+
 /// Return an outline whose roots are the occurrences selected from `outline`.
 ///
 /// GNX selection intentionally returns every occurrence of a cloned vnode.
@@ -600,6 +759,52 @@ mod tests {
         assert!(rendered.contains("  0/0 file @file main.rs\n"));
         assert!(rendered.contains("  | body\n"));
         assert!(rendered.contains("1 =file\n"));
+    }
+
+    #[test]
+    fn outline_renders_headlines_and_marks_clones() {
+        let rendered = render_outline(&outline());
+        assert_eq!(
+            rendered,
+            "- paths\n  - @file main.rs\n    - child\n- @file main.rs ↪ clone\n- other\n"
+        );
+    }
+
+    #[test]
+    fn outline_escapes_markdown_headline_punctuation() {
+        let mut outline = outline();
+        outline
+            .nodes
+            .get_mut(&NodeId("other".into()))
+            .unwrap()
+            .headline = "[literal] *headline*".into();
+        assert!(render_outline(&outline).contains(r"- \[literal\] \*headline\*"));
+    }
+
+    #[test]
+    fn outline_marks_current_path() {
+        let rendered =
+            render_outline_with_options(&outline(), Some(&PositionId("0/0/0".into())), false, &[]);
+        assert!(rendered.contains(r#"<span class="leo-outline__ancestor">paths</span>"#));
+        assert!(rendered.contains(
+            r#"<span class="leo-outline__current" data-position="0/0/0" aria-current="page">child</span>"#
+        ));
+    }
+
+    #[test]
+    fn outline_collapses_unselected_branches_and_opens_current_path() {
+        let mut outline = outline();
+        outline.roots[2].children.push(Position {
+            node: NodeId("child".into()),
+            children: vec![],
+        });
+        let rendered =
+            render_outline_with_options(&outline, Some(&PositionId("0/0/0".into())), true, &[]);
+        assert!(rendered.contains(r#"<details class="leo-outline__node" data-position="0" open>"#));
+        assert!(
+            rendered.contains(r#"<details class="leo-outline__node" data-position="0/0" open>"#)
+        );
+        assert!(rendered.contains(r#"<details class="leo-outline__node" data-position="2">"#));
     }
 
     #[test]

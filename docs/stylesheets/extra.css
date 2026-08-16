@@ -28,6 +28,78 @@
   color: var(--md-primary-fg-color);
 }
 
+.leo-outline__current {
+  color: var(--md-accent-fg-color);
+  font-weight: 700;
+}
+
+.leo-outline__ancestor {
+  font-weight: 600;
+}
+
+.leo-outline__node {
+  margin: 0.25rem 0;
+}
+
+.leo-outline__node > summary {
+  cursor: pointer;
+}
+
+.leo-outline-sample {
+  --leo-tree-line: color-mix(in srgb, var(--md-default-fg-color) 32%, transparent);
+  margin: 1rem 0 1.5rem;
+  padding: 0.85rem 1rem;
+  border: 1px solid var(--md-default-fg-color--lightest);
+  border-radius: 0.45rem;
+  background: var(--md-code-bg-color);
+}
+
+.leo-outline-sample .leo-outline__list {
+  position: relative;
+  margin: 0;
+  padding-left: 1.35rem;
+  list-style: none;
+}
+
+.leo-outline-sample .leo-outline__list .leo-outline__list {
+  margin-left: 0.35rem;
+  border-left: 1px solid var(--leo-tree-line);
+}
+
+.leo-outline-sample .leo-outline__list .leo-outline__list > li {
+  position: relative;
+}
+
+.leo-outline-sample .leo-outline__list .leo-outline__list > li::before {
+  position: absolute;
+  top: 0.8em;
+  left: -2.35rem;
+  width: 2.35rem;
+  border-top: 1px solid var(--leo-tree-line);
+  content: "";
+}
+
+.leo-outline-sample .leo-outline__list .leo-outline__list .leo-outline__last::after {
+  position: absolute;
+  top: 0.8em;
+  bottom: 0;
+  left: -2.35rem;
+  width: 1px;
+  background: var(--md-code-bg-color);
+  content: "";
+  z-index: 1;
+}
+
+.leo-outline-sample .leo-outline__last {
+  z-index: 2;
+}
+
+
+.leo-clone-label {
+  color: var(--md-accent-fg-color);
+  font-size: 0.85em;
+}
+
 @media screen and (max-width: 44rem) {
   .guide-grid {
     grid-template-columns: 1fr;

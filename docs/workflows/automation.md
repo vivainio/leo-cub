@@ -46,6 +46,26 @@ cub inspect project.leo --search 'render_(compact|json)'
 Search output includes excerpts rather than dumping every matching body. This
 keeps agent context and command output manageable.
 
+## Embed an outline in Zensical
+
+The outline renderer emits ordinary Markdown, so Zensical can render it during
+the documentation build with the Markdown Exec extension:
+
+```toml
+[project.plugins.markdown-exec]
+```
+
+Then include the selected outline in a page:
+
+````markdown
+```bash exec="on"
+cub render project.leo --position 0/2
+```
+````
+
+Only headlines are emitted. Repeated vnode occurrences are marked with
+`↪ clone`, while their descendants are not repeated.
+
 ## Practical guardrails
 
 - Keep the original `.leo` file or use version control before scripted edits.
