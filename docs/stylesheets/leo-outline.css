@@ -83,12 +83,12 @@
 
 .leo-body-dot {
   display: inline-block;
-  width: 0.32rem;
-  height: 0.32rem;
-  margin-left: 0.3rem;
+  width: 0.24rem;
+  height: 0.24rem;
+  margin-left: 0.24rem;
   border-radius: 50%;
-  background: var(--md-default-fg-color--light, #999);
-  vertical-align: 0.08em;
+  background: color-mix(in srgb, var(--md-default-fg-color--light, #999) 58%, transparent);
+  vertical-align: 0.04em;
 }
 
 .leo-branch-marker {
