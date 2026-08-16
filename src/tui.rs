@@ -1862,6 +1862,13 @@ fn load_derived_files(outline: &mut Outline, outline_path: &Path) -> LoadReport 
                     if !auto.merge_into(outline, &job.position) {
                         return Err("auto root position disappeared".to_owned());
                     }
+                    report
+                        .node_locations
+                        .entry(auto.root.clone())
+                        .or_insert(SourceLocation {
+                            path: job.path.clone(),
+                            line: 1,
+                        });
                     for (id, line) in &auto.locations {
                         report
                             .node_locations
@@ -1943,10 +1950,15 @@ fn open_selected(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mu
         .or_else(|| app.source_nodes.get(&row.node))
         .cloned()
     {
+        let original_source = fs::read(&location.path).ok();
         if let Err(error) = suspend_and_open(terminal, &location) {
             app.status = format!("open failed: {error}");
         } else {
-            app.status = format!("opened {}:{}", location.path.display(), location.line);
+            if original_source != fs::read(&location.path).ok() {
+                reload(app);
+            } else {
+                app.status = format!("opened {}:{}", location.path.display(), location.line);
+            }
         }
         return;
     }
