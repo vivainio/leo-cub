@@ -93,11 +93,19 @@
 
 .leo-branch-marker {
   display: inline-block;
-  width: 0;
-  height: 0;
-  margin-right: 0.42rem;
-  border-top: 0.28rem solid transparent;
-  border-bottom: 0.28rem solid transparent;
-  border-left: 0.38rem solid var(--md-default-fg-color--light, #999);
-  vertical-align: -0.08em;
+  width: 0.65rem;
+  margin-right: 0.1rem;
+  color: color-mix(in srgb, var(--md-default-fg-color--light, #999) 62%, transparent);
+  font-size: 0.9em;
+  line-height: 1;
+  text-align: center;
+  vertical-align: middle;
+}
+
+.leo-branch-marker::before {
+  content: "›";
+}
+
+.leo-branch-marker--expanded::before {
+  content: "⌄";
 }
