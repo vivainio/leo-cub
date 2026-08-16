@@ -101,12 +101,14 @@
 }
 
 .leo-current-label {
+  display: inline-block;
+  width: 0.5rem;
+  height: 0.5rem;
   margin-left: 0.35rem;
-  color: var(--md-accent-fg-color);
-  font-size: 0.72em;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  text-transform: uppercase;
+  border-radius: 50%;
+  background: var(--md-accent-fg-color);
+  box-shadow: 0 0 0 0.18rem color-mix(in srgb, var(--md-accent-fg-color) 18%, transparent);
+  vertical-align: 0.05em;
 }
 
 @media screen and (max-width: 44rem) {
