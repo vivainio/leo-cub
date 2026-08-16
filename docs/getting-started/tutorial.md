@@ -9,7 +9,7 @@ build, so the displayed outline is generated from the actual Leo file.
 The compact inspector includes positions, GNXs, headlines, and bodies:
 
 ```bash
-target/release/cub inspect tutorial.leo
+cub inspect tutorial.leo
 ```
 
 This is useful when diagnosing an outline, but it is intentionally dense. For
@@ -18,7 +18,7 @@ documentation, render only the hierarchy:
 ## Render the hierarchy
 
 ```bash
-target/release/cub render tutorial.leo
+cub render tutorial.leo
 ```
 
 The outline renderer emits a nested Markdown list. A repeated vnode is shown as
@@ -31,7 +31,7 @@ Use an occurrence position to mark the section being discussed. The position
 is occurrence-specific, which matters when a node is cloned:
 
 ```bash
-target/release/cub render tutorial.leo --current 0/0/1
+cub render tutorial.leo --current 0/0/1
 ```
 
 The current node and its ancestors receive CSS classes that the site theme can
@@ -43,7 +43,7 @@ For a compact book sidebar or a step-by-step tutorial, collapse unrelated
 branches and open the path around the current section:
 
 ```bash
-target/release/cub render tutorial.leo --collapsed --current 0/0/1 --expand 0/0/0
+cub render tutorial.leo --collapsed --current 0/0/1 --expand 0/0/0
 ```
 
 Collapsed output uses native HTML `<details>` elements. No JavaScript or saved
