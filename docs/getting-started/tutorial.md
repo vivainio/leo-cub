@@ -68,7 +68,7 @@ previewable on Zensical versions without third-party build plugins:
               <li class="leo-outline__last">tests.rs</li>
             </ul>
           </li>
-          <li><span class="leo-outline__current" data-position="0/0/1" aria-current="page">Documentation <span class="leo-current-label">current</span></span>
+          <li><span class="leo-outline__current" data-position="0/0/1" aria-current="page">Documentation <span class="leo-current-label" aria-label="current" title="current"></span></span>
             <ul class="leo-outline__list">
               <li>Tutorial</li>
               <li>Concepts</li>
