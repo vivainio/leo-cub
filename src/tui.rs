@@ -15,7 +15,7 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use leo::{AutoFile, DerivedFile, LeoDocument, NodeId, Outline, Position, PositionId};
+use leo::{AutoFile, DerivedFile, LeoDocument, NodeId, Outline, Position, PositionId, render_thin};
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
@@ -37,6 +37,14 @@ struct Row {
 struct OriginalExternalState {
     children: HashMap<NodeId, Vec<Position>>,
     bodies: HashMap<NodeId, String>,
+}
+
+#[derive(Clone)]
+struct WritableExternalFile {
+    path: PathBuf,
+    start_delimiter: String,
+    end_delimiter: String,
+    original: Outline,
 }
 
 struct App {
@@ -68,6 +76,7 @@ struct App {
     source_locations: HashMap<PositionId, SourceLocation>,
     source_nodes: HashMap<NodeId, SourceLocation>,
     derived_nodes: HashSet<NodeId>,
+    writable_external: HashMap<NodeId, WritableExternalFile>,
     original_external: OriginalExternalState,
     #[cfg(feature = "syntax")]
     syntax: crate::syntax::SyntaxHighlighter,
@@ -86,6 +95,7 @@ impl App {
         source_locations: HashMap<PositionId, SourceLocation>,
         source_nodes: HashMap<NodeId, SourceLocation>,
         derived_nodes: HashSet<NodeId>,
+        writable_external: HashMap<NodeId, WritableExternalFile>,
         original_external: OriginalExternalState,
         load_derived: bool,
     ) -> Self {
@@ -125,6 +135,7 @@ impl App {
             source_locations,
             source_nodes,
             derived_nodes,
+            writable_external,
             original_external,
             #[cfg(feature = "syntax")]
             syntax: crate::syntax::SyntaxHighlighter::new(),
@@ -256,12 +267,22 @@ impl App {
     }
 
     fn editable(&mut self, row: &Row) -> bool {
-        if self.derived_nodes.contains(&row.node) {
-            self.status = "derived descendants are read-only; press o to edit the source".into();
+        if self.derived_nodes.contains(&row.node) && !self.writable_derived(&row.node) {
+            self.status = "@auto descendants are read-only; press o to edit the source".into();
             false
         } else {
             true
         }
+    }
+
+    fn writable_derived(&self, node: &NodeId) -> bool {
+        self.writable_external
+            .values()
+            .any(|file| file.original.nodes.contains_key(node))
+    }
+
+    fn readonly_derived(&self, node: &NodeId) -> bool {
+        self.derived_nodes.contains(node) && !self.writable_derived(node)
     }
 }
 
@@ -297,8 +318,14 @@ enum MoveDirection {
 
 pub fn run(path: PathBuf, load_derived: bool) -> Result<()> {
     let mut document = LeoDocument::open(&path)?;
-    let (status, source_locations, source_nodes, derived_nodes, original_external) = if load_derived
-    {
+    let (
+        status,
+        source_locations,
+        source_nodes,
+        derived_nodes,
+        writable_external,
+        original_external,
+    ) = if load_derived {
         let report = load_derived_files(&mut document.outline, &path);
         let status = if report.errors.is_empty() {
             format!("loaded {} derived file(s)", report.loaded)
@@ -315,6 +342,7 @@ pub fn run(path: PathBuf, load_derived: bool) -> Result<()> {
             report.locations,
             report.node_locations,
             report.derived_nodes,
+            report.writable_external,
             OriginalExternalState {
                 children: report.original_children,
                 bodies: report.original_bodies,
@@ -326,6 +354,7 @@ pub fn run(path: PathBuf, load_derived: bool) -> Result<()> {
             HashMap::new(),
             HashMap::new(),
             HashSet::new(),
+            HashMap::new(),
             OriginalExternalState::default(),
         )
     };
@@ -336,6 +365,7 @@ pub fn run(path: PathBuf, load_derived: bool) -> Result<()> {
         source_locations,
         source_nodes,
         derived_nodes,
+        writable_external,
         original_external,
         load_derived,
     );
@@ -736,8 +766,7 @@ fn insert_headline(app: &mut App) {
     let Some(row) = app.selected_row() else {
         return;
     };
-    if !app.editable(&row) || position_contains_derived(app, &row.position) {
-        app.status = "cannot insert beside an external derived subtree".into();
+    if !app.editable(&row) {
         return;
     }
     let Some((parent, index)) = split_position(&row.position) else {
@@ -810,9 +839,9 @@ fn cut_selected(app: &mut App) {
         return;
     }
     if rows.iter().any(|row| {
-        app.derived_nodes.contains(&row.node) || position_contains_derived(app, &row.position)
+        app.readonly_derived(&row.node) || position_contains_readonly_derived(app, &row.position)
     }) {
-        app.status = "external derived subtrees cannot be cut".into();
+        app.status = "@auto subtrees cannot be cut".into();
         return;
     }
     copy_selected(app);
@@ -842,8 +871,8 @@ fn paste_tree(app: &mut App, as_clone: bool) {
         return;
     };
     let (parent, insert_at) = if let Some(row) = app.selected_row() {
-        if !app.editable(&row) || position_contains_derived(app, &row.position) {
-            app.status = "cannot paste beside an external derived subtree".into();
+        if !app.editable(&row) || position_contains_readonly_derived(app, &row.position) {
+            app.status = "cannot paste beside an @auto subtree".into();
             return;
         }
         let Some((parent, index)) = split_position(&row.position) else {
@@ -966,8 +995,8 @@ fn move_selected(app: &mut App, direction: MoveDirection) {
     let Some(row) = app.selected_row() else {
         return;
     };
-    if !app.editable(&row) || position_contains_derived(app, &row.position) {
-        app.status = "external derived subtrees cannot be moved".into();
+    if !app.editable(&row) || position_contains_readonly_derived(app, &row.position) {
+        app.status = "@auto subtrees cannot be moved".into();
         return;
     }
     let Some((parent, index)) = split_position(&row.position) else {
@@ -1040,9 +1069,9 @@ fn move_selected(app: &mut App, direction: MoveDirection) {
 
 fn move_selected_block(app: &mut App, direction: MoveDirection, rows: Vec<Row>) {
     if rows.iter().any(|row| {
-        app.derived_nodes.contains(&row.node) || position_contains_derived(app, &row.position)
+        app.readonly_derived(&row.node) || position_contains_readonly_derived(app, &row.position)
     }) {
-        app.status = "external derived subtrees cannot be moved".into();
+        app.status = "@auto subtrees cannot be moved".into();
         return;
     }
     let locations: Vec<_> = rows
@@ -1137,6 +1166,13 @@ fn move_selected_block(app: &mut App, direction: MoveDirection, rows: Vec<Row>) 
 }
 
 fn save(app: &mut App) {
+    let external_updates = match prepare_external_updates(app) {
+        Ok(updates) => updates,
+        Err(error) => {
+            app.status = format!("save failed: {error}");
+            return;
+        }
+    };
     let mut persisted = app.document.clone();
     restore_external_state(
         &mut persisted.outline,
@@ -1148,8 +1184,17 @@ fn save(app: &mut App) {
         .outline
         .nodes
         .retain(|id, _| referenced.contains(id));
+    if let Err(error) = write_external_updates(&external_updates) {
+        app.status = format!("save failed: {error}");
+        return;
+    }
     match persisted.save(&app.path) {
         Ok(()) => {
+            for update in external_updates {
+                if let Some(file) = app.writable_external.get_mut(&update.root) {
+                    file.original = update.snapshot;
+                }
+            }
             app.dirty = false;
             app.dirty_nodes.clear();
             app.quit_armed = false;
@@ -1158,6 +1203,120 @@ fn save(app: &mut App) {
         }
         Err(error) => app.status = format!("save failed: {error}"),
     }
+}
+
+struct ExternalUpdate {
+    root: NodeId,
+    path: PathBuf,
+    rendered: String,
+    snapshot: Outline,
+}
+
+fn prepare_external_updates(app: &App) -> Result<Vec<ExternalUpdate>, String> {
+    let mut updates = Vec::new();
+    for (root, file) in &app.writable_external {
+        let Some((position, snapshot)) = external_snapshot(&app.document.outline, root) else {
+            continue;
+        };
+        if snapshot == file.original {
+            continue;
+        }
+        let rendered = render_thin(
+            &app.document.outline,
+            &position,
+            &file.start_delimiter,
+            &file.end_delimiter,
+        )
+        .map_err(|error| format!("{}: {error}", file.path.display()))?;
+        DerivedFile::parse(&rendered).map_err(|error| {
+            format!(
+                "{}: generated invalid thin file: {error}",
+                file.path.display()
+            )
+        })?;
+        updates.push(ExternalUpdate {
+            root: root.clone(),
+            path: file.path.clone(),
+            rendered,
+            snapshot,
+        });
+    }
+    Ok(updates)
+}
+
+fn write_external_updates(updates: &[ExternalUpdate]) -> Result<(), String> {
+    let mut staged = Vec::new();
+    for (index, update) in updates.iter().enumerate() {
+        let name = update
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("external");
+        let temporary = update
+            .path
+            .with_file_name(format!(".{name}.cub-save-{}-{index}", std::process::id()));
+        let permissions = fs::metadata(&update.path).map(|metadata| metadata.permissions());
+        let result = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .and_then(|mut file| {
+                file.write_all(update.rendered.as_bytes())?;
+                file.sync_all()
+            })
+            .and_then(|()| {
+                permissions.and_then(|permissions| fs::set_permissions(&temporary, permissions))
+            });
+        if let Err(error) = result {
+            for path in &staged {
+                let _ = fs::remove_file(path);
+            }
+            let _ = fs::remove_file(&temporary);
+            return Err(format!("{}: {error}", update.path.display()));
+        }
+        staged.push(temporary);
+    }
+    for (update, temporary) in updates.iter().zip(&staged) {
+        if let Err(error) = fs::rename(temporary, &update.path) {
+            for path in &staged {
+                let _ = fs::remove_file(path);
+            }
+            return Err(format!("{}: {error}", update.path.display()));
+        }
+    }
+    Ok(())
+}
+
+fn external_snapshot(outline: &Outline, root: &NodeId) -> Option<(PositionId, Outline)> {
+    fn find(positions: &[Position], parent: &str, root: &NodeId) -> Option<(PositionId, Position)> {
+        for (index, position) in positions.iter().enumerate() {
+            let id = if parent.is_empty() {
+                index.to_string()
+            } else {
+                format!("{parent}/{index}")
+            };
+            if &position.node == root {
+                return Some((PositionId(id), position.clone()));
+            }
+            if let Some(found) = find(&position.children, &id, root) {
+                return Some(found);
+            }
+        }
+        None
+    }
+    let (position, tree) = find(&outline.roots, "", root)?;
+    let ids = referenced_nodes(std::slice::from_ref(&tree));
+    let nodes = ids
+        .into_iter()
+        .filter_map(|id| outline.nodes.get(&id).cloned().map(|node| (id, node)))
+        .collect();
+    Some((
+        position,
+        Outline {
+            roots: vec![tree],
+            nodes,
+        },
+    ))
 }
 
 fn reload(app: &mut App) {
@@ -1176,43 +1335,52 @@ fn reload(app: &mut App) {
             return;
         }
     };
-    let (source_locations, source_nodes, derived_nodes, original_external, derived_status) =
-        if app.load_derived {
-            let report = load_derived_files(&mut document.outline, &app.path);
-            let status = if report.errors.is_empty() {
-                format!("loaded {} derived file(s)", report.loaded)
-            } else {
-                format!(
-                    "loaded {}; {} error(s): {}",
-                    report.loaded,
-                    report.errors.len(),
-                    report.errors.join(" | ")
-                )
-            };
-            (
-                report.locations,
-                report.node_locations,
-                report.derived_nodes,
-                OriginalExternalState {
-                    children: report.original_children,
-                    bodies: report.original_bodies,
-                },
-                status,
-            )
+    let (
+        source_locations,
+        source_nodes,
+        derived_nodes,
+        writable_external,
+        original_external,
+        derived_status,
+    ) = if app.load_derived {
+        let report = load_derived_files(&mut document.outline, &app.path);
+        let status = if report.errors.is_empty() {
+            format!("loaded {} derived file(s)", report.loaded)
         } else {
-            (
-                HashMap::new(),
-                HashMap::new(),
-                HashSet::new(),
-                OriginalExternalState::default(),
-                "derived files disabled".to_owned(),
+            format!(
+                "loaded {}; {} error(s): {}",
+                report.loaded,
+                report.errors.len(),
+                report.errors.join(" | ")
             )
         };
+        (
+            report.locations,
+            report.node_locations,
+            report.derived_nodes,
+            report.writable_external,
+            OriginalExternalState {
+                children: report.original_children,
+                bodies: report.original_bodies,
+            },
+            status,
+        )
+    } else {
+        (
+            HashMap::new(),
+            HashMap::new(),
+            HashSet::new(),
+            HashMap::new(),
+            OriginalExternalState::default(),
+            "derived files disabled".to_owned(),
+        )
+    };
 
     app.document = document;
     app.source_locations = source_locations;
     app.source_nodes = source_nodes;
     app.derived_nodes = derived_nodes;
+    app.writable_external = writable_external;
     app.original_external = original_external;
     app.dirty = false;
     app.dirty_nodes.clear();
@@ -1270,16 +1438,16 @@ fn referenced_nodes(positions: &[Position]) -> HashSet<NodeId> {
     result
 }
 
-fn position_contains_derived(app: &App, id: &PositionId) -> bool {
+fn position_contains_readonly_derived(app: &App, id: &PositionId) -> bool {
     app.document
         .outline
         .position(id)
-        .is_some_and(|position| subtree_contains(&position.children, &app.derived_nodes))
+        .is_some_and(|position| subtree_contains_readonly(app, &position.children))
 }
 
-fn subtree_contains(positions: &[Position], nodes: &HashSet<NodeId>) -> bool {
+fn subtree_contains_readonly(app: &App, positions: &[Position]) -> bool {
     positions.iter().any(|position| {
-        nodes.contains(&position.node) || subtree_contains(&position.children, nodes)
+        app.readonly_derived(&position.node) || subtree_contains_readonly(app, &position.children)
     })
 }
 
@@ -1816,6 +1984,7 @@ struct LoadReport {
     locations: HashMap<PositionId, SourceLocation>,
     node_locations: HashMap<NodeId, SourceLocation>,
     derived_nodes: HashSet<NodeId>,
+    writable_external: HashMap<NodeId, WritableExternalFile>,
     original_children: HashMap<NodeId, Vec<Position>>,
     original_bodies: HashMap<NodeId, String>,
 }
@@ -1890,6 +2059,18 @@ fn load_derived_files(outline: &mut Outline, outline_path: &Path) -> LoadReport 
                     derived
                         .merge_into(outline, &job.position)
                         .map_err(|error| error.to_string())?;
+                    let original = external_snapshot(outline, &derived.root)
+                        .map(|(_, snapshot)| snapshot)
+                        .ok_or_else(|| "merged external root disappeared".to_owned())?;
+                    report.writable_external.insert(
+                        derived.root.clone(),
+                        WritableExternalFile {
+                            path: job.path.clone(),
+                            start_delimiter: derived.start_delimiter.clone(),
+                            end_delimiter: derived.end_delimiter.clone(),
+                            original,
+                        },
+                    );
                     for (derived_position, line) in &derived.locations {
                         let suffix = derived_position
                             .0
@@ -2212,6 +2393,7 @@ mod tests {
             HashMap::new(),
             HashMap::new(),
             HashSet::new(),
+            HashMap::new(),
             OriginalExternalState::default(),
             false,
         )
@@ -2274,6 +2456,93 @@ mod tests {
         assert_eq!(input.value, "Z");
         assert_eq!(input.cursor, 1);
         assert!(!input.selected);
+    }
+
+    #[test]
+    fn inserts_beside_an_auto_root_but_not_beside_its_derived_descendants() {
+        let mut app = editing_app();
+        app.derived_nodes.insert(NodeId::from("b"));
+
+        insert_headline(&mut app);
+        assert_eq!(app.document.outline.roots.len(), 2);
+        assert!(app.input.is_some());
+
+        app.input = None;
+        select_position(&mut app, &PositionId("0/0".into()));
+        insert_headline(&mut app);
+        assert_eq!(app.document.outline.roots[0].children.len(), 2);
+        assert!(app.input.is_none());
+        assert_eq!(
+            app.status,
+            "@auto descendants are read-only; press o to edit the source"
+        );
+    }
+
+    #[test]
+    fn edits_and_saves_a_thin_file_tree() {
+        let directory = env::temp_dir().join(format!(
+            "leo-cub-tui-file-edit-{}-{}",
+            std::process::id(),
+            fresh_node_id().0
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let external_path = directory.join("test.py");
+        let outline_path = directory.join("test.leo");
+        fs::write(
+            &external_path,
+            "#@+leo-ver=5-thin\n#@+node:a: * @file test.py\n#@+others\n#@+node:b: ** B\n#@-others\n#@-leo\n",
+        )
+        .unwrap();
+
+        let mut app = editing_app();
+        app.path = outline_path.clone();
+        app.document
+            .outline
+            .nodes
+            .get_mut(&NodeId::from("a"))
+            .unwrap()
+            .headline = "@file test.py".into();
+        app.document.outline.roots[0].children.truncate(1);
+        app.document.outline.nodes.remove(&NodeId::from("c"));
+        app.derived_nodes.insert(NodeId::from("b"));
+        let original = external_snapshot(&app.document.outline, &NodeId::from("a"))
+            .unwrap()
+            .1;
+        app.writable_external.insert(
+            NodeId::from("a"),
+            WritableExternalFile {
+                path: external_path.clone(),
+                start_delimiter: "#".into(),
+                end_delimiter: String::new(),
+                original,
+            },
+        );
+        app.original_external
+            .children
+            .insert(NodeId::from("a"), Vec::new());
+        app.original_external
+            .bodies
+            .insert(NodeId::from("a"), String::new());
+        select_position(&mut app, &PositionId("0/0".into()));
+
+        insert_headline(&mut app);
+        handle_headline_input(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('C'), KeyModifiers::SHIFT),
+        );
+        handle_headline_input(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        save(&mut app);
+
+        assert!(!app.dirty, "{}", app.status);
+        let written = DerivedFile::parse(&fs::read_to_string(&external_path).unwrap()).unwrap();
+        assert_eq!(written.outline.roots[0].children.len(), 2);
+        assert_eq!(
+            written.outline.nodes[&written.outline.roots[0].children[1].node].headline,
+            "C"
+        );
+        let persisted = LeoDocument::open(&outline_path).unwrap();
+        assert!(persisted.outline.roots[0].children.is_empty());
+        let _ = fs::remove_dir_all(directory);
     }
 
     #[test]
