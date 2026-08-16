@@ -349,6 +349,12 @@ fn render_tnodes(outline: &Outline) -> String {
     let mut out = "<tnodes>\n".to_owned();
     for id in ids {
         let n = &outline.nodes[id];
+        // Leo omits <t> entirely for a node with an empty body and no attributes;
+        // the parser already treats a missing <t> as an empty body, so preserve
+        // that on write to avoid materializing hundreds of empty tags on re-save.
+        if n.body.is_empty() && n.tnode_attributes.is_empty() {
+            continue;
+        }
         let attrs: String = n
             .tnode_attributes
             .iter()
