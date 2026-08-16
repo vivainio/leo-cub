@@ -416,8 +416,6 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
                 KeyCode::Char('p') => start_find(app),
                 KeyCode::Char('r') => reload(app),
                 KeyCode::Char('s') => save(app),
-                KeyCode::Char('i') | KeyCode::Tab => insert_headline(app),
-                KeyCode::Char('h') | KeyCode::Backspace => edit_headline(app),
                 KeyCode::Up => move_selected(app, MoveDirection::Up),
                 KeyCode::Down => move_selected(app, MoveDirection::Down),
                 KeyCode::Left => move_selected(app, MoveDirection::Left),
@@ -469,8 +467,8 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
                 .into();
             }
             KeyCode::Char('W') => app.toggle_body_wrap(),
-            KeyCode::Tab => insert_headline(app),
-            KeyCode::Backspace => edit_headline(app),
+            KeyCode::Char('i') if key.modifiers.is_empty() => insert_headline(app),
+            KeyCode::Char('h') if key.modifiers.is_empty() => edit_headline(app),
             #[cfg(feature = "syntax")]
             KeyCode::Char('y') => {
                 app.syntax_enabled = !app.syntax_enabled;
@@ -1818,12 +1816,12 @@ fn controls(body_full_width: bool, outline_full_width: bool) -> &'static str {
         return "? help  arrows scroll  W wrap  c/x/v/V tree  f split  F outline  o open/edit  Ctrl-P find  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  q quit";
     }
     if outline_full_width {
-        return "? help  arrows navigate  W wrap  c/x/v/V tree  F split view  o open/edit  Ctrl-P find  Ctrl-I new  Ctrl-H rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  q quit";
+        return "? help  arrows navigate  W wrap  c/x/v/V tree  F split view  o open/edit  Ctrl-P find  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  q quit";
     }
     #[cfg(feature = "syntax")]
-    return "? help  arrows navigate  PgUp/PgDn body  W wrap  c/x/v/V tree  f body  F outline  o open/edit  Ctrl-P find  Ctrl-I new  Ctrl-H rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  y syntax  q quit";
+    return "? help  arrows navigate  PgUp/PgDn body  W wrap  c/x/v/V tree  f body  F outline  o open/edit  Ctrl-P find  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  y syntax  q quit";
     #[cfg(not(feature = "syntax"))]
-    "? help  arrows navigate  PgUp/PgDn body  W wrap  c/x/v/V tree  f body  F outline  o open/edit  Ctrl-P find  Ctrl-I new  Ctrl-H rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  q quit"
+    "? help  arrows navigate  PgUp/PgDn body  W wrap  c/x/v/V tree  f body  F outline  o open/edit  Ctrl-P find  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  q quit"
 }
 
 fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full_width: bool) {
@@ -1846,8 +1844,8 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full
             Line::from("Shift-F          Show full-width outline"),
             Line::from("c/x              Copy/cut selected trees"),
             Line::from("v / Shift-V      Paste copy / paste clone"),
-            Line::from("Ctrl-I or Tab    Insert a sibling"),
-            Line::from("Ctrl-H/Backspace Rename the headline"),
+            Line::from("i                Insert a sibling"),
+            Line::from("h                Rename the headline"),
             Line::from("Ctrl-↑↓←→        Move selected tree(s)"),
             Line::from("Ctrl-P           Find a headline"),
             Line::from("Ctrl-R           Reload from disk"),
@@ -1866,8 +1864,8 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full
             Line::from("Shift-W          Toggle body word wrap"),
             Line::from("c/x/v/V          Copy/cut/paste/clone"),
             Line::from("Ctrl-P           Find a headline"),
-            Line::from("Ctrl-I or Tab    Insert a sibling"),
-            Line::from("Ctrl-H/Backspace Rename the headline"),
+            Line::from("i                Insert a sibling"),
+            Line::from("h                Rename the headline"),
             Line::from("Ctrl-↑↓←→        Move selected tree(s)"),
             Line::from("Ctrl-R           Reload from disk"),
             Line::from("Ctrl-S           Save"),
@@ -1885,8 +1883,8 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full
             Line::from("PageUp/PageDown  Scroll the body pane"),
             Line::from("Shift-W          Toggle body word wrap"),
             Line::from("Ctrl-P           Find a headline"),
-            Line::from("Ctrl-I or Tab    Insert a sibling"),
-            Line::from("Ctrl-H/Backspace Rename the headline"),
+            Line::from("i                Insert a sibling"),
+            Line::from("h                Rename the headline"),
             Line::from("c                Copy selected tree"),
             Line::from("x                Cut selected tree"),
             Line::from("v / Shift-V      Paste copy / paste clone"),
