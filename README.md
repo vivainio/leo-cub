@@ -246,14 +246,17 @@ edits.
 ## Status and safety
 
 This project is early and the file format support is incomplete. In particular,
-it does not yet write thin derived files, dynamically interpret every
-`@comment`/`@delims` change, or fully reconstruct all doc-part forms. Keep
-backups and use `--dry-run` when testing write operations on important outlines.
+it does not dynamically interpret every `@comment`/`@delims` change or fully
+reconstruct all doc-part forms. Keep backups and use `--dry-run` when testing
+write operations on important outlines.
 
-The TUI overlays derived files without modifying either the outline or external
-source files. Derived descendants are read-only in the outline editor; use `o`
-to edit their full external source. Unsaved outline changes require a second
-`q` before they are discarded.
+The TUI permits structural and headline edits in `@file`, `@thin`, and
+`@file-thin` trees and writes changed thin files on `Ctrl-S`. It validates and
+stages generated files before replacing their external sources; unchanged
+external files are not rewritten. Generated `@auto` descendants remain
+read-only because writing them requires language-specific exporters. Use `o`
+to edit a derived node's full external source directly. Unsaved changes require
+a second `q` before they are discarded.
 
 ## License
 

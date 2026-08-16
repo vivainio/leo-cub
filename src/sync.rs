@@ -284,6 +284,33 @@ fn comment_delimiters(path: &Path) -> (&'static str, &'static str) {
     }
 }
 
+pub fn render_thin(
+    outline: &Outline,
+    target: &PositionId,
+    start: &str,
+    end: &str,
+) -> Result<String, SyncError> {
+    let root = outline
+        .position(target)
+        .ok_or_else(|| crate::SentinelError::PositionNotFound(target.0.clone()))?;
+    let mut first = Vec::new();
+    let mut last = Vec::new();
+    collect_first_last(outline, root, &mut first, &mut last);
+    let mut result = String::new();
+    for line in first {
+        result.push_str(line);
+        result.push('\n');
+    }
+    result.push_str(&format!("{start}@+leo-ver=5-thin{end}\n"));
+    render_position(outline, root, 1, "", start, end, &mut result);
+    result.push_str(&format!("{start}@-leo{end}\n"));
+    for line in last {
+        result.push_str(line);
+        result.push('\n');
+    }
+    Ok(result)
+}
+
 fn render_private(
     outline: &Outline,
     target: &PositionId,
@@ -294,10 +321,25 @@ fn render_private(
         .position(target)
         .ok_or_else(|| crate::SentinelError::PositionNotFound(target.0.clone()))?;
     ensure_supported_clean_tree(outline, root)?;
-    let mut result = format!("{start}@+leo-ver=5-thin{end}\n");
-    render_position(outline, root, 1, "", start, end, &mut result);
-    result.push_str(&format!("{start}@-leo{end}\n"));
-    Ok(result)
+    render_thin(outline, target, start, end)
+}
+
+fn collect_first_last<'a>(
+    outline: &'a Outline,
+    position: &'a Position,
+    first: &mut Vec<&'a str>,
+    last: &mut Vec<&'a str>,
+) {
+    for line in outline.nodes[&position.node].body.lines() {
+        if let Some(line) = line.strip_prefix("@first ") {
+            first.push(line);
+        } else if let Some(line) = line.strip_prefix("@last ") {
+            last.push(line);
+        }
+    }
+    for child in &position.children {
+        collect_first_last(outline, child, first, last);
+    }
 }
 
 fn ensure_supported_clean_tree(outline: &Outline, position: &Position) -> Result<(), SyncError> {
@@ -344,10 +386,40 @@ fn render_position(
             let leading = &line[..line.len() - trimmed.len()];
             let child_indent = format!("{indent}{leading}");
             result.push_str(&format!("{indent}{leading}{start}@+others{end}\n"));
-            for child in &position.children {
+            for child in position
+                .children
+                .iter()
+                .filter(|child| !is_section_node(outline, child))
+            {
                 render_position(outline, child, level + 1, &child_indent, start, end, result);
             }
             result.push_str(&format!("{indent}{leading}{start}@-others{end}\n"));
+        } else if trimmed.trim_end() == "@all" {
+            expanded = true;
+            let leading = &line[..line.len() - trimmed.len()];
+            let child_indent = format!("{indent}{leading}");
+            result.push_str(&format!("{child_indent}{start}@+all{end}\n"));
+            for child in &position.children {
+                render_position(outline, child, level + 1, &child_indent, start, end, result);
+            }
+            result.push_str(&format!("{child_indent}{start}@-all{end}\n"));
+        } else if let Some(section) = section_reference(trimmed.trim_end()) {
+            expanded = true;
+            let leading = &line[..line.len() - trimmed.len()];
+            let child_indent = format!("{indent}{leading}");
+            result.push_str(&format!("{child_indent}{start}@+{section}{end}\n"));
+            if let Some(child) = position
+                .children
+                .iter()
+                .find(|child| outline.nodes[&child.node].headline.trim() == section)
+            {
+                render_position(outline, child, level + 1, &child_indent, start, end, result);
+            }
+            result.push_str(&format!("{child_indent}{start}@-{section}{end}\n"));
+        } else if trimmed.starts_with("@first ") {
+            result.push_str(&format!("{indent}{start}@@first{end}\n"));
+        } else if trimmed.starts_with("@last ") {
+            result.push_str(&format!("{indent}{start}@@last{end}\n"));
         } else if let Some(directive) = trimmed.strip_prefix('@') {
             result.push_str(&format!(
                 "{indent}{start}@@{}{end}\n",
@@ -366,11 +438,23 @@ fn render_position(
     }
     if !expanded && !position.children.is_empty() {
         result.push_str(&format!("{indent}{start}@+others{end}\n"));
-        for child in &position.children {
+        for child in position
+            .children
+            .iter()
+            .filter(|child| !is_section_node(outline, child))
+        {
             render_position(outline, child, level + 1, indent, start, end, result);
         }
         result.push_str(&format!("{indent}{start}@-others{end}\n"));
     }
+}
+
+fn section_reference(line: &str) -> Option<&str> {
+    (line.starts_with("<<") && line.ends_with(">>")).then_some(line)
+}
+
+fn is_section_node(outline: &Outline, position: &Position) -> bool {
+    section_reference(outline.nodes[&position.node].headline.trim()).is_some()
 }
 
 fn is_sentinel_like(line: &str, start: &str, end: &str) -> bool {
@@ -403,6 +487,37 @@ mod tests {
             "root\n@others\ntail\n"
         );
         assert_eq!(parsed.outline.nodes[&NodeId::from("c")].body, "child\n");
+    }
+
+    #[test]
+    fn renders_thin_section_all_and_first_last_expansions() {
+        let source = concat!(
+            "#!/usr/bin/env python\n",
+            "#@+leo-ver=5-thin\n",
+            "#@+node:r: * @file test.py\n",
+            "#@@first\n",
+            "#@+<<imports>>\n",
+            "#@+node:s: ** <<imports>>\n",
+            "import sys\n",
+            "#@-<<imports>>\n",
+            "#@+others\n",
+            "#@+node:c: ** child\n",
+            "#@+all\n",
+            "#@+node:g: *3* grandchild\n",
+            "body\n",
+            "#@-all\n",
+            "#@-others\n",
+            "#@@last\n",
+            "#@-leo\n",
+            "# trailing\n",
+        );
+        let parsed = DerivedFile::parse(source).unwrap();
+        let rendered = render_thin(&parsed.outline, &PositionId("0".into()), "#", "").unwrap();
+        let reparsed = DerivedFile::parse(&rendered).unwrap();
+
+        assert_eq!(reparsed.outline, parsed.outline);
+        assert!(rendered.starts_with("#!/usr/bin/env python\n#@+leo-ver=5-thin\n"));
+        assert!(rendered.ends_with("#@-leo\n# trailing\n"));
     }
 
     #[test]
