@@ -412,6 +412,7 @@ pub fn render_outline_with_options(
                 .is_some_and(|rest| rest.starts_with('/'))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn visit(
         outline: &Outline,
         positions: &[Position],
