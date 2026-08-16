@@ -47,3 +47,7 @@ cub tui project.leo
 
 Use the arrow keys to navigate, `Enter` to expand a node, `o` to open source,
 and `?` to see the complete keybinding list. Press `q` to quit.
+
+To build and edit a tree from inside the TUI itself — inserting, renaming,
+reordering, copying, and cloning nodes — see
+[Interactive editing](interactive-editing.md).

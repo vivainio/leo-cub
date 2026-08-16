@@ -16,6 +16,7 @@ nav = [
   { "Getting started" = [
     { "Installation" = "getting-started/installation.md" },
     { "First outline" = "getting-started/first-outline.md" },
+    { "Interactive editing" = "getting-started/interactive-editing.md" },
     { "Tutorial outline" = "getting-started/tutorial.md" },
   ] },
   { "Reference" = [
