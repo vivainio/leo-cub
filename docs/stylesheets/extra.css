@@ -100,6 +100,15 @@
   font-size: 0.85em;
 }
 
+.leo-current-label {
+  margin-left: 0.35rem;
+  color: var(--md-accent-fg-color);
+  font-size: 0.72em;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
 @media screen and (max-width: 44rem) {
   .guide-grid {
     grid-template-columns: 1fr;

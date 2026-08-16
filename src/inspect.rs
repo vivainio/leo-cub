@@ -448,7 +448,7 @@ pub fn render_outline_with_options(
             let headline = escape_headline(&node.headline);
             let headline = if is_current {
                 format!(
-                    r#"<span class="leo-outline__current" data-position="{path}" aria-current="page">{headline}</span>"#
+                    r#"<span class="leo-outline__current" data-position="{path}" aria-current="page">{headline} <span class="leo-current-label">current</span></span>"#
                 )
             } else if is_ancestor {
                 format!(r#"<span class="leo-outline__ancestor">{headline}</span>"#)
@@ -787,7 +787,7 @@ mod tests {
             render_outline_with_options(&outline(), Some(&PositionId("0/0/0".into())), false, &[]);
         assert!(rendered.contains(r#"<span class="leo-outline__ancestor">paths</span>"#));
         assert!(rendered.contains(
-            r#"<span class="leo-outline__current" data-position="0/0/0" aria-current="page">child</span>"#
+            r#"<span class="leo-outline__current" data-position="0/0/0" aria-current="page">child <span class="leo-current-label">current</span></span>"#
         ));
     }
 
