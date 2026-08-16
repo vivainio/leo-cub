@@ -6,6 +6,18 @@ outlines.
 
 The installed command is `cub`; the Rust library namespace is `leo`.
 
+## Documentation
+
+The project guide is built with [Zensical](https://zensical.org/) and published
+to [GitHub Pages](https://vivainio.github.io/leo-cub/) from the `main` branch.
+The source files live in [`docs/`](docs/), and the local preview can be started
+with:
+
+```sh
+python -m pip install zensical
+zensical serve
+```
+
 ## Screenshot
 
 <img width="1836" height="933" alt="image" src="https://github.com/user-attachments/assets/2ff24163-62a2-487b-aaf5-a9ec8c2beb73" />
