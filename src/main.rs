@@ -3,7 +3,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 use leo::{
     DerivedFile, ExternalFilter, ImportMode, ImportOptions, InspectSelector, LeoDocument, NodeId,
     OperationBatch, PositionId, import_files, load_matching_external_files, render_compact,
-    render_search_compact, search_outline, select_subtrees, sync_document,
+    render_outline_with_options, render_search_compact, search_outline, select_subtrees,
+    sync_document,
 };
 use regex::Regex;
 use std::{fs, path::PathBuf};
@@ -89,6 +90,28 @@ enum Command {
         /// Output format. Compact is intended for reading; JSON for scripts.
         #[arg(long, value_enum, default_value_t)]
         format: InspectFormat,
+    },
+    /// Render a selected outline hierarchy as a Markdown list.
+    Render {
+        file: PathBuf,
+        /// Show the subtree at this occurrence path (for example, 0/2/1).
+        #[arg(long, conflicts_with_all = ["external", "gnx"])]
+        position: Option<String>,
+        /// Show all occurrences of the subtree with this GNX.
+        #[arg(long, conflicts_with_all = ["external", "position"])]
+        gnx: Option<String>,
+        /// Show the subtree matching this external filename.
+        #[arg(long, conflicts_with_all = ["gnx", "position"])]
+        external: Option<String>,
+        /// Mark this occurrence and its ancestors as current.
+        #[arg(long)]
+        current: Option<String>,
+        /// Collapse branches unless they contain the current or an expanded position.
+        #[arg(long)]
+        collapsed: bool,
+        /// Expand a position; may be repeated.
+        #[arg(long, value_name = "POSITION")]
+        expand: Vec<String>,
     },
     Validate {
         file: PathBuf,
@@ -235,6 +258,37 @@ fn main() -> Result<()> {
                     }
                 }
             }
+        }
+        Command::Render {
+            file,
+            position,
+            gnx,
+            external,
+            current,
+            collapsed,
+            expand,
+        } => {
+            let mut outline = LeoDocument::open(&file)?.outline;
+            if let Some(gnx) = gnx.as_deref() {
+                load_matching_external_files(&mut outline, &file, ExternalFilter::Gnx(gnx))?;
+            } else if let Some(external) = external.as_deref() {
+                load_matching_external_files(&mut outline, &file, ExternalFilter::File(external))?;
+            }
+            let selected = if let Some(external) = external.as_deref() {
+                select_subtrees(&outline, InspectSelector::File(external))?
+            } else if let Some(gnx) = gnx.as_deref() {
+                select_subtrees(&outline, InspectSelector::Gnx(gnx))?
+            } else if let Some(position) = position {
+                select_subtrees(&outline, InspectSelector::Position(&PositionId(position)))?
+            } else {
+                outline
+            };
+            let current = current.map(PositionId);
+            let expand = expand.into_iter().map(PositionId).collect::<Vec<_>>();
+            print!(
+                "{}",
+                render_outline_with_options(&selected, current.as_ref(), collapsed, &expand)
+            );
         }
         Command::Validate { file } => {
             let errors = LeoDocument::open(file)?.outline.validate();
