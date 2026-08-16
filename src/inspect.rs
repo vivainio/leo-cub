@@ -445,7 +445,13 @@ pub fn render_outline_with_options(
             let is_current = current == Some(path.as_str());
             let is_ancestor =
                 current.is_some_and(|value| value != path && is_descendant(value, &path));
-            let headline = escape_headline(&node.headline);
+            let body_marker = if node.body.trim().is_empty() {
+                String::new()
+            } else {
+                r#" <span class="leo-body-dot" aria-label="has body text" title="has body text"></span>"#
+                    .to_owned()
+            };
+            let headline = format!("{}{}", escape_headline(&node.headline), body_marker);
             let headline = if is_current {
                 format!(
                     r#"<span class="leo-outline__current" data-position="{path}" aria-current="page">{headline} <span class="leo-current-label" aria-label="current" title="current"></span></span>"#
@@ -766,7 +772,7 @@ mod tests {
         let rendered = render_outline(&outline());
         assert_eq!(
             rendered,
-            "- paths\n  - @file main.rs\n    - child\n- @file main.rs ↪ clone\n- other\n"
+            "- paths <span class=\"leo-body-dot\" aria-label=\"has body text\" title=\"has body text\"></span>\n  - @file main.rs\n    - child <span class=\"leo-body-dot\" aria-label=\"has body text\" title=\"has body text\"></span>\n- @file main.rs ↪ clone\n- other\n"
         );
     }
 
@@ -785,9 +791,11 @@ mod tests {
     fn outline_marks_current_path() {
         let rendered =
             render_outline_with_options(&outline(), Some(&PositionId("0/0/0".into())), false, &[]);
-        assert!(rendered.contains(r#"<span class="leo-outline__ancestor">paths</span>"#));
         assert!(rendered.contains(
-            r#"<span class="leo-outline__current" data-position="0/0/0" aria-current="page">child <span class="leo-current-label" aria-label="current" title="current"></span></span>"#
+            r#"<span class="leo-outline__ancestor">paths <span class="leo-body-dot" aria-label="has body text" title="has body text"></span></span>"#
+        ));
+        assert!(rendered.contains(
+            r#"<span class="leo-outline__current" data-position="0/0/0" aria-current="page">child <span class="leo-body-dot" aria-label="has body text" title="has body text"></span> <span class="leo-current-label" aria-label="current" title="current"></span></span>"#
         ));
     }
 

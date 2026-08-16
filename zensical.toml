@@ -27,7 +27,7 @@ nav = [
   ] },
 ]
 
-extra_css = ["stylesheets/extra.css"]
+extra_css = ["stylesheets/leo-outline.css", "stylesheets/extra.css"]
 
 [project.theme]
 language = "en"

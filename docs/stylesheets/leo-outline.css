@@ -1,0 +1,103 @@
+/* Reusable styles for HTML emitted by `cub render`. */
+.leo-outline__current {
+  color: var(--md-accent-fg-color, #c2185b);
+  font-weight: 700;
+}
+
+.leo-outline__ancestor {
+  font-weight: 600;
+}
+
+.leo-outline__node {
+  margin: 0.25rem 0;
+}
+
+.leo-outline__node > summary {
+  cursor: pointer;
+}
+
+.leo-outline-sample {
+  --leo-tree-line: color-mix(in srgb, var(--md-default-fg-color, #333) 32%, transparent);
+  margin: 1rem 0 1.5rem;
+  padding: 0.85rem 1rem;
+  border: 1px solid var(--md-default-fg-color--lightest, #ddd);
+  border-radius: 0.45rem;
+  background: var(--md-code-bg-color, #f5f5f5);
+}
+
+.leo-outline-sample .leo-outline__list {
+  position: relative;
+  margin: 0;
+  padding-left: 1.35rem;
+  list-style: none;
+}
+
+.leo-outline-sample .leo-outline__list .leo-outline__list {
+  margin-left: 0.35rem;
+  border-left: 1px solid var(--leo-tree-line);
+}
+
+.leo-outline-sample .leo-outline__list .leo-outline__list > li {
+  position: relative;
+}
+
+.leo-outline-sample .leo-outline__list .leo-outline__list > li::before {
+  position: absolute;
+  top: 0.8em;
+  left: -2.35rem;
+  width: 2.35rem;
+  border-top: 1px solid var(--leo-tree-line);
+  content: "";
+}
+
+.leo-outline-sample .leo-outline__list .leo-outline__list .leo-outline__last::after {
+  position: absolute;
+  top: 0.8em;
+  bottom: 0;
+  left: -2.35rem;
+  width: 1px;
+  z-index: 1;
+  background: var(--md-code-bg-color, #f5f5f5);
+  content: "";
+}
+
+.leo-outline-sample .leo-outline__last {
+  z-index: 2;
+}
+
+.leo-clone-label {
+  color: var(--md-accent-fg-color, #c2185b);
+  font-size: 0.85em;
+}
+
+.leo-current-label {
+  display: inline-block;
+  width: 0.5rem;
+  height: 0.5rem;
+  margin-left: 0.35rem;
+  border-radius: 50%;
+  background: var(--md-accent-fg-color, #c2185b);
+  box-shadow: 0 0 0 0.18rem color-mix(in srgb, var(--md-accent-fg-color, #c2185b) 18%, transparent);
+  vertical-align: 0.05em;
+}
+
+.leo-body-dot {
+  display: inline-block;
+  width: 0.32rem;
+  height: 0.32rem;
+  margin-left: 0.3rem;
+  border-radius: 50%;
+  background: var(--md-default-fg-color--light, #999);
+  vertical-align: 0.08em;
+}
+
+.leo-branch-marker {
+  display: inline-block;
+  width: 0;
+  height: 0;
+  margin-right: 0.42rem;
+  border-top: 0.28rem solid transparent;
+  border-bottom: 0.28rem solid transparent;
+  border-left: 0.38rem solid var(--md-default-fg-color--light, #999);
+  vertical-align: -0.08em;
+}

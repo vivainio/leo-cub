@@ -34,22 +34,19 @@
 <tnodes>
   <t tx="tutorial.root">A small outline used throughout the leo-cub tutorial.</t>
   <t tx="tutorial.project">The project tree groups source, documentation, and work items.</t>
-  <t tx="tutorial.source">Code belongs here.</t>
+  <t tx="tutorial.source"></t>
   <t tx="tutorial.main">fn main() {
     println!("hello from the outline");
 }</t>
-  <t tx="tutorial.lib">pub fn greet() -&gt; &amp;'static str {
-    "hello"
-}</t>
-  <t tx="tutorial.tests">#[test]
-fn greeting_is_stable() {}</t>
+  <t tx="tutorial.lib"></t>
+  <t tx="tutorial.tests"></t>
   <t tx="tutorial.docs">Written material belongs here.</t>
   <t tx="tutorial.page">This page is assembled from the outline and rendered by Zensical.</t>
-  <t tx="tutorial.concepts">Explain positions, GNXs, and clones.</t>
-  <t tx="tutorial.commands">Document the commands used in each step.</t>
+  <t tx="tutorial.concepts"></t>
+  <t tx="tutorial.commands"></t>
   <t tx="tutorial.tasks">Open work items belong here.</t>
   <t tx="tutorial.first-task">Explain how positions and GNXs differ.</t>
-  <t tx="tutorial.review">Check that every command has a visible result.</t>
+  <t tx="tutorial.review"></t>
   <t tx="tutorial.publish">Build the site and publish the guide.</t>
   <t tx="tutorial.reference">The same Tasks node is cloned here to demonstrate shared identity.</t>
 </tnodes>

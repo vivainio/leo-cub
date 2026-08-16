@@ -57,36 +57,36 @@ previewable on Zensical versions without third-party build plugins:
 
 <div class="leo-outline-sample">
 <ul class="leo-outline__list">
-  <li><span class="leo-outline__ancestor">Tutorial project</span>
+  <li><span class="leo-outline__ancestor"><span class="leo-branch-marker" aria-label="has children" title="has children"></span>Tutorial project <span class="leo-body-dot" aria-label="has body text" title="has body text"></span></span>
     <ul class="leo-outline__list">
-      <li><span class="leo-outline__ancestor">Project</span>
+      <li><span class="leo-outline__ancestor"><span class="leo-branch-marker" aria-label="has children" title="has children"></span>Project <span class="leo-body-dot" aria-label="has body text" title="has body text"></span></span>
         <ul class="leo-outline__list">
-          <li>Source
+          <li><span class="leo-branch-marker" aria-label="has children" title="has children"></span>Source
             <ul class="leo-outline__list">
-              <li>main.rs</li>
+              <li>main.rs <span class="leo-body-dot" aria-label="has body text" title="has body text"></span></li>
               <li>lib.rs</li>
               <li class="leo-outline__last">tests.rs</li>
             </ul>
           </li>
-          <li><span class="leo-outline__current" data-position="0/0/1" aria-current="page">Documentation <span class="leo-current-label" aria-label="current" title="current"></span></span>
+          <li><span class="leo-outline__current" data-position="0/0/1" aria-current="page"><span class="leo-branch-marker" aria-label="has children" title="has children"></span>Documentation <span class="leo-body-dot" aria-label="has body text" title="has body text"></span> <span class="leo-current-label" aria-label="current" title="current"></span></span>
             <ul class="leo-outline__list">
-              <li>Tutorial</li>
+              <li>Tutorial <span class="leo-body-dot" aria-label="has body text" title="has body text"></span></li>
               <li>Concepts</li>
               <li class="leo-outline__last">Command reference</li>
             </ul>
           </li>
-          <li class="leo-outline__last">Tasks
+          <li class="leo-outline__last"><span class="leo-branch-marker" aria-label="has children" title="has children"></span>Tasks <span class="leo-body-dot" aria-label="has body text" title="has body text"></span>
             <ul class="leo-outline__list">
-              <li>Write the first draft</li>
+              <li>Write the first draft <span class="leo-body-dot" aria-label="has body text" title="has body text"></span></li>
               <li>Review the examples</li>
-              <li class="leo-outline__last">Publish the guide</li>
+              <li class="leo-outline__last">Publish the guide <span class="leo-body-dot" aria-label="has body text" title="has body text"></span></li>
             </ul>
           </li>
         </ul>
       </li>
-      <li class="leo-outline__last">Reference
+      <li class="leo-outline__last"><span class="leo-branch-marker" aria-label="has children" title="has children"></span>Reference <span class="leo-body-dot" aria-label="has body text" title="has body text"></span>
         <ul class="leo-outline__list">
-          <li>Tasks <span class="leo-clone-label">↪ clone</span></li>
+          <li>Tasks <span class="leo-body-dot" aria-label="has body text" title="has body text"></span> <span class="leo-clone-label">↪ clone</span></li>
           <li>Concepts <span class="leo-clone-label">↪ clone</span></li>
           <li class="leo-outline__last">Command reference <span class="leo-clone-label">↪ clone</span></li>
         </ul>
