@@ -42,8 +42,11 @@ an external file.
 ## Browse interactively
 
 ```sh
-cub tui project.leo
+cub project.leo
 ```
+
+An outline given without a subcommand opens in the TUI; `cub tui project.leo`
+is the equivalent explicit form.
 
 Use the arrow keys to navigate, `Enter` to expand a node, `o` to open source,
 and `?` to see the complete keybinding list. Press `q` to quit.

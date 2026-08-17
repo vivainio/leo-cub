@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use leo::{
     DerivedFile, ExternalFilter, ImportMode, ImportOptions, InspectSelector, LeoDocument, NodeId,
     OperationBatch, PositionId, import_files, load_matching_external_files, render_compact,
@@ -16,10 +16,17 @@ mod syntax;
 mod tui;
 
 #[derive(Parser)]
-#[command(name = "cub", version, about)]
+#[command(name = "cub", version, about, args_conflicts_with_subcommands = true)]
 struct Cli {
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
+    /// Outline to browse interactively when no subcommand is given.
+    #[cfg(feature = "tui")]
+    file: Option<PathBuf>,
+    /// Show only the hierarchy stored directly in the .leo XML.
+    #[cfg(feature = "tui")]
+    #[arg(long, requires = "file")]
+    no_derived: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
@@ -191,7 +198,27 @@ EXAMPLE:
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    match cli.command {
+    #[cfg(feature = "tui")]
+    let command = match (cli.command, cli.file) {
+        (Some(command), None) => command,
+        (None, Some(file)) => Command::Tui {
+            file,
+            no_derived: cli.no_derived,
+        },
+        (None, None) => {
+            Cli::command().print_help()?;
+            println!();
+            return Ok(());
+        }
+        (Some(_), Some(_)) => unreachable!("clap rejects arguments alongside subcommands"),
+    };
+    #[cfg(not(feature = "tui"))]
+    let Some(command) = cli.command else {
+        Cli::command().print_help()?;
+        println!();
+        return Ok(());
+    };
+    match command {
         Command::New { file, headline } => {
             LeoDocument::new(headline)
                 .save_new(&file)
@@ -414,4 +441,37 @@ fn count_positions(positions: &[leo::Position]) -> usize {
         .iter()
         .map(|position| 1 + count_positions(&position.children))
         .sum()
+}
+
+#[cfg(all(test, feature = "tui"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_an_outline_without_the_tui_subcommand() {
+        let cli = Cli::try_parse_from(["cub", "notes.leo"]).unwrap();
+
+        assert!(cli.command.is_none());
+        assert_eq!(cli.file, Some(PathBuf::from("notes.leo")));
+        assert!(!cli.no_derived);
+    }
+
+    #[test]
+    fn explicit_subcommands_still_parse_normally() {
+        let cli = Cli::try_parse_from(["cub", "validate", "notes.leo"]).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Some(Command::Validate { file }) if file == PathBuf::from("notes.leo")
+        ));
+        assert!(cli.file.is_none());
+    }
+
+    #[test]
+    fn shorthand_accepts_tui_options() {
+        let cli = Cli::try_parse_from(["cub", "notes.leo", "--no-derived"]).unwrap();
+
+        assert_eq!(cli.file, Some(PathBuf::from("notes.leo")));
+        assert!(cli.no_derived);
+    }
 }

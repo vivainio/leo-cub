@@ -1,7 +1,7 @@
 # Interactive editing
 
 The commands in [First outline](first-outline.md) build a tree from the shell.
-This chapter builds the same shape of tree from inside `cub tui`, so you can
+This chapter builds the same shape of tree from inside the TUI, so you can
 see how insertion, renaming, indentation, reordering, copying, and cloning
 feel as keystrokes rather than flags. Each stage below is checked with
 `cub render`, so you can compare your outline against what it should look
@@ -14,10 +14,11 @@ Nothing here is destructive: nothing is written to disk until you press
 
 ```sh
 cub new project.leo --headline "Project"
-cub tui project.leo
+cub project.leo
 ```
 
-The outline opens with a single root, `Project`, selected.
+The outline opens with a single root, `Project`, selected. The explicit
+`cub tui project.leo` command does the same thing.
 
 ## Keys used in this chapter
 
@@ -71,7 +72,7 @@ cub render project.leo
 
 ## Add a grandchild
 
-Back in `cub tui project.leo`, select `Source` and repeat the
+Back in `cub project.leo`, select `Source` and repeat the
 insert-then-demote pattern one level deeper:
 
 1. Press `i`, type `main.rs`, `Enter`. It lands as a sibling of `Source`,
