@@ -18,7 +18,10 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use leo::{AutoFile, DerivedFile, LeoDocument, NodeId, Outline, Position, PositionId, render_thin};
+use leo::{
+    AutoFile, DerivedFile, LeoDocument, NodeId, Outline, Position, PositionId, render_thin,
+    search_outline,
+};
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
@@ -27,6 +30,7 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
+use regex::{Regex, RegexBuilder};
 
 #[derive(Clone)]
 struct Row {
@@ -70,6 +74,7 @@ struct App {
     flash: Option<(String, Instant)>,
     input: Option<HeadlineInput>,
     find: Option<FindInput>,
+    search: Option<FindInput>,
     dirty: bool,
     dirty_nodes: HashSet<NodeId>,
     quit_armed: bool,
@@ -129,6 +134,7 @@ impl App {
             flash: None,
             input: None,
             find: None,
+            search: None,
             dirty: false,
             dirty_nodes: HashSet::new(),
             quit_armed: false,
@@ -397,7 +403,7 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
         }
         let event = event::read()?;
         if let Event::Mouse(mouse) = event {
-            if app.input.is_none() && app.find.is_none() && !app.help {
+            if app.input.is_none() && app.find.is_none() && app.search.is_none() && !app.help {
                 handle_mouse(app, terminal.size()?.into(), mouse);
             }
             continue;
@@ -412,6 +418,10 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
         }
         if app.find.is_some() {
             handle_find_input(app, key);
+            continue;
+        }
+        if app.search.is_some() {
+            handle_search_input(app, key);
             continue;
         }
         if app.help {
@@ -479,6 +489,7 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
                 .into();
             }
             KeyCode::Char('W') => app.toggle_body_wrap(),
+            KeyCode::Char('/') if key.modifiers.is_empty() => start_search(app),
             KeyCode::Char('i') if key.modifiers.is_empty() => insert_headline(app),
             KeyCode::Char('h') if key.modifiers.is_empty() => edit_headline(app),
             #[cfg(feature = "syntax")]
@@ -637,6 +648,119 @@ fn cycle_find_match(app: &mut App, delta: isize) {
     let position = find.matches[active].clone();
     app.find.as_mut().expect("find input exists").active = active;
     reveal_and_select(app, &position);
+}
+
+fn start_search(app: &mut App) {
+    let original = app.selected_row().map(|row| row.position);
+    app.search = Some(FindInput {
+        query: String::new(),
+        matches: Vec::new(),
+        active: 0,
+        original,
+    });
+    app.status = "search headlines and body: type to search, Enter accepts, Esc cancels".into();
+}
+
+fn handle_search_input(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Enter => {
+            app.search = None;
+            app.status = "search match selected".into();
+        }
+        KeyCode::Esc => {
+            let original = app.search.take().and_then(|search| search.original);
+            if let Some(position) = original {
+                reveal_and_select(app, &position);
+            }
+            app.status = "search cancelled".into();
+        }
+        KeyCode::Backspace => {
+            app.search
+                .as_mut()
+                .expect("search input exists")
+                .query
+                .pop();
+            update_search_matches(app, 0);
+        }
+        KeyCode::Down => cycle_search_match(app, 1),
+        KeyCode::Up => cycle_search_match(app, -1),
+        KeyCode::Char(character)
+            if !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
+            app.search
+                .as_mut()
+                .expect("search input exists")
+                .query
+                .push(character);
+            update_search_matches(app, 0);
+        }
+        _ => {}
+    }
+}
+
+fn update_search_matches(app: &mut App, active: usize) {
+    let query = app
+        .search
+        .as_ref()
+        .expect("search input exists")
+        .query
+        .clone();
+    let matches = if query.is_empty() {
+        Vec::new()
+    } else if let Ok(pattern) = RegexBuilder::new(&regex::escape(&query))
+        .case_insensitive(true)
+        .build()
+    {
+        search_outline(&app.document.outline, &[pattern])
+            .into_iter()
+            .map(|result| result.position)
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let active = active.min(matches.len().saturating_sub(1));
+    let selected = matches.get(active).cloned();
+    let search = app.search.as_mut().expect("search input exists");
+    search.matches = matches;
+    search.active = active;
+    if let Some(position) = selected {
+        reveal_and_select(app, &position);
+        scroll_body_to_first_match(app, &query);
+    }
+}
+
+fn cycle_search_match(app: &mut App, delta: isize) {
+    let search = app.search.as_ref().expect("search input exists");
+    if search.matches.is_empty() {
+        return;
+    }
+    let len = search.matches.len() as isize;
+    let active = (search.active as isize + delta).rem_euclid(len) as usize;
+    let position = search.matches[active].clone();
+    let query = search.query.clone();
+    app.search.as_mut().expect("search input exists").active = active;
+    reveal_and_select(app, &position);
+    scroll_body_to_first_match(app, &query);
+}
+
+/// Scrolls the body pane to the first line matching `query`, so a
+/// body-content hit is visible without extra manual scrolling.
+fn scroll_body_to_first_match(app: &mut App, query: &str) {
+    if query.is_empty() {
+        return;
+    }
+    let Some(row) = app.selected_row() else {
+        return;
+    };
+    let needle = query.to_lowercase();
+    let line = app.document.outline.nodes[&row.node]
+        .body
+        .lines()
+        .position(|line| line.to_lowercase().contains(&needle))
+        .unwrap_or(0);
+    app.body_scroll = line;
 }
 
 fn all_rows(outline: &Outline) -> Vec<Row> {
@@ -1692,7 +1816,15 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
         let node_area = node_block.inner(columns[1]);
         frame.render_widget(node_block, columns[1]);
         if let Some(row) = rows.get(app.selected) {
-            let body = body_text(app, row);
+            let mut body = body_text(app, row);
+            if let Some(search) = &app.search
+                && !search.query.is_empty()
+                && let Ok(pattern) = RegexBuilder::new(&regex::escape(&search.query))
+                    .case_insensitive(true)
+                    .build()
+            {
+                body = highlight_query_in_text(body, &pattern);
+            }
             let body_width = body.width();
             let mut paragraph = Paragraph::new(body);
             if app.body_wrap {
@@ -1727,13 +1859,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
     if flash.is_none() {
         app.flash = None;
     }
-    let mut status = vec![Span::styled(
-        format!(
-            "{}   [",
-            controls(app.body_full_width, app.outline_full_width)
-        ),
-        Style::default().fg(Color::DarkGray),
-    )];
+    let mut status = vec![Span::styled("[", Style::default().fg(Color::DarkGray))];
     status.push(Span::styled(
         flash.as_deref().unwrap_or(&app.status),
         if flash.is_some() {
@@ -1744,7 +1870,13 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
             Style::default().fg(Color::DarkGray)
         },
     ));
-    status.push(Span::styled("]", Style::default().fg(Color::DarkGray)));
+    status.push(Span::styled(
+        format!(
+            "]   {}",
+            controls(app.body_full_width, app.outline_full_width)
+        ),
+        Style::default().fg(Color::DarkGray),
+    ));
     frame.render_widget(Paragraph::new(Line::from(status)), areas[1]);
     if let Some(find) = &app.find {
         let width = frame.area().width.saturating_sub(4).min(72);
@@ -1785,6 +1917,58 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
             Paragraph::new(lines).block(
                 Block::default()
                     .title(format!(" Find headline  {count} "))
+                    .borders(Borders::ALL),
+            ),
+            area,
+        );
+    }
+    if let Some(search) = &app.search {
+        // Anchored to the outline column (rather than the full frame, like
+        // the find popup) so it never covers the body pane, which is where
+        // the highlighted match actually needs to stay visible.
+        let anchor = if app.body_full_width {
+            frame.area()
+        } else {
+            columns[0]
+        };
+        let width = anchor.width.saturating_sub(4).min(72);
+        let shown = search.matches.len().min(5);
+        let height = (3 + shown as u16).min(frame.area().height.saturating_sub(2));
+        let area = Rect::new(
+            anchor.x + (anchor.width.saturating_sub(width)) / 2,
+            anchor.y + 1,
+            width,
+            height,
+        );
+        let count = if search.query.is_empty() {
+            String::new()
+        } else if search.matches.is_empty() {
+            "no matches".into()
+        } else {
+            format!("{} of {}", search.active + 1, search.matches.len())
+        };
+        let rows = all_rows(&app.document.outline);
+        let first = search.active.saturating_sub(4);
+        let mut lines = vec![Line::from(format!("/ {}▏", search.query))];
+        lines.extend(search.matches.iter().enumerate().skip(first).take(5).map(
+            |(index, position)| {
+                let row = rows
+                    .iter()
+                    .find(|row| &row.position == position)
+                    .expect("matched position exists");
+                let marker = if index == search.active { "› " } else { "  " };
+                let mut spans = vec![Span::raw(marker)];
+                spans.extend(headline_spans(
+                    &app.document.outline.nodes[&row.node].headline,
+                ));
+                Line::from(spans)
+            },
+        ));
+        frame.render_widget(Clear, area);
+        frame.render_widget(
+            Paragraph::new(lines).block(
+                Block::default()
+                    .title(format!(" Search (headline + body)  {count} "))
                     .borders(Borders::ALL),
             ),
             area,
@@ -1881,17 +2065,17 @@ fn headline_spans(headline: &str) -> Vec<Span<'_>> {
 fn controls(body_full_width: bool, outline_full_width: bool) -> &'static str {
     if body_full_width {
         #[cfg(feature = "syntax")]
-        return "? help  arrows scroll  W wrap  c/x/v/V tree  f split  F outline  o open/edit  Ctrl-P find  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  y syntax  q quit";
+        return "? help  arrows scroll  W wrap  c/x/v/V tree  f split  F outline  o open/edit  Ctrl-P find  / search  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  y syntax  q quit";
         #[cfg(not(feature = "syntax"))]
-        return "? help  arrows scroll  W wrap  c/x/v/V tree  f split  F outline  o open/edit  Ctrl-P find  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  q quit";
+        return "? help  arrows scroll  W wrap  c/x/v/V tree  f split  F outline  o open/edit  Ctrl-P find  / search  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  q quit";
     }
     if outline_full_width {
-        return "? help  arrows navigate  W wrap  c/x/v/V tree  F split view  o open/edit  Ctrl-P find  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  q quit";
+        return "? help  arrows navigate  W wrap  c/x/v/V tree  F split view  o open/edit  Ctrl-P find  / search  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  q quit";
     }
     #[cfg(feature = "syntax")]
-    return "? help  arrows navigate  PgUp/PgDn body  W wrap  c/x/v/V tree  f body  F outline  o open/edit  Ctrl-P find  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  y syntax  q quit";
+    return "? help  arrows navigate  PgUp/PgDn body  W wrap  c/x/v/V tree  f body  F outline  o open/edit  Ctrl-P find  / search  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  y syntax  q quit";
     #[cfg(not(feature = "syntax"))]
-    "? help  arrows navigate  PgUp/PgDn body  W wrap  c/x/v/V tree  f body  F outline  o open/edit  Ctrl-P find  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  q quit"
+    "? help  arrows navigate  PgUp/PgDn body  W wrap  c/x/v/V tree  f body  F outline  o open/edit  Ctrl-P find  / search  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  q quit"
 }
 
 fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full_width: bool) {
@@ -1918,6 +2102,7 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full
             Line::from("h                Rename the headline"),
             Line::from("Ctrl-↑↓←→        Move selected tree(s)"),
             Line::from("Ctrl-P           Find a headline"),
+            Line::from("/                Search headlines and body text"),
             Line::from("Ctrl-R           Reload from disk"),
             Line::from("Ctrl-S           Save"),
             Line::from("o                Edit body, or open derived source"),
@@ -1934,6 +2119,7 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full
             Line::from("Shift-W          Toggle body word wrap"),
             Line::from("c/x/v/V          Copy/cut/paste/clone"),
             Line::from("Ctrl-P           Find a headline"),
+            Line::from("/                Search headlines and body text"),
             Line::from("i                Insert a sibling"),
             Line::from("h                Rename the headline"),
             Line::from("Ctrl-↑↓←→        Move selected tree(s)"),
@@ -1953,6 +2139,7 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full
             Line::from("PageUp/PageDown  Scroll the body pane"),
             Line::from("Shift-W          Toggle body word wrap"),
             Line::from("Ctrl-P           Find a headline"),
+            Line::from("/                Search headlines and body text"),
             Line::from("i                Insert a sibling"),
             Line::from("h                Rename the headline"),
             Line::from("c                Copy selected tree"),
@@ -1983,6 +2170,67 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full
         ),
         area,
     );
+}
+
+/// Overlays a background highlight on substrings matching `pattern`,
+/// splitting existing spans at the match boundaries while keeping each
+/// fragment's original style (e.g. syntax-highlight foreground colors)
+/// intact — only the background/bold modifier is added.
+fn highlight_query_in_text(text: Text<'static>, pattern: &Regex) -> Text<'static> {
+    Text::from(
+        text.lines
+            .into_iter()
+            .map(|line| highlight_matches_in_line(line, pattern))
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn highlight_matches_in_line(line: Line<'static>, pattern: &Regex) -> Line<'static> {
+    let content: String = line
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect();
+    let ranges: Vec<(usize, usize)> = pattern
+        .find_iter(&content)
+        .map(|found| (found.start(), found.end()))
+        .collect();
+    if ranges.is_empty() {
+        return line;
+    }
+    let mut spans = Vec::new();
+    let mut offset = 0usize;
+    for span in line.spans {
+        let text = span.content.into_owned();
+        let span_start = offset;
+        let span_end = span_start + text.len();
+        offset = span_end;
+        let mut cursor = 0usize;
+        for &(match_start, match_end) in &ranges {
+            let overlap_start = match_start.max(span_start);
+            let overlap_end = match_end.min(span_end);
+            if overlap_start >= overlap_end {
+                continue;
+            }
+            let local_start = overlap_start - span_start;
+            let local_end = overlap_end - span_start;
+            if local_start > cursor {
+                spans.push(Span::styled(
+                    text[cursor..local_start].to_owned(),
+                    span.style,
+                ));
+            }
+            spans.push(Span::styled(
+                text[local_start..local_end].to_owned(),
+                span.style.bg(Color::Yellow).add_modifier(Modifier::BOLD),
+            ));
+            cursor = local_end;
+        }
+        if cursor < text.len() {
+            spans.push(Span::styled(text[cursor..].to_owned(), span.style));
+        }
+    }
+    Line::from(spans)
 }
 
 fn body_text(app: &mut App, row: &Row) -> Text<'static> {
@@ -2504,6 +2752,7 @@ fn clone_count(outline: &Outline, id: &NodeId) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::backend::TestBackend;
 
     fn editing_app() -> App {
         let document = LeoDocument::parse(
@@ -2521,6 +2770,62 @@ mod tests {
             OriginalExternalState::default(),
             false,
         )
+    }
+
+    #[test]
+    fn status_precedes_controls_on_narrow_terminals() {
+        let mut app = editing_app();
+        app.status = "save failed: /missing/file: No such file or directory".into();
+        let backend = TestBackend::new(50, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let bottom_line: String = (0..50)
+            .map(|x| buffer.cell((x, 9)).unwrap().symbol())
+            .collect();
+        assert!(bottom_line.starts_with("[save failed:"), "{bottom_line:?}");
+    }
+
+    #[test]
+    fn search_popup_does_not_cover_the_highlighted_body_line() {
+        let mut app = editing_app();
+        app.document
+            .outline
+            .nodes
+            .get_mut(&NodeId::from("b"))
+            .unwrap()
+            .body = "line one\nline two contains a needle here\nline three".into();
+        app.selected = 1;
+        start_search(&mut app);
+        for character in "needle".chars() {
+            handle_search_input(
+                &mut app,
+                KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+            );
+        }
+        assert_eq!(app.body_scroll, 1);
+
+        let backend = TestBackend::new(200, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let matched_row = (0..30)
+            .find(|&y| {
+                let line: String = (85..200)
+                    .map(|x| buffer.cell((x, y)).unwrap().symbol().to_string())
+                    .collect();
+                line.trim_start()
+                    .starts_with("line two contains a needle here")
+            })
+            .expect("matched body line should be visible, not hidden behind the search popup");
+        let highlighted_cell = buffer
+            .cell((85 + "line two contains a ".len() as u16, matched_row))
+            .unwrap();
+        assert_eq!(highlighted_cell.symbol(), "n");
+        assert_eq!(highlighted_cell.style().bg, Some(Color::Yellow));
     }
 
     #[test]
@@ -2958,6 +3263,91 @@ mod tests {
         handle_find_input(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(app.find.is_none());
         assert_eq!(app.selected_row().unwrap().position, PositionId("0".into()));
+    }
+
+    #[test]
+    fn search_matches_body_content_and_escape_restores_selection() {
+        let mut app = editing_app();
+        app.document
+            .outline
+            .nodes
+            .get_mut(&NodeId::from("b"))
+            .unwrap()
+            .body = "contains needle text".into();
+        start_search(&mut app);
+        for character in "needle".chars() {
+            handle_search_input(
+                &mut app,
+                KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+            );
+        }
+
+        assert_eq!(app.search.as_ref().unwrap().matches.len(), 1);
+        assert_eq!(
+            app.selected_row().unwrap().position,
+            PositionId("0/0".into())
+        );
+
+        handle_search_input(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.search.is_none());
+        assert_eq!(app.selected_row().unwrap().position, PositionId("0".into()));
+    }
+
+    #[test]
+    fn search_scrolls_the_body_pane_to_the_matching_line() {
+        let mut app = editing_app();
+        app.document
+            .outline
+            .nodes
+            .get_mut(&NodeId::from("b"))
+            .unwrap()
+            .body = "one\ntwo\nneedle here\nfour".into();
+        app.body_scroll = 5;
+
+        start_search(&mut app);
+        for character in "needle".chars() {
+            handle_search_input(
+                &mut app,
+                KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+            );
+        }
+
+        assert_eq!(app.body_scroll, 2);
+    }
+
+    #[test]
+    fn highlight_preserves_span_style_and_adds_a_background() {
+        let pattern = RegexBuilder::new(&regex::escape("needle"))
+            .case_insensitive(true)
+            .build()
+            .unwrap();
+        let original_style = Style::default().fg(Color::Rgb(1, 2, 3));
+        let line = Line::from(vec![Span::styled(
+            "a Needle in text".to_owned(),
+            original_style,
+        )]);
+
+        let highlighted = highlight_matches_in_line(line, &pattern);
+
+        let rendered: String = highlighted
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert_eq!(rendered, "a Needle in text");
+        let matched = highlighted
+            .spans
+            .iter()
+            .find(|span| span.content.as_ref() == "Needle")
+            .expect("matched span present");
+        assert_eq!(matched.style.fg, original_style.fg);
+        assert_eq!(matched.style.bg, Some(Color::Yellow));
+        let unmatched = highlighted
+            .spans
+            .iter()
+            .find(|span| span.content.as_ref() == "a ")
+            .expect("unmatched span present");
+        assert_eq!(unmatched.style, original_style);
     }
 
     #[test]
