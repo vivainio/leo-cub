@@ -14,6 +14,13 @@ fn home_dir() -> Result<PathBuf> {
         .context("could not determine home directory (neither HOME nor USERPROFILE is set)")
 }
 
+fn claude_config_dir() -> Result<PathBuf> {
+    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
+        return Ok(PathBuf::from(dir));
+    }
+    Ok(home_dir()?.join(".claude"))
+}
+
 fn extract_dir(dir: &Dir<'_>, destination: &Path) -> Result<usize> {
     std::fs::create_dir_all(destination)
         .with_context(|| format!("create directory {}", destination.display()))?;
@@ -37,7 +44,7 @@ fn extract_dir(dir: &Dir<'_>, destination: &Path) -> Result<usize> {
 }
 
 pub(crate) fn install_skills() -> Result<()> {
-    let destination = home_dir()?.join(".claude").join("skills");
+    let destination = claude_config_dir()?.join("skills");
     let count = extract_dir(&SKILLS_DIR, &destination)?;
     println!(
         "Installed {count} skill file(s) to {}",
