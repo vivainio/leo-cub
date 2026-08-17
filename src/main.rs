@@ -445,6 +445,8 @@ fn count_positions(positions: &[leo::Position]) -> usize {
 
 #[cfg(all(test, feature = "tui"))]
 mod tests {
+    use std::path::Path;
+
     use super::*;
 
     #[test]
@@ -462,7 +464,7 @@ mod tests {
 
         assert!(matches!(
             cli.command,
-            Some(Command::Validate { file }) if file == PathBuf::from("notes.leo")
+            Some(Command::Validate { file }) if file == Path::new("notes.leo")
         ));
         assert!(cli.file.is_none());
     }
