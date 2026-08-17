@@ -85,8 +85,11 @@ copy, so it is safe to rerun after upgrading.
 ## TUI
 
 ```sh
-cub tui outline.leo
+cub outline.leo
 ```
+
+Giving `cub` an outline without a subcommand opens the TUI. The explicit
+`cub tui outline.leo` form is equivalent.
 
 The browser resolves external thin files in memory. Outline headlines highlight
 Leo directives, external-file names, and section-reference markers. A red `*`
