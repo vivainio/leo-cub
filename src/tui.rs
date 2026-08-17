@@ -1715,9 +1715,22 @@ fn content_columns(area: Rect, app: &App) -> Vec<Rect> {
 }
 
 fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
+    // While find/search is active, the bottom bar becomes a docked
+    // minibuffer: a candidate list (up to 5 rows) with the query/status
+    // line at the very bottom, sized into the layout rather than floated
+    // over the panes, so it can never cover their content.
+    let finder_matches = app
+        .find
+        .as_ref()
+        .or(app.search.as_ref())
+        .map(|state| state.matches.len().min(5));
+    let bottom_height = match finder_matches {
+        Some(shown) => shown as u16 + 1,
+        None => 1,
+    };
     let areas = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(4), Constraint::Length(1)])
+        .constraints([Constraint::Min(4), Constraint::Length(bottom_height)])
         .split(frame.area());
     let columns = content_columns(areas[0], app);
     let rows = app.rows();
@@ -1859,124 +1872,97 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
     if flash.is_none() {
         app.flash = None;
     }
-    let mut status = vec![Span::styled("[", Style::default().fg(Color::DarkGray))];
-    status.push(Span::styled(
-        flash.as_deref().unwrap_or(&app.status),
-        if flash.is_some() {
-            Style::default()
-                .fg(Color::LightYellow)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::DarkGray)
-        },
-    ));
-    status.push(Span::styled(
-        format!(
-            "]   {}",
-            controls(app.body_full_width, app.outline_full_width)
-        ),
-        Style::default().fg(Color::DarkGray),
-    ));
-    frame.render_widget(Paragraph::new(Line::from(status)), areas[1]);
     if let Some(find) = &app.find {
-        let width = frame.area().width.saturating_sub(4).min(72);
-        let shown = find.matches.len().min(5);
-        let height = (3 + shown as u16).min(frame.area().height.saturating_sub(2));
-        let area = Rect::new(
-            frame.area().x + (frame.area().width.saturating_sub(width)) / 2,
-            frame.area().y + 1,
-            width,
-            height,
+        draw_finder_panel(
+            frame,
+            areas[1],
+            "> ",
+            "Find headline",
+            find,
+            &app.document.outline,
         );
-        let count = if find.query.is_empty() {
-            String::new()
-        } else if find.matches.is_empty() {
-            "no matches".into()
-        } else {
-            format!("{} of {}", find.active + 1, find.matches.len())
-        };
-        let rows = all_rows(&app.document.outline);
-        let first = find.active.saturating_sub(4);
-        let mut lines = vec![Line::from(format!("> {}▏", find.query))];
-        lines.extend(find.matches.iter().enumerate().skip(first).take(5).map(
-            |(index, position)| {
-                let row = rows
-                    .iter()
-                    .find(|row| &row.position == position)
-                    .expect("matched position exists");
-                let marker = if index == find.active { "› " } else { "  " };
-                let mut spans = vec![Span::raw(marker)];
-                spans.extend(headline_spans(
-                    &app.document.outline.nodes[&row.node].headline,
-                ));
-                Line::from(spans)
+    } else if let Some(search) = &app.search {
+        draw_finder_panel(
+            frame,
+            areas[1],
+            "/ ",
+            "Search (headline + body)",
+            search,
+            &app.document.outline,
+        );
+    } else {
+        let mut status = vec![Span::styled("[", Style::default().fg(Color::DarkGray))];
+        status.push(Span::styled(
+            flash.as_deref().unwrap_or(&app.status),
+            if flash.is_some() {
+                Style::default()
+                    .fg(Color::LightYellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::DarkGray)
             },
         ));
-        frame.render_widget(Clear, area);
-        frame.render_widget(
-            Paragraph::new(lines).block(
-                Block::default()
-                    .title(format!(" Find headline  {count} "))
-                    .borders(Borders::ALL),
+        status.push(Span::styled(
+            format!(
+                "]   {}",
+                controls(app.body_full_width, app.outline_full_width)
             ),
-            area,
-        );
-    }
-    if let Some(search) = &app.search {
-        // Anchored to the outline column (rather than the full frame, like
-        // the find popup) so it never covers the body pane, which is where
-        // the highlighted match actually needs to stay visible.
-        let anchor = if app.body_full_width {
-            frame.area()
-        } else {
-            columns[0]
-        };
-        let width = anchor.width.saturating_sub(4).min(72);
-        let shown = search.matches.len().min(5);
-        let height = (3 + shown as u16).min(frame.area().height.saturating_sub(2));
-        let area = Rect::new(
-            anchor.x + (anchor.width.saturating_sub(width)) / 2,
-            anchor.y + 1,
-            width,
-            height,
-        );
-        let count = if search.query.is_empty() {
-            String::new()
-        } else if search.matches.is_empty() {
-            "no matches".into()
-        } else {
-            format!("{} of {}", search.active + 1, search.matches.len())
-        };
-        let rows = all_rows(&app.document.outline);
-        let first = search.active.saturating_sub(4);
-        let mut lines = vec![Line::from(format!("/ {}▏", search.query))];
-        lines.extend(search.matches.iter().enumerate().skip(first).take(5).map(
-            |(index, position)| {
-                let row = rows
-                    .iter()
-                    .find(|row| &row.position == position)
-                    .expect("matched position exists");
-                let marker = if index == search.active { "› " } else { "  " };
-                let mut spans = vec![Span::raw(marker)];
-                spans.extend(headline_spans(
-                    &app.document.outline.nodes[&row.node].headline,
-                ));
-                Line::from(spans)
-            },
+            Style::default().fg(Color::DarkGray),
         ));
-        frame.render_widget(Clear, area);
-        frame.render_widget(
-            Paragraph::new(lines).block(
-                Block::default()
-                    .title(format!(" Search (headline + body)  {count} "))
-                    .borders(Borders::ALL),
-            ),
-            area,
-        );
+        frame.render_widget(Paragraph::new(Line::from(status)), areas[1]);
     }
     if app.help {
         draw_help(frame, app.body_full_width, app.outline_full_width);
     }
+}
+
+/// Renders the docked find/search minibuffer: up to 5 candidate rows on
+/// top of a single query/status line, all sized into `area` rather than
+/// floated over the outline/body panes.
+fn draw_finder_panel(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    prefix: &str,
+    label: &str,
+    state: &FindInput,
+    outline: &Outline,
+) {
+    let rows = all_rows(outline);
+    let shown = state.matches.len().min(5);
+    let first = state.active.saturating_sub(4);
+    let mut lines: Vec<Line> = state
+        .matches
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(shown)
+        .map(|(index, position)| {
+            let row = rows
+                .iter()
+                .find(|row| &row.position == position)
+                .expect("matched position exists");
+            let marker = if index == state.active { "› " } else { "  " };
+            let mut spans = vec![Span::raw(marker)];
+            spans.extend(headline_spans(&outline.nodes[&row.node].headline));
+            Line::from(spans)
+        })
+        .collect();
+    let count = if state.query.is_empty() {
+        String::new()
+    } else if state.matches.is_empty() {
+        "no matches".into()
+    } else {
+        format!("{} of {}", state.active + 1, state.matches.len())
+    };
+    lines.push(Line::from(vec![
+        Span::styled(format!("{label}: "), Style::default().fg(Color::DarkGray)),
+        Span::raw(format!("{prefix}{}▏", state.query)),
+        Span::styled(
+            format!("   {count}   ↑↓ cycle · Enter accept · Esc cancel"),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]));
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 fn dirty_marker(dirty: bool) -> Span<'static> {
@@ -2826,6 +2812,52 @@ mod tests {
             .unwrap();
         assert_eq!(highlighted_cell.symbol(), "n");
         assert_eq!(highlighted_cell.style().bg, Some(Color::Yellow));
+    }
+
+    #[test]
+    fn find_panel_docks_a_candidate_list_above_the_query_line() {
+        let mut app = editing_app();
+        app.document
+            .outline
+            .nodes
+            .get_mut(&NodeId::from("a"))
+            .unwrap()
+            .headline = "Alpha".into();
+        app.document
+            .outline
+            .nodes
+            .get_mut(&NodeId::from("b"))
+            .unwrap()
+            .headline = "Beta".into();
+        start_find(&mut app);
+        handle_find_input(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::SHIFT),
+        );
+
+        let backend = TestBackend::new(50, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let rendered: Vec<String> = (0..20)
+            .map(|y| {
+                (0..50)
+                    .map(|x| buffer.cell((x, y)).unwrap().symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect();
+        // 2 matches: a 2-row candidate list docked directly above the
+        // 1-row query line at the very bottom of the frame.
+        assert!(rendered[17].starts_with("› Alpha"), "{:?}", rendered[17]);
+        assert!(rendered[18].starts_with("  Beta"), "{:?}", rendered[18]);
+        assert!(
+            rendered[19].contains("Find headline") && rendered[19].contains("> a▏"),
+            "{:?}",
+            rendered[19]
+        );
+        // The outline/body panes still occupy every row above the panel.
+        assert!(rendered[16].contains("Outline") || rendered[0].contains("Outline"));
     }
 
     #[test]
