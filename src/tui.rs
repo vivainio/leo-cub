@@ -1312,7 +1312,9 @@ fn write_external_updates(updates: &[ExternalUpdate]) -> Result<(), String> {
         let temporary = update
             .path
             .with_file_name(format!(".{name}.cub-save-{}-{index}", std::process::id()));
-        let permissions = fs::metadata(&update.path).map(|metadata| metadata.permissions());
+        let permissions = fs::metadata(&update.path)
+            .ok()
+            .map(|metadata| metadata.permissions());
         let result = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -1322,7 +1324,9 @@ fn write_external_updates(updates: &[ExternalUpdate]) -> Result<(), String> {
                 file.sync_all()
             })
             .and_then(|()| {
-                permissions.and_then(|permissions| fs::set_permissions(&temporary, permissions))
+                permissions.map_or(Ok(()), |permissions| {
+                    fs::set_permissions(&temporary, permissions)
+                })
             });
         if let Err(error) = result {
             for path in &staged {
