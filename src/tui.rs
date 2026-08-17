@@ -693,6 +693,11 @@ fn handle_headline_input(app: &mut App, key: KeyEvent) {
                     .expect("edited external node has a source path");
                 app.writable_external
                     .entry(node_id.clone())
+                    .and_modify(|file| {
+                        file.path = path.clone();
+                        file.start_delimiter = start_delimiter.to_owned();
+                        file.end_delimiter = end_delimiter.to_owned();
+                    })
                     .or_insert(WritableExternalFile {
                         path,
                         start_delimiter: start_delimiter.to_owned(),
@@ -2580,6 +2585,35 @@ mod tests {
         assert_eq!(input.value, "Z");
         assert_eq!(input.cursor, 1);
         assert!(!input.selected);
+    }
+
+    #[test]
+    fn renaming_an_external_headline_refreshes_its_path_and_delimiters() {
+        let mut app = editing_app();
+        app.document
+            .outline
+            .nodes
+            .get_mut(&NodeId::from("a"))
+            .unwrap()
+            .headline = "@file test.py".into();
+        app.writable_external.insert(
+            NodeId::from("a"),
+            WritableExternalFile {
+                path: PathBuf::from("test.py"),
+                start_delimiter: "#".into(),
+                end_delimiter: String::new(),
+                original: Outline::default(),
+            },
+        );
+
+        edit_headline(&mut app);
+        app.input.as_mut().unwrap().value = "@file test.md".into();
+        handle_headline_input(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let file = &app.writable_external[&NodeId::from("a")];
+        assert_eq!(file.path, PathBuf::from("test.md"));
+        assert_eq!(file.start_delimiter, "#");
+        assert_eq!(file.end_delimiter, "");
     }
 
     #[test]
