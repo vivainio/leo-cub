@@ -2072,6 +2072,19 @@ fn load_derived_files(outline: &mut Outline, outline_path: &Path) -> LoadReport 
     let mut report = LoadReport::default();
     for job in jobs {
         let label = job.path.display().to_string();
+        if !job.auto && !job.path.exists() {
+            report.writable_external.insert(
+                job.root.clone(),
+                WritableExternalFile {
+                    path: job.path.clone(),
+                    start_delimiter: comment_delimiters(&job.path).0.to_owned(),
+                    end_delimiter: comment_delimiters(&job.path).1.to_owned(),
+                    original: Outline::default(),
+                },
+            );
+            report.loaded += 1;
+            continue;
+        }
         let result = fs::read_to_string(&job.path)
             .map_err(|error| error.to_string())
             .and_then(|source| {
