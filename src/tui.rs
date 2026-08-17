@@ -11,7 +11,10 @@ use std::{
 
 use anyhow::Result;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+        KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -371,13 +374,17 @@ pub fn run(path: PathBuf, load_derived: bool) -> Result<()> {
     );
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
     let result = event_loop(&mut terminal, &mut app);
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    )?;
     terminal.show_cursor()?;
     result
 }
@@ -388,9 +395,14 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
         if !event::poll(Duration::from_millis(250))? {
             continue;
         }
-        let Event::Key(key) = event::read()? else {
+        let event = event::read()?;
+        if let Event::Mouse(mouse) = event {
+            if app.input.is_none() && app.find.is_none() && !app.help {
+                handle_mouse(app, terminal.size()?.into(), mouse);
+            }
             continue;
-        };
+        }
+        let Event::Key(key) = event else { continue };
         if key.kind != KeyEventKind::Press {
             continue;
         }
@@ -483,7 +495,8 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
             KeyCode::Up => app.move_selection(-1),
             KeyCode::Right if app.body_full_width => app.scroll_body_horizontal(4),
             KeyCode::Left if app.body_full_width => app.scroll_body_horizontal(-4),
-            KeyCode::Right | KeyCode::Enter => {
+            KeyCode::Enter => open_selected(terminal, app),
+            KeyCode::Right => {
                 app.selection_anchor = None;
                 app.toggle(true);
             }
@@ -507,6 +520,33 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
             KeyCode::PageDown => app.scroll_body(1),
             _ => {}
         }
+    }
+}
+
+fn handle_mouse(app: &mut App, area: Rect, mouse: MouseEvent) {
+    if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+        return;
+    }
+    let content_height = area.height.saturating_sub(1);
+    let content = Rect::new(area.x, area.y, area.width, content_height);
+    let columns = content_columns(content, app);
+    let outline = columns[0];
+    if app.body_full_width
+        || mouse.column < outline.x
+        || mouse.column >= outline.right()
+        || mouse.row < outline.y.saturating_add(1)
+        || mouse.row >= outline.bottom().saturating_sub(1)
+    {
+        return;
+    }
+    let row = app.outline_scroll + usize::from(mouse.row - outline.y - 1);
+    if row < app.rows().len() {
+        app.selection_anchor = None;
+        if row != app.selected {
+            app.body_scroll = 0;
+            app.body_horizontal_scroll = 0;
+        }
+        app.selected = row;
     }
 }
 
@@ -633,6 +673,7 @@ fn handle_headline_input(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::Enter => {
             let headline = input.value.trim().to_owned();
+            let node_id = input.node.clone();
             if headline.is_empty() {
                 app.status = "headline may not be empty".into();
                 return;
@@ -640,13 +681,31 @@ fn handle_headline_input(app: &mut App, key: KeyEvent) {
             app.document
                 .outline
                 .nodes
-                .get_mut(&input.node)
+                .get_mut(&node_id)
                 .expect("edited node exists")
-                .headline = headline;
-            app.dirty_nodes.insert(input.node.clone());
+                .headline = headline.clone();
+            if let Some(row) = app.rows().iter().find(|row| row.node == node_id).cloned()
+                && let Some(filename) = external_filename(&headline)
+            {
+                let (start_delimiter, end_delimiter) = comment_delimiters(Path::new(filename));
+                let path = dynamic_source_location(app, &row)
+                    .map(|location| location.path)
+                    .expect("edited external node has a source path");
+                app.writable_external
+                    .entry(node_id.clone())
+                    .or_insert(WritableExternalFile {
+                        path,
+                        start_delimiter: start_delimiter.to_owned(),
+                        end_delimiter: end_delimiter.to_owned(),
+                        original: Outline::default(),
+                    });
+            }
+            app.dirty_nodes.insert(node_id);
             app.input = None;
             app.dirty = true;
             app.quit_armed = false;
+            #[cfg(feature = "syntax")]
+            app.highlight_cache.clear();
             app.status = "headline changed (Ctrl-S to save)".into();
         }
         KeyCode::Esc => {
@@ -1505,27 +1564,34 @@ fn fresh_node_id() -> NodeId {
     ))
 }
 
+fn content_columns(area: Rect, app: &App) -> Vec<Rect> {
+    if app.body_full_width {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Length(0), Constraint::Percentage(100)])
+            .split(area)
+            .to_vec()
+    } else if app.outline_full_width {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(100), Constraint::Length(0)])
+            .split(area)
+            .to_vec()
+    } else {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
+            .split(area)
+            .to_vec()
+    }
+}
+
 fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
     let areas = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(4), Constraint::Length(1)])
         .split(frame.area());
-    let columns = if app.body_full_width {
-        Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(0), Constraint::Percentage(100)])
-            .split(areas[0])
-    } else if app.outline_full_width {
-        Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(100), Constraint::Length(0)])
-            .split(areas[0])
-    } else {
-        Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
-            .split(areas[0])
-    };
+    let columns = content_columns(areas[0], app);
     let rows = app.rows();
     let selection_anchor = app.selection_anchor.unwrap_or(app.selected);
     let selection_start = selection_anchor.min(app.selected);
@@ -1857,7 +1923,7 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full
             Line::from("↑/↓              Select previous/next node"),
             Line::from("Shift-↑/↓        Extend tree selection"),
             Line::from("←/→              Collapse/expand node"),
-            Line::from("Enter            Expand node"),
+            Line::from("Enter            Open body editor"),
             Line::from("Home/End         Select first/last visible node"),
             Line::from("Shift-F          Restore split view"),
             Line::from("f                Show full-width body"),
@@ -1876,7 +1942,7 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full
             Line::from("↑/↓              Select previous/next node"),
             Line::from("Shift-↑/↓        Extend tree selection"),
             Line::from("←/→              Collapse/expand node"),
-            Line::from("Enter            Expand node"),
+            Line::from("Enter            Open body editor"),
             Line::from("Home/End         Select first/last visible node"),
             Line::from("f                Show full-width body"),
             Line::from("Shift-F          Show full-width outline"),
@@ -2123,11 +2189,9 @@ fn open_selected(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mu
     let Some(row) = app.rows().get(app.selected).cloned() else {
         return;
     };
-    if let Some(location) = app
-        .source_locations
-        .get(&row.position)
-        .or_else(|| app.source_nodes.get(&row.node))
-        .cloned()
+    if let Some(location) = dynamic_source_location(app, &row)
+        .or_else(|| app.source_locations.get(&row.position).cloned())
+        .or_else(|| app.source_nodes.get(&row.node).cloned())
     {
         let original_source = fs::read(&location.path).ok();
         if let Err(error) = suspend_and_open(terminal, &location) {
@@ -2342,6 +2406,51 @@ fn external_filename(headline: &str) -> Option<&str> {
     )
     .then(|| strip_path_cruft(filename))
     .filter(|filename| !filename.is_empty())
+}
+
+fn comment_delimiters(path: &Path) -> (&'static str, &'static str) {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "py" | "pyw" | "sh" | "bash" | "zsh" | "fish" | "rb" | "pl" | "pm" | "r" | "toml"
+        | "yaml" | "yml" => ("#", ""),
+        "rs" | "c" | "h" | "cc" | "cpp" | "cxx" | "hpp" | "java" | "js" | "jsx" | "ts" | "tsx"
+        | "go" | "swift" | "kt" | "kts" | "cs" => ("//", ""),
+        "html" | "htm" | "xml" | "xhtml" | "svg" => ("<!--", "-->"),
+        "css" | "scss" | "less" => ("/*", "*/"),
+        "sql" | "lua" => ("--", ""),
+        "ini" | "cfg" => ("#", ""),
+        _ => ("#", ""),
+    }
+}
+
+fn dynamic_source_location(app: &App, row: &Row) -> Option<SourceLocation> {
+    let filename = external_filename(&app.document.outline.nodes[&row.node].headline)?;
+    let mut path = app
+        .path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    let mut prefix = String::new();
+    for component in row.position.0.split('/') {
+        if !prefix.is_empty() {
+            prefix.push('/');
+        }
+        prefix.push_str(component);
+        let position = app.document.outline.position(&PositionId(prefix.clone()))?;
+        let node = &app.document.outline.nodes[&position.node];
+        if let Some(directory) =
+            path_directive(&node.headline).or_else(|| path_directive(&node.body))
+        {
+            path.push(directory);
+        }
+    }
+    path.push(filename);
+    Some(SourceLocation { path, line: 1 })
 }
 
 fn path_directive(text: &str) -> Option<String> {

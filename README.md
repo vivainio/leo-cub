@@ -101,7 +101,8 @@ reloading clears the markers.
 | --- | --- |
 | `↓` / `↑` | Select next/previous node |
 | `Shift-↓` / `Shift-↑` | Extend or shrink a contiguous multi-node selection |
-| `→`, `Enter` | Expand selected node |
+| `→` | Expand selected node |
+| `Enter` | Open the selected node's body editor |
 | `←` | Collapse selected node |
 | `Home` / `End` | Select the first/last visible node |
 | `PageUp` / `PageDown` | Scroll the selected node's body by one page |
