@@ -5,7 +5,7 @@ use std::{
     io,
     io::Write,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -76,6 +76,8 @@ struct App {
     input: Option<HeadlineInput>,
     find: Option<FindInput>,
     search: Option<FindInput>,
+    palette: Option<ActionPalette>,
+    action_output: Option<ActionOutput>,
     dirty: bool,
     dirty_nodes: HashSet<NodeId>,
     quit_armed: bool,
@@ -137,6 +139,8 @@ impl App {
             input: None,
             find: None,
             search: None,
+            palette: None,
+            action_output: None,
             dirty: false,
             dirty_nodes: HashSet::new(),
             quit_armed: false,
@@ -313,6 +317,20 @@ struct FindInput {
     original: Option<PositionId>,
 }
 
+struct ActionPalette {
+    query: String,
+    matches: Vec<PositionId>,
+    active: usize,
+}
+
+struct ActionOutput {
+    node: NodeId,
+    name: String,
+    interpreter: &'static str,
+    status: Option<i32>,
+    text: String,
+}
+
 #[derive(Clone)]
 struct ClipboardTree {
     roots: Vec<Position>,
@@ -405,7 +423,12 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
         }
         let event = event::read()?;
         if let Event::Mouse(mouse) = event {
-            if app.input.is_none() && app.find.is_none() && app.search.is_none() && !app.help {
+            if app.input.is_none()
+                && app.find.is_none()
+                && app.search.is_none()
+                && app.palette.is_none()
+                && !app.help
+            {
                 handle_mouse(app, terminal.size()?.into(), mouse);
             }
             continue;
@@ -424,6 +447,10 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
         }
         if app.search.is_some() {
             handle_search_input(app, key);
+            continue;
+        }
+        if app.palette.is_some() {
+            handle_palette_input(app, key);
             continue;
         }
         if app.help {
@@ -501,6 +528,7 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
             }
             KeyCode::Char('W') => app.toggle_body_wrap(),
             KeyCode::Char('/') if key.modifiers.is_empty() => start_search(app),
+            KeyCode::Char('a') if key.modifiers.is_empty() => start_palette(app),
             KeyCode::Char('i') if key.modifiers.is_empty() => insert_headline(app),
             KeyCode::Char('h') if key.modifiers.is_empty() => edit_headline(app),
             #[cfg(feature = "syntax")]
@@ -709,6 +737,227 @@ fn handle_search_input(app: &mut App, key: KeyEvent) {
         }
         _ => {}
     }
+}
+
+/// An `@action` node is a runnable node: its body is executed as a script
+/// when chosen from the action palette (`a`). Any node, anywhere in the
+/// outline, can be an action; the name shown in the palette is the headline
+/// with the `@action` marker stripped.
+fn is_action_headline(headline: &str) -> bool {
+    let trimmed = headline.trim_start();
+    trimmed == "@action" || trimmed.starts_with("@action ") || trimmed.starts_with("@action\t")
+}
+
+fn action_name(headline: &str) -> &str {
+    headline
+        .trim_start()
+        .strip_prefix("@action")
+        .unwrap_or(headline)
+        .trim()
+}
+
+fn action_rows(outline: &Outline) -> Vec<Row> {
+    all_rows(outline)
+        .into_iter()
+        .filter(|row| is_action_headline(&outline.nodes[&row.node].headline))
+        .collect()
+}
+
+fn start_palette(app: &mut App) {
+    app.palette = Some(ActionPalette {
+        query: String::new(),
+        matches: action_rows(&app.document.outline)
+            .into_iter()
+            .map(|row| row.position)
+            .collect(),
+        active: 0,
+    });
+    app.status = "run action: type to filter, Enter runs, Esc cancels".into();
+}
+
+fn handle_palette_input(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Enter => {
+            let position = app
+                .palette
+                .as_ref()
+                .and_then(|palette| palette.matches.get(palette.active).cloned());
+            app.palette = None;
+            if let Some(position) = position {
+                reveal_and_select(app, &position);
+                run_action(app, &position);
+            } else {
+                app.status = "no matching action".into();
+            }
+        }
+        KeyCode::Esc => {
+            app.palette = None;
+            app.status = "action palette cancelled".into();
+        }
+        KeyCode::Backspace => {
+            app.palette
+                .as_mut()
+                .expect("palette input exists")
+                .query
+                .pop();
+            update_palette_matches(app);
+        }
+        KeyCode::Down => cycle_palette_match(app, 1),
+        KeyCode::Up => cycle_palette_match(app, -1),
+        KeyCode::Char(character)
+            if !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
+            app.palette
+                .as_mut()
+                .expect("palette input exists")
+                .query
+                .push(character);
+            update_palette_matches(app);
+        }
+        _ => {}
+    }
+}
+
+fn update_palette_matches(app: &mut App) {
+    let query = app
+        .palette
+        .as_ref()
+        .expect("palette input exists")
+        .query
+        .to_lowercase();
+    let matches = action_rows(&app.document.outline)
+        .into_iter()
+        .filter(|row| {
+            action_name(&app.document.outline.nodes[&row.node].headline)
+                .to_lowercase()
+                .contains(&query)
+        })
+        .map(|row| row.position)
+        .collect::<Vec<_>>();
+    let palette = app.palette.as_mut().expect("palette input exists");
+    palette.active = palette.active.min(matches.len().saturating_sub(1));
+    palette.matches = matches;
+}
+
+fn cycle_palette_match(app: &mut App, delta: isize) {
+    let palette = app.palette.as_mut().expect("palette input exists");
+    if palette.matches.is_empty() {
+        return;
+    }
+    let len = palette.matches.len() as isize;
+    palette.active = (palette.active as isize + delta).rem_euclid(len) as usize;
+}
+
+/// Maps an `@language` directive (see `syntax::language_directive`) to the
+/// interpreter used to run an action's body. Unrecognized or missing
+/// languages fall back to the shell, so a plain script needs no directive.
+fn interpreter_for(
+    #[cfg_attr(not(feature = "syntax"), allow(unused_variables))] language: Option<&str>,
+) -> &'static str {
+    #[cfg(feature = "syntax")]
+    match language.unwrap_or("sh") {
+        "python" | "python3" => return "python3",
+        "javascript" | "js" | "node" => return "node",
+        "ruby" => return "ruby",
+        "bash" => return "bash",
+        _ => {}
+    }
+    "sh"
+}
+
+/// Removes `@language xxx` directive lines from a body before it is run as
+/// a script: the directive picks the interpreter (see `interpreter_for`)
+/// but isn't itself valid code in that language.
+fn strip_language_directive(body: &str) -> String {
+    body.lines()
+        .filter(|line| {
+            let is_directive = line
+                .trim_start()
+                .strip_prefix("@language")
+                .is_some_and(|rest| rest.split_whitespace().next().is_some());
+            !is_directive
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Runs the body of the `@action` node at `position` as a script and puts
+/// the result in `app.action_output`, which the body pane shows in place of
+/// the node's body until the selection moves to a different node.
+fn run_action(app: &mut App, position: &PositionId) {
+    let Some(row) = all_rows(&app.document.outline)
+        .into_iter()
+        .find(|row| &row.position == position)
+    else {
+        return;
+    };
+    let node = &app.document.outline.nodes[&row.node];
+    let name = action_name(&node.headline).to_owned();
+    #[cfg(feature = "syntax")]
+    let language = crate::syntax::language_directive(&node.body).map(str::to_owned);
+    #[cfg(not(feature = "syntax"))]
+    let language: Option<String> = None;
+    let interpreter = interpreter_for(language.as_deref());
+    // The `@language` directive picks the interpreter but isn't itself
+    // valid in that language, so it must not be sent to the interpreter.
+    let body = strip_language_directive(&node.body);
+
+    app.status = format!("running '{name}' with {interpreter}...");
+    // `parent()` of a bare filename like "foo.leo" is `Some("")`, and
+    // `current_dir("")` fails at `chdir`, so only set a cwd when non-empty.
+    let cwd = app
+        .path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map(Path::to_path_buf);
+    let mut command = Command::new(interpreter);
+    if let Some(cwd) = &cwd {
+        command.current_dir(cwd);
+    }
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let outcome = command.spawn().and_then(move |mut child| {
+        let mut stdin = child.stdin.take().expect("stdin was piped");
+        let writer = std::thread::spawn(move || {
+            let _ = stdin.write_all(body.as_bytes());
+        });
+        let output = child.wait_with_output();
+        let _ = writer.join();
+        output
+    });
+
+    let (status, text) = match outcome {
+        Ok(output) => {
+            let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if !stderr.is_empty() {
+                if !text.is_empty() && !text.ends_with('\n') {
+                    text.push('\n');
+                }
+                text.push_str(&stderr);
+            }
+            (output.status.code(), text)
+        }
+        Err(error) => (None, format!("failed to run {interpreter}: {error}")),
+    };
+
+    app.status = match status {
+        Some(0) => format!("'{name}' finished"),
+        Some(code) => format!("'{name}' exited with status {code}"),
+        None => format!("'{name}' did not complete"),
+    };
+    app.action_output = Some(ActionOutput {
+        node: row.node,
+        name,
+        interpreter,
+        status,
+        text,
+    });
 }
 
 fn update_search_matches(app: &mut App, active: usize) {
@@ -1741,18 +1990,25 @@ fn content_columns(area: Rect, app: &App) -> Vec<Rect> {
 }
 
 fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
-    // While find/search is active, the bottom bar becomes a docked
-    // minibuffer: a candidate list (up to 5 rows) with the query/status
+    // While find/search/the action palette is active, the bottom bar
+    // becomes a docked minibuffer: a candidate list with the query/status
     // line at the very bottom, sized into the layout rather than floated
-    // over the panes, so it can never cover their content.
+    // over the panes, so it can never cover their content. Find/search cap
+    // the list at 5 rows (a quick jump aid); the action palette shows as
+    // many actions as fit, reserving a few rows so the outline/body panes
+    // stay visible, since it's meant to be a full command list.
     let finder_matches = app
         .find
         .as_ref()
         .or(app.search.as_ref())
         .map(|state| state.matches.len().min(5));
-    let bottom_height = match finder_matches {
-        Some(shown) => shown as u16 + 1,
-        None => 1,
+    let bottom_height = if let Some(shown) = finder_matches {
+        shown as u16 + 1
+    } else if let Some(palette) = app.palette.as_ref() {
+        let max_visible = frame.area().height.saturating_sub(6).max(1);
+        palette.matches.len().min(usize::from(max_visible)) as u16 + 1
+    } else {
+        1
     };
     let areas = Layout::default()
         .direction(Direction::Vertical)
@@ -1849,13 +2105,54 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
     app.outline_scroll = state.offset();
 
     if !app.outline_full_width {
+        if let Some(row) = rows.get(app.selected)
+            && app
+                .action_output
+                .as_ref()
+                .is_some_and(|out| out.node != row.node)
+        {
+            app.action_output = None;
+        }
+        // Cloned out (rather than kept as a borrow) so `body_text` below can
+        // still take `app` mutably: it owns the syntax-highlight cache.
+        let output_info = app.action_output.as_ref().and_then(|out| {
+            rows.get(app.selected)
+                .filter(|row| row.node == out.node)
+                .map(|_| {
+                    (
+                        out.name.clone(),
+                        out.interpreter,
+                        out.status,
+                        out.text.clone(),
+                    )
+                })
+        });
         let node_block = Block::default()
-            .title(node_title(app.body_wrap))
+            .title(match &output_info {
+                Some((name, interpreter, status, _)) => Line::from(vec![
+                    Span::raw(format!(" Output: {name} ({interpreter}) ")),
+                    match status {
+                        Some(0) => Span::styled("exit 0", Style::default().fg(Color::LightGreen)),
+                        Some(code) => Span::styled(
+                            format!("exit {code}"),
+                            Style::default().fg(Color::LightRed),
+                        ),
+                        None => {
+                            Span::styled("did not complete", Style::default().fg(Color::LightRed))
+                        }
+                    },
+                ]),
+                None => Line::from(node_title(app.body_wrap)),
+            })
             .borders(Borders::ALL);
         let node_area = node_block.inner(columns[1]);
         frame.render_widget(node_block, columns[1]);
         if let Some(row) = rows.get(app.selected) {
-            let mut body = body_text(app, row);
+            let mut body = if let Some((_, _, _, text)) = output_info {
+                Text::from(text)
+            } else {
+                body_text(app, row)
+            };
             if let Some(search) = &app.search
                 && !search.query.is_empty()
                 && let Ok(pattern) = RegexBuilder::new(&regex::escape(&search.query))
@@ -1916,6 +2213,8 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
             search,
             &app.document.outline,
         );
+    } else if let Some(palette) = &app.palette {
+        draw_palette_panel(frame, areas[1], palette, &app.document.outline);
     } else {
         let mut status = vec![Span::styled("[", Style::default().fg(Color::DarkGray))];
         status.push(Span::styled(
@@ -1985,6 +2284,54 @@ fn draw_finder_panel(
         Span::raw(format!("{prefix}{}▏", state.query)),
         Span::styled(
             format!("   {count}   ↑↓ cycle · Enter accept · Esc cancel"),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]));
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// Renders the docked action palette (`a`), listing `@action` node names
+/// rather than full headlines. Laid out the same as `draw_finder_panel`.
+fn draw_palette_panel(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    state: &ActionPalette,
+    outline: &Outline,
+) {
+    let rows = action_rows(outline);
+    let shown = state
+        .matches
+        .len()
+        .min(usize::from(area.height.saturating_sub(1)));
+    let first = state.active.saturating_sub(shown.saturating_sub(1));
+    let mut lines: Vec<Line> = state
+        .matches
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(shown)
+        .map(|(index, position)| {
+            let row = rows
+                .iter()
+                .find(|row| &row.position == position)
+                .expect("matched position exists");
+            let marker = if index == state.active { "› " } else { "  " };
+            let name = action_name(&outline.nodes[&row.node].headline);
+            Line::from(format!("{marker}{name}"))
+        })
+        .collect();
+    let count = if rows.is_empty() {
+        "no @action nodes in this outline".to_owned()
+    } else if state.matches.is_empty() {
+        "no matches".into()
+    } else {
+        format!("{} of {}", state.active + 1, state.matches.len())
+    };
+    lines.push(Line::from(vec![
+        Span::styled("Run action: ", Style::default().fg(Color::DarkGray)),
+        Span::raw(format!("{}▏", state.query)),
+        Span::styled(
+            format!("   {count}   ↑↓ cycle · Enter run · Esc cancel"),
             Style::default().fg(Color::DarkGray),
         ),
     ]));
@@ -2077,17 +2424,17 @@ fn headline_spans(headline: &str) -> Vec<Span<'_>> {
 fn controls(body_full_width: bool, outline_full_width: bool) -> &'static str {
     if body_full_width {
         #[cfg(feature = "syntax")]
-        return "? help  arrows scroll  W wrap  c/x/v/V tree  f split  F outline  s split dir  o open/edit  Ctrl-P find  / search  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  y syntax  q quit";
+        return "? help  arrows scroll  W wrap  c/x/v/V tree  f split  F outline  s split dir  o open/edit  Ctrl-P find  / search  a actions  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  y syntax  q quit";
         #[cfg(not(feature = "syntax"))]
-        return "? help  arrows scroll  W wrap  c/x/v/V tree  f split  F outline  s split dir  o open/edit  Ctrl-P find  / search  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  q quit";
+        return "? help  arrows scroll  W wrap  c/x/v/V tree  f split  F outline  s split dir  o open/edit  Ctrl-P find  / search  a actions  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  q quit";
     }
     if outline_full_width {
-        return "? help  arrows navigate  W wrap  c/x/v/V tree  F split view  s split dir  o open/edit  Ctrl-P find  / search  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  q quit";
+        return "? help  arrows navigate  W wrap  c/x/v/V tree  F split view  s split dir  o open/edit  Ctrl-P find  / search  a actions  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  q quit";
     }
     #[cfg(feature = "syntax")]
-    return "? help  arrows navigate  PgUp/PgDn body  W wrap  c/x/v/V tree  f body  F outline  s split dir  o open/edit  Ctrl-P find  / search  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  y syntax  q quit";
+    return "? help  arrows navigate  PgUp/PgDn body  W wrap  c/x/v/V tree  f body  F outline  s split dir  o open/edit  Ctrl-P find  / search  a actions  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  y syntax  q quit";
     #[cfg(not(feature = "syntax"))]
-    "? help  arrows navigate  PgUp/PgDn body  W wrap  c/x/v/V tree  f body  F outline  s split dir  o open/edit  Ctrl-P find  / search  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  q quit"
+    "? help  arrows navigate  PgUp/PgDn body  W wrap  c/x/v/V tree  f body  F outline  s split dir  o open/edit  Ctrl-P find  / search  a actions  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  q quit"
 }
 
 fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full_width: bool) {
@@ -2115,6 +2462,7 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full
             Line::from("h                Rename the headline"),
             Line::from("Ctrl-↑↓←→        Move selected tree(s)"),
             Line::from("Ctrl-P           Find a headline"),
+            Line::from("a                Run an @action node"),
             Line::from("/                Search headlines and body text"),
             Line::from("Ctrl-R           Reload from disk"),
             Line::from("Ctrl-S           Save"),
@@ -2133,6 +2481,7 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full
             Line::from("Shift-W          Toggle body word wrap"),
             Line::from("c/x/v/V          Copy/cut/paste/clone"),
             Line::from("Ctrl-P           Find a headline"),
+            Line::from("a                Run an @action node"),
             Line::from("/                Search headlines and body text"),
             Line::from("i                Insert a sibling"),
             Line::from("h                Rename the headline"),
@@ -2154,6 +2503,7 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full
             Line::from("PageUp/PageDown  Scroll the body pane"),
             Line::from("Shift-W          Toggle body word wrap"),
             Line::from("Ctrl-P           Find a headline"),
+            Line::from("a                Run an @action node"),
             Line::from("/                Search headlines and body text"),
             Line::from("i                Insert a sibling"),
             Line::from("h                Rename the headline"),
@@ -2888,6 +3238,113 @@ mod tests {
         );
         // The outline/body panes still occupy every row above the panel.
         assert!(rendered[16].contains("Outline") || rendered[0].contains("Outline"));
+    }
+
+    #[test]
+    fn detects_action_headlines_and_strips_the_marker() {
+        assert!(is_action_headline("@action Build"));
+        assert!(is_action_headline("@action"));
+        assert!(!is_action_headline("@actionable"));
+        assert!(!is_action_headline("Build"));
+        assert_eq!(action_name("@action Build"), "Build");
+        assert_eq!(action_name("@action   Say Hi  "), "Say Hi");
+    }
+
+    #[test]
+    fn palette_lists_only_action_nodes_and_filters_by_name() {
+        let mut app = editing_app();
+        app.document
+            .outline
+            .nodes
+            .get_mut(&NodeId::from("a"))
+            .unwrap()
+            .headline = "@action Build".into();
+        app.document
+            .outline
+            .nodes
+            .get_mut(&NodeId::from("b"))
+            .unwrap()
+            .headline = "@action Test".into();
+        // "c" is left as a plain headline and must not appear.
+        start_palette(&mut app);
+        assert_eq!(app.palette.as_ref().unwrap().matches.len(), 2);
+
+        handle_palette_input(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE),
+        );
+        let palette = app.palette.as_ref().unwrap();
+        assert_eq!(palette.matches, vec![PositionId("0".into())]);
+    }
+
+    #[test]
+    fn running_an_action_shows_output_until_selection_moves_away() {
+        let mut app = editing_app();
+        {
+            let node = app
+                .document
+                .outline
+                .nodes
+                .get_mut(&NodeId::from("b"))
+                .unwrap();
+            node.headline = "@action Greet".into();
+            node.body = "echo hello-from-action".into();
+        }
+        app.selected = 1; // row "0/0" -> node "b"
+
+        run_action(&mut app, &PositionId("0/0".into()));
+
+        let output = app.action_output.as_ref().expect("action produced output");
+        assert_eq!(output.node, NodeId::from("b"));
+        assert_eq!(output.status, Some(0));
+        assert!(
+            output.text.contains("hello-from-action"),
+            "{:?}",
+            output.text
+        );
+
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert!(
+            app.action_output.is_some(),
+            "output should still show while its node is selected"
+        );
+
+        app.selected = 0; // node "a"
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        assert!(
+            app.action_output.is_none(),
+            "output should clear once selection moves to a different node"
+        );
+    }
+
+    #[test]
+    fn enter_in_the_palette_runs_the_selected_action_and_selects_its_node() {
+        let mut app = editing_app();
+        {
+            let node = app
+                .document
+                .outline
+                .nodes
+                .get_mut(&NodeId::from("b"))
+                .unwrap();
+            node.headline = "@action Greet".into();
+            node.body = "echo hi".into();
+        }
+
+        start_palette(&mut app);
+        for character in "greet".chars() {
+            handle_palette_input(
+                &mut app,
+                KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+            );
+        }
+        handle_palette_input(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(app.palette.is_none());
+        assert_eq!(app.selected_row().unwrap().node, NodeId::from("b"));
+        assert_eq!(app.action_output.as_ref().unwrap().status, Some(0));
     }
 
     #[test]
