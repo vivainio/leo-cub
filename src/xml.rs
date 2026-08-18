@@ -30,6 +30,16 @@ pub struct LeoDocument {
 }
 
 impl LeoDocument {
+    /// Create an empty Leo document with no nodes at all. Intended for
+    /// callers that populate the outline themselves (for example, bootstrapping
+    /// via import) before saving.
+    pub fn empty() -> Self {
+        Self {
+            outline: Outline::default(),
+            original: NEW_DOCUMENT_ENVELOPE.to_owned(),
+        }
+    }
+
     /// Create a minimal Leo document containing one root node.
     pub fn new(headline: impl Into<String>) -> Self {
         let now = SystemTime::now()

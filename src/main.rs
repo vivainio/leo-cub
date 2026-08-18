@@ -59,9 +59,23 @@ enum Command {
     /// Create a new Leo outline without overwriting an existing file.
     New {
         file: PathBuf,
-        /// Headline for the initial root node.
-        #[arg(long, default_value = "New Headline")]
+        /// Headline for the initial root node. Ignored when --import is given.
+        #[arg(long, default_value = "New Headline", conflicts_with = "import")]
         headline: String,
+        /// Bootstrap the outline from files or directories instead of a blank
+        /// headline; the first node is the import itself (for example @path).
+        #[arg(long, value_name = "PATH")]
+        import: Vec<PathBuf>,
+        #[arg(long, value_enum, default_value_t, requires = "import")]
+        mode: CliImportMode,
+        /// Import directories non-recursively (bootstrapping defaults to recursive).
+        #[arg(long, requires = "import")]
+        no_recursive: bool,
+        /// Import files directly without preserving directory structure.
+        #[arg(long, requires = "import")]
+        no_paths: bool,
+        #[arg(long, requires = "import")]
+        dry_run: bool,
     },
     /// Add nodes using slash-separated headline paths.
     Add {
@@ -219,11 +233,41 @@ fn main() -> Result<()> {
         return Ok(());
     };
     match command {
-        Command::New { file, headline } => {
-            LeoDocument::new(headline)
-                .save_new(&file)
-                .with_context(|| format!("create {}", file.display()))?;
-            println!("{}", file.display());
+        Command::New {
+            file,
+            headline,
+            import,
+            mode,
+            no_recursive,
+            no_paths,
+            dry_run,
+        } => {
+            if import.is_empty() {
+                LeoDocument::new(headline)
+                    .save_new(&file)
+                    .with_context(|| format!("create {}", file.display()))?;
+                println!("{}", file.display());
+            } else {
+                let mut document = LeoDocument::empty();
+                let report = import_files(
+                    &mut document,
+                    &file,
+                    &import,
+                    &ImportOptions {
+                        mode: mode.into(),
+                        recursive: !no_recursive,
+                        paths: !no_paths,
+                        parent: None,
+                        dry_run,
+                    },
+                )?;
+                if !dry_run {
+                    document
+                        .save_new(&file)
+                        .with_context(|| format!("create {}", file.display()))?;
+                }
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            }
         }
         Command::Add { file, paths } => {
             let mut document = LeoDocument::open(&file)?;
