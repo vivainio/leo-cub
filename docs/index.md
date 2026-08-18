@@ -18,7 +18,10 @@ That distinction makes clones visible and makes scripted changes predictable.
 [:lucide-download: **Install it**  
 Get the `cub` command from PyPI or build it with Cargo.](getting-started/installation.md)
 
-[:lucide-rocket: **Try the first outline**  
+[:lucide-rocket: **Open the quickstart outline**  
+A working `.leo` file you read and act on node by node, right in the TUI.](getting-started/quickstart-outline.md)
+
+[:lucide-hammer: **Build your first outline**  
 Create an outline, add a small tree, and inspect the result.](getting-started/first-outline.md)
 
 [:lucide-book-open: **Understand the model**  

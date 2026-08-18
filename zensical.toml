@@ -15,6 +15,7 @@ nav = [
   { "Home" = "index.md" },
   { "Getting started" = [
     { "Installation" = "getting-started/installation.md" },
+    { "Quickstart outline" = "getting-started/quickstart-outline.md" },
     { "First outline" = "getting-started/first-outline.md" },
     { "Interactive editing" = "getting-started/interactive-editing.md" },
     { "Tutorial outline" = "getting-started/tutorial.md" },
