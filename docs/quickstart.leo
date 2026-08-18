@@ -86,14 +86,15 @@ See &quot;First outline&quot; in the docs for a hands-on `cub import` example.
 
 Try the pull direction here: the child node below is a real @clean
 node, mirroring quickstart-files/greeting.txt next to this outline.
-Quit this TUI (q), edit that file with any editor - or run
+From another terminal, edit that file with any editor - or run
 
     echo &quot;Edited outside the outline.&quot; &gt; docs/quickstart-files/greeting.txt
 
-- then run `cub sync docs/quickstart.leo` and reopen it. The child
-node's body now matches the file's new content. Sync only pulls file
-changes into the outline; it never pushes outline edits back out, so
-editing the body here instead has no effect on the file.</t>
+- then run `cub sync docs/quickstart.leo`. Back here, press Ctrl-R to
+reload; the child node's body now matches the file's new content.
+Sync only pulls file changes into the outline; it never pushes outline
+edits back out, so editing the body here instead has no effect on the
+file.</t>
   <t tx="quickstart.external.greeting">Hello from an external file.
 </t>
   <t tx="quickstart.find">Ctrl-P finds a headline: press it, type &quot;second&quot;, and Enter jumps
