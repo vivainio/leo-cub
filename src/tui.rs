@@ -69,6 +69,7 @@ struct App {
     body_wrap: bool,
     body_full_width: bool,
     outline_full_width: bool,
+    split_horizontal: bool,
     help: bool,
     status: String,
     flash: Option<(String, Instant)>,
@@ -129,6 +130,7 @@ impl App {
             body_wrap: false,
             body_full_width: false,
             outline_full_width: false,
+            split_horizontal: true,
             help: false,
             status,
             flash: None,
@@ -485,6 +487,15 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
                     "outline pane expanded to full width"
                 } else {
                     "body pane restored"
+                }
+                .into();
+            }
+            KeyCode::Char('s') if key.modifiers.is_empty() => {
+                app.split_horizontal = !app.split_horizontal;
+                app.status = if app.split_horizontal {
+                    "split horizontally (outline above body)"
+                } else {
+                    "split vertically (outline beside body)"
                 }
                 .into();
             }
@@ -1703,21 +1714,26 @@ fn fresh_node_id() -> NodeId {
 }
 
 fn content_columns(area: Rect, app: &App) -> Vec<Rect> {
+    let direction = if app.split_horizontal {
+        Direction::Vertical
+    } else {
+        Direction::Horizontal
+    };
     if app.body_full_width {
         Layout::default()
-            .direction(Direction::Horizontal)
+            .direction(direction)
             .constraints([Constraint::Length(0), Constraint::Percentage(100)])
             .split(area)
             .to_vec()
     } else if app.outline_full_width {
         Layout::default()
-            .direction(Direction::Horizontal)
+            .direction(direction)
             .constraints([Constraint::Percentage(100), Constraint::Length(0)])
             .split(area)
             .to_vec()
     } else {
         Layout::default()
-            .direction(Direction::Horizontal)
+            .direction(direction)
             .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
             .split(area)
             .to_vec()
@@ -2061,17 +2077,17 @@ fn headline_spans(headline: &str) -> Vec<Span<'_>> {
 fn controls(body_full_width: bool, outline_full_width: bool) -> &'static str {
     if body_full_width {
         #[cfg(feature = "syntax")]
-        return "? help  arrows scroll  W wrap  c/x/v/V tree  f split  F outline  o open/edit  Ctrl-P find  / search  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  y syntax  q quit";
+        return "? help  arrows scroll  W wrap  c/x/v/V tree  f split  F outline  s split dir  o open/edit  Ctrl-P find  / search  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  y syntax  q quit";
         #[cfg(not(feature = "syntax"))]
-        return "? help  arrows scroll  W wrap  c/x/v/V tree  f split  F outline  o open/edit  Ctrl-P find  / search  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  q quit";
+        return "? help  arrows scroll  W wrap  c/x/v/V tree  f split  F outline  s split dir  o open/edit  Ctrl-P find  / search  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  q quit";
     }
     if outline_full_width {
-        return "? help  arrows navigate  W wrap  c/x/v/V tree  F split view  o open/edit  Ctrl-P find  / search  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  q quit";
+        return "? help  arrows navigate  W wrap  c/x/v/V tree  F split view  s split dir  o open/edit  Ctrl-P find  / search  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  q quit";
     }
     #[cfg(feature = "syntax")]
-    return "? help  arrows navigate  PgUp/PgDn body  W wrap  c/x/v/V tree  f body  F outline  o open/edit  Ctrl-P find  / search  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  y syntax  q quit";
+    return "? help  arrows navigate  PgUp/PgDn body  W wrap  c/x/v/V tree  f body  F outline  s split dir  o open/edit  Ctrl-P find  / search  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  y syntax  q quit";
     #[cfg(not(feature = "syntax"))]
-    "? help  arrows navigate  PgUp/PgDn body  W wrap  c/x/v/V tree  f body  F outline  o open/edit  Ctrl-P find  / search  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  q quit"
+    "? help  arrows navigate  PgUp/PgDn body  W wrap  c/x/v/V tree  f body  F outline  s split dir  o open/edit  Ctrl-P find  / search  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  q quit"
 }
 
 fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full_width: bool) {
@@ -2092,6 +2108,7 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full
             Line::from("PageUp/PageDown  Scroll body by one page"),
             Line::from("f                Restore split view"),
             Line::from("Shift-F          Show full-width outline"),
+            Line::from("s                Toggle split direction"),
             Line::from("c/x              Copy/cut selected trees"),
             Line::from("v / Shift-V      Paste copy / paste clone"),
             Line::from("i                Insert a sibling"),
@@ -2112,6 +2129,7 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full
             Line::from("Home/End         Select first/last visible node"),
             Line::from("Shift-F          Restore split view"),
             Line::from("f                Show full-width body"),
+            Line::from("s                Toggle split direction"),
             Line::from("Shift-W          Toggle body word wrap"),
             Line::from("c/x/v/V          Copy/cut/paste/clone"),
             Line::from("Ctrl-P           Find a headline"),
@@ -2132,6 +2150,7 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full
             Line::from("Home/End         Select first/last visible node"),
             Line::from("f                Show full-width body"),
             Line::from("Shift-F          Show full-width outline"),
+            Line::from("s                Toggle split direction"),
             Line::from("PageUp/PageDown  Scroll the body pane"),
             Line::from("Shift-W          Toggle body word wrap"),
             Line::from("Ctrl-P           Find a headline"),
@@ -2787,6 +2806,7 @@ mod tests {
     #[test]
     fn search_popup_does_not_cover_the_highlighted_body_line() {
         let mut app = editing_app();
+        app.split_horizontal = false;
         app.document
             .outline
             .nodes
