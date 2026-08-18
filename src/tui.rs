@@ -798,6 +798,7 @@ fn handle_headline_input(app: &mut App, key: KeyEvent) {
         KeyCode::Enter => {
             let headline = input.value.trim().to_owned();
             let node_id = input.node.clone();
+            let inserted_position = input.inserted_position.clone();
             if headline.is_empty() {
                 app.status = "headline may not be empty".into();
                 return;
@@ -835,7 +836,11 @@ fn handle_headline_input(app: &mut App, key: KeyEvent) {
             app.quit_armed = false;
             #[cfg(feature = "syntax")]
             app.highlight_cache.clear();
-            app.status = "headline changed (Ctrl-S to save)".into();
+            if inserted_position.is_some() {
+                insert_headline(app);
+            } else {
+                app.status = "headline changed (Ctrl-S to save)".into();
+            }
         }
         KeyCode::Esc => {
             let input = app.input.take().expect("input exists");
@@ -987,7 +992,7 @@ fn insert_headline(app: &mut App) {
         selected: false,
         inserted_position: Some(inserted),
     });
-    app.status = "new headline: type a name, Enter accepts, Esc cancels".into();
+    app.status = "new headline: type a name, Enter accepts and adds another, Esc cancels".into();
 }
 
 fn copy_selected(app: &mut App) {
@@ -2974,6 +2979,34 @@ mod tests {
     }
 
     #[test]
+    fn accepting_a_new_headline_immediately_starts_the_next_sibling() {
+        let mut app = editing_app();
+
+        insert_headline(&mut app);
+        for character in "First".chars() {
+            handle_headline_input(
+                &mut app,
+                KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+            );
+        }
+        handle_headline_input(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(app.document.outline.roots.len(), 3);
+        assert_eq!(
+            app.document.outline.nodes[&app.document.outline.roots[1].node].headline,
+            "First"
+        );
+        let input = app.input.as_ref().expect("chained insert starts editing");
+        assert!(input.inserted_position.is_some());
+        assert_eq!(input.value, "");
+
+        handle_headline_input(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert!(app.input.is_none());
+        assert_eq!(app.document.outline.roots.len(), 2);
+    }
+
+    #[test]
     fn edits_and_saves_a_thin_file_tree() {
         let directory = env::temp_dir().join(format!(
             "leo-cub-tui-file-edit-{}-{}",
@@ -3026,6 +3059,7 @@ mod tests {
             KeyEvent::new(KeyCode::Char('C'), KeyModifiers::SHIFT),
         );
         handle_headline_input(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        handle_headline_input(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         save(&mut app);
 
         assert!(!app.dirty, "{}", app.status);
