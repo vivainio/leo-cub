@@ -61,17 +61,20 @@ default shell. The interpreter is picked from that directive; `node`,
 
 **External files** has a real `@clean` node under it, mirroring
 [`quickstart-files/greeting.txt`](https://github.com/vivainio/leo-cub/blob/main/docs/quickstart-files/greeting.txt)
-next to the outline. Quit the TUI, change that file (any editor works, or
-`echo "new text" > docs/quickstart-files/greeting.txt`), then run:
+next to the outline. From another terminal, change that file (any editor
+works, or `echo "new text" > docs/quickstart-files/greeting.txt`), then
+run:
 
 ```sh
 cub sync docs/quickstart.leo
 ```
 
-Reopen the outline and the node's body matches the file's new content.
-Sync is one-directional: it pulls file changes into the outline, and never
-pushes an in-TUI body edit back out to the file - editing the node's body
-directly, then syncing, leaves the file untouched.
+Back in the TUI, press `Ctrl-R` to reload - no need to quit, since reload
+re-reads the outline from disk exactly like reopening it would. The node's
+body now matches the file's new content. Sync is one-directional: it pulls
+file changes into the outline, and never pushes an in-TUI body edit back
+out to the file - editing the node's body directly, then syncing, leaves
+the file untouched.
 
 ## How this differs from the other docs
 
