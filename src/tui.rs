@@ -4,13 +4,14 @@ use std::{
     fs::OpenOptions,
     io,
     io::Write,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     process::{Command, Stdio},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::Result;
 use crossterm::{
+    clipboard::CopyToClipboard,
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
         KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -540,6 +541,9 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
         }
         match key.code {
             KeyCode::Char('c') if key.modifiers.is_empty() => copy_selected(app),
+            KeyCode::Char('C') if key.modifiers == KeyModifiers::SHIFT => {
+                copy_location_to_clipboard(app);
+            }
             KeyCode::Char('x') if key.modifiers.is_empty() => cut_selected(app),
             KeyCode::Char('v') if key.modifiers.is_empty() => paste_tree(app, false),
             KeyCode::Char('V') if key.modifiers == KeyModifiers::SHIFT => paste_tree(app, true),
@@ -2564,6 +2568,7 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full
             Line::from("Shift-F          Show full-width outline"),
             Line::from("s                Toggle split direction"),
             Line::from("c/x              Copy/cut selected trees"),
+            Line::from("Shift-C          Copy path:line to clipboard"),
             Line::from("v / Shift-V      Paste copy / paste clone"),
             Line::from("i                Insert a sibling"),
             Line::from("h                Rename the headline"),
@@ -2587,6 +2592,7 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full
             Line::from("s                Toggle split direction"),
             Line::from("Shift-W          Toggle body word wrap"),
             Line::from("c/x/v/V          Copy/cut/paste/clone"),
+            Line::from("Shift-C          Copy path:line to clipboard"),
             Line::from("Ctrl-P           Find a headline"),
             Line::from("a                Run an @action node"),
             Line::from("/                Search headlines and body text"),
@@ -2615,6 +2621,7 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full
             Line::from("i                Insert a sibling"),
             Line::from("h                Rename the headline"),
             Line::from("c                Copy selected tree"),
+            Line::from("Shift-C          Copy path:line to clipboard"),
             Line::from("x                Cut selected tree"),
             Line::from("v / Shift-V      Paste copy / paste clone"),
             Line::from("Ctrl-↑↓←→        Move selected tree(s)"),
@@ -2987,6 +2994,71 @@ fn open_selected(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mu
         Ok(None) => app.status = "body unchanged".into(),
         Err(error) => app.status = format!("body edit failed: {error}"),
     }
+}
+
+fn copy_location_to_clipboard(app: &mut App) {
+    let Some(row) = app.rows().get(app.selected).cloned() else {
+        return;
+    };
+    let headline = app.document.outline.nodes[&row.node].headline.clone();
+    let text = match dynamic_source_location(app, &row)
+        .or_else(|| app.source_locations.get(&row.position).cloned())
+        .or_else(|| app.source_nodes.get(&row.node).cloned())
+    {
+        Some(location) => format!("{}:{}: {headline}", display_path(&location.path), location.line),
+        None => format!("{}: {headline}", display_path(&app.path)),
+    };
+    match execute!(io::stdout(), CopyToClipboard::to_clipboard_from(text.clone())) {
+        Ok(()) => app.status = format!("copied to clipboard: {text}"),
+        Err(error) => app.status = format!("clipboard copy failed: {error}"),
+    }
+}
+
+/// Renders `path` as an absolute, `~`-abbreviated string for pasting
+/// elsewhere, since a path relative to the app's launch directory (the
+/// common case for derived-file locations) is meaningless out of context.
+fn display_path(path: &Path) -> String {
+    let cwd = env::current_dir().unwrap_or_default();
+    let home = env::var_os("HOME")
+        .or_else(|| env::var_os("USERPROFILE"))
+        .map(PathBuf::from);
+    tildify(&absolutize(path, &cwd), home.as_deref())
+}
+
+fn absolutize(path: &Path, cwd: &Path) -> PathBuf {
+    let joined = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    };
+    normalize_path(&joined)
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut result = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                result.pop();
+            }
+            other => result.push(other.as_os_str()),
+        }
+    }
+    result
+}
+
+fn tildify(path: &Path, home: Option<&Path>) -> String {
+    if let Some(home) = home
+        && let Ok(relative) = path.strip_prefix(home)
+    {
+        return if relative.as_os_str().is_empty() {
+            "~".to_owned()
+        } else {
+            format!("~/{}", relative.display())
+        };
+    }
+    path.display().to_string()
 }
 
 fn edit_body_in_temp_file(
@@ -4428,6 +4500,65 @@ fn main() {}</t><t tx="b">just notes</t></tnodes></leo_file>"#,
         assert!(app.document.outline.roots[0].children.is_empty());
         assert_eq!(app.document.outline.nodes.len(), 1);
         assert!(app.selection_anchor.is_none());
+    }
+
+    #[test]
+    fn copying_location_uses_the_known_source_line_and_headline() {
+        let mut app = editing_app();
+        app.selected = 1;
+        app.source_nodes.insert(
+            NodeId::from("b"),
+            SourceLocation {
+                path: PathBuf::from("/workspace/src/example.py"),
+                line: 42,
+            },
+        );
+
+        copy_location_to_clipboard(&mut app);
+
+        assert_eq!(
+            app.status,
+            "copied to clipboard: /workspace/src/example.py:42: B"
+        );
+    }
+
+    #[test]
+    fn copying_location_falls_back_to_the_leo_file_when_no_source_is_known() {
+        let mut app = editing_app();
+        app.path = PathBuf::from("/workspace/test.leo");
+
+        copy_location_to_clipboard(&mut app);
+
+        assert_eq!(app.status, "copied to clipboard: /workspace/test.leo: A");
+    }
+
+    #[test]
+    fn tildify_replaces_a_home_prefix_with_tilde() {
+        assert_eq!(
+            tildify(Path::new("/home/v/r/leo-rs/src/tui.rs"), Some(Path::new("/home/v"))),
+            "~/r/leo-rs/src/tui.rs"
+        );
+        assert_eq!(tildify(Path::new("/home/v"), Some(Path::new("/home/v"))), "~");
+        assert_eq!(
+            tildify(Path::new("/etc/hosts"), Some(Path::new("/home/v"))),
+            "/etc/hosts"
+        );
+        assert_eq!(tildify(Path::new("/etc/hosts"), None), "/etc/hosts");
+    }
+
+    #[test]
+    fn absolutize_joins_relative_paths_onto_cwd_and_collapses_dot_segments() {
+        assert_eq!(
+            absolutize(Path::new("src/tui.rs"), Path::new("/home/v/r/leo-rs")),
+            PathBuf::from("/home/v/r/leo-rs/src/tui.rs")
+        );
+        assert_eq!(
+            absolutize(
+                Path::new("/already/absolute/./foo/../bar.rs"),
+                Path::new("/ignored")
+            ),
+            PathBuf::from("/already/absolute/bar.rs")
+        );
     }
 
     #[test]
