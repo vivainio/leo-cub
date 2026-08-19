@@ -590,13 +590,22 @@ fn handle_mouse(app: &mut App, area: Rect, mouse: MouseEvent) {
         return;
     }
     let row = app.outline_scroll + usize::from(mouse.row - outline.y - 1);
-    if row < app.rows().len() {
-        app.selection_anchor = None;
-        if row != app.selected {
-            app.body_scroll = 0;
-            app.body_horizontal_scroll = 0;
-        }
-        app.selected = row;
+    let rows = app.rows();
+    let Some(clicked) = rows.get(row) else {
+        return;
+    };
+    let marker_start = outline.x + 1 + u16::try_from(clicked.depth * 2).unwrap_or(u16::MAX);
+    let on_marker =
+        clicked.has_children && mouse.column >= marker_start && mouse.column < marker_start + 2;
+    let position = clicked.position.clone();
+    app.selection_anchor = None;
+    if row != app.selected {
+        app.body_scroll = 0;
+        app.body_horizontal_scroll = 0;
+    }
+    app.selected = row;
+    if on_marker {
+        app.toggle(!app.expanded.contains(&position));
     }
 }
 
@@ -1446,7 +1455,7 @@ fn move_selected(app: &mut App, direction: MoveDirection) {
     let Some(row) = app.selected_row() else {
         return;
     };
-    if !app.editable(&row) || position_contains_readonly_derived(app, &row.position) {
+    if !app.editable(&row) {
         app.status = "@auto subtrees cannot be moved".into();
         return;
     }
@@ -1519,9 +1528,7 @@ fn move_selected(app: &mut App, direction: MoveDirection) {
 }
 
 fn move_selected_block(app: &mut App, direction: MoveDirection, rows: Vec<Row>) {
-    if rows.iter().any(|row| {
-        app.readonly_derived(&row.node) || position_contains_readonly_derived(app, &row.position)
-    }) {
+    if rows.iter().any(|row| app.readonly_derived(&row.node)) {
         app.status = "@auto subtrees cannot be moved".into();
         return;
     }
@@ -3709,6 +3716,82 @@ mod tests {
             app.document.outline.roots[0].children[1].node,
             NodeId::from("c")
         );
+    }
+
+    #[test]
+    fn moves_an_auto_container_but_not_its_derived_descendants() {
+        let document = LeoDocument::parse(
+            r#"<leo_file><vnodes><v t="a"><vh>A</vh><v t="b"><vh>B</vh></v><v t="c"><vh>C</vh></v></v><v t="d"><vh>D</vh></v></vnodes><tnodes><t tx="a"></t><t tx="b"></t><t tx="c"></t><t tx="d"></t></tnodes></leo_file>"#,
+        )
+        .unwrap();
+        let mut app = App::new(
+            document,
+            PathBuf::from("test.leo"),
+            String::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashSet::new(),
+            HashMap::new(),
+            OriginalExternalState::default(),
+            false,
+        );
+        app.derived_nodes.insert(NodeId::from("b"));
+
+        // "a" is an authored container whose child "b" is a read-only
+        // derived node; the container itself should still be reorderable
+        // as a whole subtree, carrying "b" along with it.
+        select_position(&mut app, &PositionId("0".into()));
+        move_selected(&mut app, MoveDirection::Down);
+        assert_eq!(app.document.outline.roots[0].node, NodeId::from("d"));
+        assert_eq!(app.document.outline.roots[1].node, NodeId::from("a"));
+        assert_eq!(
+            app.document.outline.roots[1].children[0].node,
+            NodeId::from("b")
+        );
+
+        // The derived descendant itself still cannot be moved directly.
+        select_position(&mut app, &PositionId("1/0".into()));
+        move_selected(&mut app, MoveDirection::Down);
+        assert_eq!(
+            app.document.outline.roots[1].children[0].node,
+            NodeId::from("b")
+        );
+        assert_eq!(app.status, "@auto subtrees cannot be moved");
+    }
+
+    #[test]
+    fn clicking_the_expand_marker_toggles_without_touching_other_columns() {
+        let mut app = editing_app();
+        assert_eq!(app.rows().len(), 3, "root starts expanded with 2 children");
+        let area = Rect::new(0, 0, 80, 24);
+        let click_on_marker = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 1,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        handle_mouse(&mut app, area, click_on_marker);
+        assert_eq!(app.selected, 0);
+        assert!(!app.expanded.contains(&PositionId("0".into())));
+        assert_eq!(app.rows().len(), 1, "collapsing hides the children");
+
+        handle_mouse(&mut app, area, click_on_marker);
+        assert!(app.expanded.contains(&PositionId("0".into())));
+        assert_eq!(app.rows().len(), 3, "clicking again re-expands");
+
+        // Clicking elsewhere on the same row only selects it.
+        app.selected = 0;
+        let click_on_headline = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 10,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        };
+        handle_mouse(&mut app, area, click_on_headline);
+        assert_eq!(app.selected, 1);
+        assert!(app.expanded.contains(&PositionId("0".into())));
+        assert_eq!(app.rows().len(), 3);
     }
 
     #[test]
