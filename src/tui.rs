@@ -653,89 +653,89 @@ fn handle_key(
             app.quit_armed = true;
             app.status = "unsaved changes; press q again to discard, or Ctrl-S to save".into();
         }
-            KeyCode::Char('o') => match terminal {
-                Some(t) => open_selected(t, app),
-                None => app.status = "open skipped (no terminal in this run)".into(),
-            },
-            KeyCode::Char('f') => {
-                app.body_full_width = !app.body_full_width;
-                app.outline_full_width = false;
-                app.status = if app.body_full_width {
-                    "body pane expanded to full width"
-                } else {
-                    "outline pane restored"
-                }
-                .into();
+        KeyCode::Char('o') => match terminal {
+            Some(t) => open_selected(t, app),
+            None => app.status = "open skipped (no terminal in this run)".into(),
+        },
+        KeyCode::Char('f') => {
+            app.body_full_width = !app.body_full_width;
+            app.outline_full_width = false;
+            app.status = if app.body_full_width {
+                "body pane expanded to full width"
+            } else {
+                "outline pane restored"
             }
-            KeyCode::Char('F') => {
-                app.outline_full_width = !app.outline_full_width;
-                app.body_full_width = false;
-                app.status = if app.outline_full_width {
-                    "outline pane expanded to full width"
-                } else {
-                    "body pane restored"
-                }
-                .into();
-            }
-            KeyCode::Char('s') if key.modifiers.is_empty() => {
-                app.split_horizontal = !app.split_horizontal;
-                app.status = if app.split_horizontal {
-                    "split horizontally (outline above body)"
-                } else {
-                    "split vertically (outline beside body)"
-                }
-                .into();
-            }
-            KeyCode::Char('W') => app.toggle_body_wrap(),
-            KeyCode::Char('/') if key.modifiers.is_empty() => start_search(app),
-            KeyCode::Char('a') if key.modifiers.is_empty() => start_command_palette(app),
-            KeyCode::Char('A') if key.modifiers == KeyModifiers::SHIFT => start_palette(app),
-            KeyCode::Char('i') if key.modifiers.is_empty() => insert_headline(app),
-            KeyCode::Char('h') if key.modifiers.is_empty() => edit_headline(app),
-            #[cfg(feature = "syntax")]
-            KeyCode::Char('y') => {
-                app.syntax_enabled = !app.syntax_enabled;
-                app.status = format!(
-                    "syntax highlighting {}",
-                    if app.syntax_enabled { "on" } else { "off" }
-                );
-            }
-            #[cfg(feature = "syntax")]
-            KeyCode::Char('m') => app.toggle_preview(),
-            KeyCode::Down if app.body_full_width => app.scroll_body_lines(1),
-            KeyCode::Up if app.body_full_width => app.scroll_body_lines(-1),
-            KeyCode::Down => app.move_selection(1),
-            KeyCode::Up => app.move_selection(-1),
-            KeyCode::Right if app.body_full_width => app.scroll_body_horizontal(4),
-            KeyCode::Left if app.body_full_width => app.scroll_body_horizontal(-4),
-            KeyCode::Enter => match terminal {
-                Some(t) => open_selected(t, app),
-                None => app.status = "open skipped (no terminal in this run)".into(),
-            },
-            KeyCode::Right => {
-                app.selection_anchor = None;
-                app.toggle(true);
-            }
-            KeyCode::Left => {
-                app.selection_anchor = None;
-                app.toggle(false);
-            }
-            KeyCode::Home => {
-                app.selection_anchor = None;
-                app.selected = 0;
-                app.body_scroll = 0;
-                app.body_horizontal_scroll = 0;
-            }
-            KeyCode::End => {
-                app.selection_anchor = None;
-                app.selected = app.rows().len().saturating_sub(1);
-                app.body_scroll = 0;
-                app.body_horizontal_scroll = 0;
-            }
-            KeyCode::PageUp => app.scroll_body(-1),
-            KeyCode::PageDown => app.scroll_body(1),
-            _ => {}
+            .into();
         }
+        KeyCode::Char('F') => {
+            app.outline_full_width = !app.outline_full_width;
+            app.body_full_width = false;
+            app.status = if app.outline_full_width {
+                "outline pane expanded to full width"
+            } else {
+                "body pane restored"
+            }
+            .into();
+        }
+        KeyCode::Char('s') if key.modifiers.is_empty() => {
+            app.split_horizontal = !app.split_horizontal;
+            app.status = if app.split_horizontal {
+                "split horizontally (outline above body)"
+            } else {
+                "split vertically (outline beside body)"
+            }
+            .into();
+        }
+        KeyCode::Char('W') => app.toggle_body_wrap(),
+        KeyCode::Char('/') if key.modifiers.is_empty() => start_search(app),
+        KeyCode::Char('a') if key.modifiers.is_empty() => start_command_palette(app),
+        KeyCode::Char('A') if key.modifiers == KeyModifiers::SHIFT => start_palette(app),
+        KeyCode::Char('i') if key.modifiers.is_empty() => insert_headline(app),
+        KeyCode::Char('h') if key.modifiers.is_empty() => edit_headline(app),
+        #[cfg(feature = "syntax")]
+        KeyCode::Char('y') => {
+            app.syntax_enabled = !app.syntax_enabled;
+            app.status = format!(
+                "syntax highlighting {}",
+                if app.syntax_enabled { "on" } else { "off" }
+            );
+        }
+        #[cfg(feature = "syntax")]
+        KeyCode::Char('m') => app.toggle_preview(),
+        KeyCode::Down if app.body_full_width => app.scroll_body_lines(1),
+        KeyCode::Up if app.body_full_width => app.scroll_body_lines(-1),
+        KeyCode::Down => app.move_selection(1),
+        KeyCode::Up => app.move_selection(-1),
+        KeyCode::Right if app.body_full_width => app.scroll_body_horizontal(4),
+        KeyCode::Left if app.body_full_width => app.scroll_body_horizontal(-4),
+        KeyCode::Enter => match terminal {
+            Some(t) => open_selected(t, app),
+            None => app.status = "open skipped (no terminal in this run)".into(),
+        },
+        KeyCode::Right => {
+            app.selection_anchor = None;
+            app.toggle(true);
+        }
+        KeyCode::Left => {
+            app.selection_anchor = None;
+            app.toggle(false);
+        }
+        KeyCode::Home => {
+            app.selection_anchor = None;
+            app.selected = 0;
+            app.body_scroll = 0;
+            app.body_horizontal_scroll = 0;
+        }
+        KeyCode::End => {
+            app.selection_anchor = None;
+            app.selected = app.rows().len().saturating_sub(1);
+            app.body_scroll = 0;
+            app.body_horizontal_scroll = 0;
+        }
+        KeyCode::PageUp => app.scroll_body(-1),
+        KeyCode::PageDown => app.scroll_body(1),
+        _ => {}
+    }
     KeyOutcome::Continue
 }
 
@@ -3942,7 +3942,11 @@ fn run_script(app: &mut App, steps: &[Step]) -> Result<Terminal<TestBackend>> {
 }
 
 #[allow(dead_code)]
-fn apply_step_headless(app: &mut App, terminal: &mut Terminal<TestBackend>, step: &Step) -> Result<()> {
+fn apply_step_headless(
+    app: &mut App,
+    terminal: &mut Terminal<TestBackend>,
+    step: &Step,
+) -> Result<()> {
     match step {
         Step::Key { key } => {
             let event = parse_key(key)?;
@@ -3950,7 +3954,11 @@ fn apply_step_headless(app: &mut App, terminal: &mut Terminal<TestBackend>, step
         }
         Step::Type { text } => {
             for ch in text.chars() {
-                handle_key(app, KeyEvent::new(KeyCode::Char(ch), KeyModifiers::empty()), None);
+                handle_key(
+                    app,
+                    KeyEvent::new(KeyCode::Char(ch), KeyModifiers::empty()),
+                    None,
+                );
             }
         }
         Step::Wait { ms } => std::thread::sleep(Duration::from_millis(*ms)),
