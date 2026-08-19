@@ -178,8 +178,16 @@ enum Command {
   {"op":"set-body","node":"<gnx>","body":"new","expected":"old"}
   {"op":"insert","parent":"<parent-gnx>","index":0,
    "node":{"id":"<new-gnx>","headline":"New node","body":""}}
+  {"op":"insert-tree","parent":"<parent-gnx>","index":0,
+   "tree":{"Headline":{"_gnx":"<optional-gnx>","_body":"text",
+   "Child headline":{"_body":"..."}}}}
   {"op":"clone","parent":"<parent-gnx>","index":0,"node":"<gnx>"}
   {"op":"remove","position":"<position>"}
+  {"op":"replace-tree","headline":"Slash/Path/To/Node",
+   "tree":{"New headline":{"_body":"..."}}}
+  {"op":"merge-tree","parent":"<parent-gnx>",
+   "tree":{"Existing headline":{"_body":"updated",
+   "New headline":{"_body":"..."}}}}
 
   "parent" is a GNX and may be null for the outline root. Inserting below a
   cloned parent affects all its occurrences. "index" and "expected" are
@@ -187,8 +195,31 @@ enum Command {
   clone occurrence. The complete batch is committed only if every operation
   succeeds. Pass "-" for OPERATIONS to read the batch from stdin.
 
+  "insert-tree" adds a whole subtree (or several sibling subtrees) in one
+  operation, using the same shape "inspect --format json-tree" prints: a map
+  from headline to a node with reserved "_gnx"/"_body" keys plus one key per
+  child headline. Both are optional: "_body" defaults to "", and a node
+  missing "_gnx" gets a fresh id from the batch's top-level "gnx-prefix"
+  (default "cub"), formatted like the ids "import" generates.
+
+  "replace-tree" removes a node's defining occurrence and its subtree, then
+  inserts a fresh "tree" (same shape as "insert-tree") in its place at the
+  same parent/index. The target is either "node" (a GNX) or "headline" (a
+  slash-separated headline path, resolved the same way as "cub add"'s
+  paths) — exactly one of the two. The removed node's GNX is discarded; the
+  new tree's nodes get fresh ids unless they set their own "_gnx".
+
+  "merge-tree" merges "tree" into "parent"'s children (same shape again),
+  matching each entry to an existing child by headline. A match updates
+  that child's body (only if "_body" is given — omitting it, unlike
+  "insert-tree", leaves the existing body alone) and merges its children
+  the same way, recursively. No match inserts that entry fresh, same as
+  "insert-tree". "merge-tree" never removes a node; a headline matching
+  more than one sibling fails the batch.
+
 EXAMPLE:
-  {"operations":[{"op":"set-body","node":"ekr.1","expected":"old","body":"new"}]}"#)]
+  {"gnx-prefix":"acme",
+   "operations":[{"op":"set-body","node":"ekr.1","expected":"old","body":"new"}]}"#)]
     Apply {
         file: PathBuf,
         /// Path to the operations JSON file, or "-" to read it from stdin.
