@@ -9,7 +9,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use crossterm::{
     clipboard::CopyToClipboard,
     event::{
@@ -25,13 +25,15 @@ use leo::{
 };
 use ratatui::{
     Terminal,
-    backend::CrosstermBackend,
+    backend::{CrosstermBackend, TestBackend},
+    buffer::{Buffer, Cell},
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 use regex::{Regex, RegexBuilder};
+use serde::Deserialize;
 
 #[derive(Clone)]
 struct Row {
@@ -443,7 +445,7 @@ enum MoveDirection {
     Right,
 }
 
-pub fn run(path: PathBuf, load_derived: bool) -> Result<()> {
+fn build_app(path: PathBuf, load_derived: bool) -> Result<App> {
     let mut document = LeoDocument::open(&path)?;
     let (
         status,
@@ -486,7 +488,7 @@ pub fn run(path: PathBuf, load_derived: bool) -> Result<()> {
             OriginalExternalState::default(),
         )
     };
-    let mut app = App::new(
+    Ok(App::new(
         document,
         path,
         status,
@@ -496,14 +498,22 @@ pub fn run(path: PathBuf, load_derived: bool) -> Result<()> {
         writable_external,
         original_external,
         load_derived,
-    );
+    ))
+}
+
+/// Runs `body` against a real alternate-screen terminal, guaranteeing the
+/// terminal is restored to normal afterwards even if `body` fails.
+fn with_real_terminal<F>(body: F) -> Result<()>
+where
+    F: FnOnce(&mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()>,
+{
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = event_loop(&mut terminal, &mut app);
+    let result = body(&mut terminal);
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
@@ -512,6 +522,32 @@ pub fn run(path: PathBuf, load_derived: bool) -> Result<()> {
     )?;
     terminal.show_cursor()?;
     result
+}
+
+pub fn run(path: PathBuf, load_derived: bool) -> Result<()> {
+    let mut app = build_app(path, load_derived)?;
+    with_real_terminal(|terminal| event_loop(terminal, &mut app))
+}
+
+/// Replays `steps` against a real terminal (spawning external editors for
+/// any key that opens one, same as interactive use) and then, unless the
+/// script quit the app, hands control back to the keyboard -- for
+/// reproducing a bug by scripting the steps that lead up to it and then
+/// taking over by hand right where it happens.
+pub fn run_with_script(path: PathBuf, load_derived: bool, script_path: PathBuf) -> Result<()> {
+    let script = fs::read_to_string(&script_path)
+        .with_context(|| format!("read script {}", script_path.display()))?;
+    let steps = parse_script_jsonl(&script)?;
+    let mut app = build_app(path, load_derived)?;
+    with_real_terminal(|terminal| {
+        run_steps_live(&mut app, &mut *terminal, &steps)?;
+        event_loop(terminal, &mut app)
+    })
+}
+
+enum KeyOutcome {
+    Continue,
+    Quit,
 }
 
 fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Result<()> {
@@ -534,76 +570,93 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
             continue;
         }
         let Event::Key(key) = event else { continue };
-        if key.kind != KeyEventKind::Press {
-            continue;
+        if let KeyOutcome::Quit = handle_key(app, key, Some(&mut *terminal)) {
+            return Ok(());
         }
-        if app.input.is_some() {
-            handle_headline_input(app, key);
-            continue;
+    }
+}
+
+/// Dispatches a single key press. `terminal` is `None` for headless/scripted
+/// runs with no real terminal to suspend into -- keys that would normally
+/// open an external editor just report that they were skipped instead.
+fn handle_key(
+    app: &mut App,
+    key: KeyEvent,
+    terminal: Option<&mut Terminal<CrosstermBackend<io::Stdout>>>,
+) -> KeyOutcome {
+    if key.kind != KeyEventKind::Press {
+        return KeyOutcome::Continue;
+    }
+    if app.input.is_some() {
+        handle_headline_input(app, key);
+        return KeyOutcome::Continue;
+    }
+    if app.find.is_some() {
+        handle_find_input(app, key);
+        return KeyOutcome::Continue;
+    }
+    if app.search.is_some() {
+        handle_search_input(app, key);
+        return KeyOutcome::Continue;
+    }
+    if app.palette.is_some() {
+        handle_palette_input(app, key);
+        return KeyOutcome::Continue;
+    }
+    if app.command_palette.is_some() {
+        handle_command_palette_input(app, key);
+        return KeyOutcome::Continue;
+    }
+    if app.help {
+        if matches!(
+            key.code,
+            KeyCode::Char('?') | KeyCode::Char('q') | KeyCode::Esc
+        ) {
+            app.help = false;
         }
-        if app.find.is_some() {
-            handle_find_input(app, key);
-            continue;
-        }
-        if app.search.is_some() {
-            handle_search_input(app, key);
-            continue;
-        }
-        if app.palette.is_some() {
-            handle_palette_input(app, key);
-            continue;
-        }
-        if app.command_palette.is_some() {
-            handle_command_palette_input(app, key);
-            continue;
-        }
-        if app.help {
-            if matches!(
-                key.code,
-                KeyCode::Char('?') | KeyCode::Char('q') | KeyCode::Esc
-            ) {
-                app.help = false;
-            }
-            continue;
-        }
-        if key.modifiers.contains(KeyModifiers::CONTROL) {
-            match key.code {
-                KeyCode::Char('p') => start_find(app),
-                KeyCode::Char('r') => reload(app),
-                KeyCode::Char('s') => save(app),
-                KeyCode::Up => move_selected(app, MoveDirection::Up),
-                KeyCode::Down => move_selected(app, MoveDirection::Down),
-                KeyCode::Left => move_selected(app, MoveDirection::Left),
-                KeyCode::Right => move_selected(app, MoveDirection::Right),
-                _ => {}
-            }
-            continue;
-        }
+        return KeyOutcome::Continue;
+    }
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
         match key.code {
-            KeyCode::Char('c') if key.modifiers.is_empty() => copy_selected(app),
-            KeyCode::Char('C') if key.modifiers == KeyModifiers::SHIFT => {
-                copy_location_to_clipboard(app);
+            KeyCode::Char('p') => start_find(app),
+            KeyCode::Char('r') => reload(app),
+            KeyCode::Char('s') => save(app),
+            KeyCode::Up => move_selected(app, MoveDirection::Up),
+            KeyCode::Down => move_selected(app, MoveDirection::Down),
+            KeyCode::Left => move_selected(app, MoveDirection::Left),
+            KeyCode::Right => move_selected(app, MoveDirection::Right),
+            _ => {}
+        }
+        return KeyOutcome::Continue;
+    }
+    match key.code {
+        KeyCode::Char('c') if key.modifiers.is_empty() => copy_selected(app),
+        KeyCode::Char('C') if key.modifiers == KeyModifiers::SHIFT => {
+            copy_location_to_clipboard(app);
+        }
+        KeyCode::Char('x') if key.modifiers.is_empty() => cut_selected(app),
+        KeyCode::Char('v') if key.modifiers.is_empty() => paste_tree(app, false),
+        KeyCode::Char('V') if key.modifiers == KeyModifiers::SHIFT => paste_tree(app, true),
+        KeyCode::Up if key.modifiers == KeyModifiers::SHIFT => {
+            app.selection_anchor.get_or_insert(app.selected);
+            app.extend_selection(-1);
+        }
+        KeyCode::Down if key.modifiers == KeyModifiers::SHIFT => {
+            app.selection_anchor.get_or_insert(app.selected);
+            app.extend_selection(1);
+        }
+        KeyCode::Char('?') => app.help = true,
+        KeyCode::Char('q') | KeyCode::Esc => {
+            if !app.dirty || app.quit_armed {
+                return KeyOutcome::Quit;
             }
-            KeyCode::Char('x') if key.modifiers.is_empty() => cut_selected(app),
-            KeyCode::Char('v') if key.modifiers.is_empty() => paste_tree(app, false),
-            KeyCode::Char('V') if key.modifiers == KeyModifiers::SHIFT => paste_tree(app, true),
-            KeyCode::Up if key.modifiers == KeyModifiers::SHIFT => {
-                app.selection_anchor.get_or_insert(app.selected);
-                app.extend_selection(-1);
-            }
-            KeyCode::Down if key.modifiers == KeyModifiers::SHIFT => {
-                app.selection_anchor.get_or_insert(app.selected);
-                app.extend_selection(1);
-            }
-            KeyCode::Char('?') => app.help = true,
-            KeyCode::Char('q') | KeyCode::Esc => {
-                if !app.dirty || app.quit_armed {
-                    return Ok(());
-                }
-                app.quit_armed = true;
-                app.status = "unsaved changes; press q again to discard, or Ctrl-S to save".into();
-            }
-            KeyCode::Char('o') => open_selected(terminal, app),
+            app.quit_armed = true;
+            app.status = "unsaved changes; press q again to discard, or Ctrl-S to save".into();
+        }
+            KeyCode::Char('o') => match terminal {
+                Some(t) => open_selected(t, app),
+                None => app.status = "open skipped (no terminal in this run)".into(),
+            },
             KeyCode::Char('f') => {
                 app.body_full_width = !app.body_full_width;
                 app.outline_full_width = false;
@@ -655,7 +708,10 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
             KeyCode::Up => app.move_selection(-1),
             KeyCode::Right if app.body_full_width => app.scroll_body_horizontal(4),
             KeyCode::Left if app.body_full_width => app.scroll_body_horizontal(-4),
-            KeyCode::Enter => open_selected(terminal, app),
+            KeyCode::Enter => match terminal {
+                Some(t) => open_selected(t, app),
+                None => app.status = "open skipped (no terminal in this run)".into(),
+            },
             KeyCode::Right => {
                 app.selection_anchor = None;
                 app.toggle(true);
@@ -680,7 +736,7 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
             KeyCode::PageDown => app.scroll_body(1),
             _ => {}
         }
-    }
+    KeyOutcome::Continue
 }
 
 fn handle_mouse(app: &mut App, area: Rect, mouse: MouseEvent) {
@@ -3731,10 +3787,257 @@ fn is_clone_root(outline: &Outline, position: &PositionId, id: &NodeId) -> bool 
     count > parent_count
 }
 
+/// One step of a scripted TUI interaction: used directly as `Vec<Step>`
+/// literals in regression tests, and loaded from a JSONL file for
+/// `cub tui file.leo --script repro.jsonl` bug-repro replay.
+///
+/// A script is line-delimited JSON, one step object per line; blank lines
+/// and lines starting with `#` are ignored. For example:
+///
+/// ```text
+/// {"type": "key", "key": "j"}
+/// {"type": "key", "key": "a"}
+/// {"type": "type", "text": "grep"}
+/// {"type": "key", "key": "Enter"}
+/// {"type": "assert_status", "text": "grep"}
+/// ```
+// Read by apply_step_headless/apply_step_live, which are only reachable
+// from #[cfg(test)] regression tests and the (feature-gated) --script CLI
+// path respectively; a plain non-test build of one without the other sees
+// some fields/functions here as unused.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum Step {
+    /// Press a single key: a literal char ("j", "?"), a bare capital for
+    /// shift ("C"), a named key ("Enter"/"Return", "Esc"/"Escape", "Tab",
+    /// "Backspace", "Delete", "Space", "Up"/"Down"/"Left"/"Right", "Home",
+    /// "End", "PageUp", "PageDown", "F1".."F12"), optionally prefixed with
+    /// modifiers ("C-r", "S-Down", "C-S-Left"; "C"/"Ctrl", "S"/"Shift",
+    /// "A"/"Alt").
+    Key { key: String },
+    /// Type each character of `text` as an individual unmodified keypress
+    /// -- for filling in headline/find/search/action-palette inputs.
+    Type { text: String },
+    /// Sleep for `ms` milliseconds of wall-clock time. Rarely needed: flash
+    /// messages and similar UI expire against real `Instant`s, not a
+    /// virtual clock.
+    Wait { ms: u64 },
+    /// Resize the headless backend, e.g. to reproduce a narrow-terminal
+    /// bug. No effect when replaying live against a real terminal, whose
+    /// size is up to the OS.
+    Resize { cols: u16, rows: u16 },
+    /// Render the current frame and write it to `path` as plain text.
+    /// Headless-only: skipped with a warning on a live replay.
+    Screenshot { path: PathBuf },
+    /// Fail unless the rendered screen contains `text`. Headless-only:
+    /// skipped with a warning on a live replay.
+    AssertContains { text: String },
+    /// Fail if the rendered screen contains `text`. Headless-only: skipped
+    /// with a warning on a live replay.
+    AssertNotContains { text: String },
+    /// Fail unless the status line contains `text`. Works in both modes.
+    AssertStatus { text: String },
+    /// No-op; documents intent in a script file.
+    Comment {
+        #[allow(dead_code)]
+        text: String,
+    },
+}
+
+/// Parses key notation like `"j"`, `"Enter"`, `"C-r"`, `"S-Down"` into a
+/// [`KeyEvent`]. See [`Step::Key`] for the supported names.
+fn parse_key(notation: &str) -> Result<KeyEvent> {
+    let mut modifiers = KeyModifiers::empty();
+    let mut rest = notation;
+    while let Some((head, tail)) = rest.split_once('-') {
+        match head {
+            "C" | "Ctrl" => modifiers |= KeyModifiers::CONTROL,
+            "S" | "Shift" => modifiers |= KeyModifiers::SHIFT,
+            "A" | "Alt" => modifiers |= KeyModifiers::ALT,
+            _ => break,
+        }
+        rest = tail;
+    }
+    let code = match rest {
+        "Enter" | "Return" => KeyCode::Enter,
+        "Esc" | "Escape" => KeyCode::Esc,
+        "Tab" => KeyCode::Tab,
+        "Backspace" => KeyCode::Backspace,
+        "Delete" => KeyCode::Delete,
+        "Space" => KeyCode::Char(' '),
+        "Up" => KeyCode::Up,
+        "Down" => KeyCode::Down,
+        "Left" => KeyCode::Left,
+        "Right" => KeyCode::Right,
+        "Home" => KeyCode::Home,
+        "End" => KeyCode::End,
+        "PageUp" => KeyCode::PageUp,
+        "PageDown" => KeyCode::PageDown,
+        _ if rest.len() >= 2
+            && rest.starts_with('F')
+            && rest[1..].bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            KeyCode::F(rest[1..].parse().context("invalid function key")?)
+        }
+        _ if rest.chars().count() == 1 => {
+            let mut ch = rest.chars().next().expect("checked len == 1");
+            if modifiers.contains(KeyModifiers::SHIFT) {
+                ch = ch.to_ascii_uppercase();
+            } else if ch.is_ascii_uppercase() {
+                modifiers |= KeyModifiers::SHIFT;
+            }
+            KeyCode::Char(ch)
+        }
+        other => bail!("unrecognized key notation {notation:?} (key part {other:?})"),
+    };
+    Ok(KeyEvent::new(code, modifiers))
+}
+
+/// Parses a script file: one JSON [`Step`] per line, blank lines and `#`
+/// comment lines ignored.
+fn parse_script_jsonl(input: &str) -> Result<Vec<Step>> {
+    input
+        .lines()
+        .map(str::trim)
+        .enumerate()
+        .filter(|(_, line)| !line.is_empty() && !line.starts_with('#'))
+        .map(|(i, line)| {
+            serde_json::from_str(line).with_context(|| format!("script line {}: {line}", i + 1))
+        })
+        .collect()
+}
+
+/// Renders `buffer` as plain text, one line per row, trailing blanks on
+/// each row trimmed.
+#[allow(dead_code)]
+fn buffer_text(buffer: &Buffer) -> String {
+    let width = buffer.area.width.max(1) as usize;
+    buffer
+        .content()
+        .chunks(width)
+        .map(|row| {
+            row.iter()
+                .map(Cell::symbol)
+                .collect::<String>()
+                .trim_end()
+                .to_owned()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Runs `steps` against a fresh headless (in-memory) terminal and `app`,
+/// for regression tests. No key ever opens an external editor -- 'o' and
+/// Enter on an out-of-tree node just set a status message instead.
+#[allow(dead_code)]
+fn run_script(app: &mut App, steps: &[Step]) -> Result<Terminal<TestBackend>> {
+    let mut terminal = Terminal::new(TestBackend::new(100, 40))?;
+    terminal.draw(|frame| draw(frame, app))?;
+    for (i, step) in steps.iter().enumerate() {
+        apply_step_headless(app, &mut terminal, step)
+            .with_context(|| format!("script step {} failed: {step:?}", i + 1))?;
+    }
+    Ok(terminal)
+}
+
+#[allow(dead_code)]
+fn apply_step_headless(app: &mut App, terminal: &mut Terminal<TestBackend>, step: &Step) -> Result<()> {
+    match step {
+        Step::Key { key } => {
+            let event = parse_key(key)?;
+            handle_key(app, event, None);
+        }
+        Step::Type { text } => {
+            for ch in text.chars() {
+                handle_key(app, KeyEvent::new(KeyCode::Char(ch), KeyModifiers::empty()), None);
+            }
+        }
+        Step::Wait { ms } => std::thread::sleep(Duration::from_millis(*ms)),
+        Step::Resize { cols, rows } => terminal.backend_mut().resize(*cols, *rows),
+        Step::Comment { .. } => {}
+        Step::Screenshot { path } => {
+            let text = buffer_text(terminal.backend().buffer());
+            fs::write(path, text)
+                .with_context(|| format!("write screenshot {}", path.display()))?;
+        }
+        Step::AssertContains { text } => {
+            let screen = buffer_text(terminal.backend().buffer());
+            if !screen.contains(text.as_str()) {
+                bail!("expected screen to contain {text:?}; got:\n{screen}");
+            }
+        }
+        Step::AssertNotContains { text } => {
+            let screen = buffer_text(terminal.backend().buffer());
+            if screen.contains(text.as_str()) {
+                bail!("expected screen not to contain {text:?}; got:\n{screen}");
+            }
+        }
+        Step::AssertStatus { text } => {
+            if !app.status.contains(text.as_str()) {
+                bail!("expected status to contain {text:?}; got {:?}", app.status);
+            }
+        }
+    }
+    terminal.draw(|frame| draw(frame, app))?;
+    Ok(())
+}
+
+/// Replays `steps` against a real terminal for CLI bug-repro use: 'o' and
+/// Enter open a real external editor exactly as they would interactively.
+/// Screenshot/assert-on-screen steps have no buffer to read here, so they
+/// print a warning and are skipped rather than failing the replay.
+fn run_steps_live(
+    app: &mut App,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    steps: &[Step],
+) -> Result<()> {
+    terminal.draw(|frame| draw(frame, app))?;
+    for (i, step) in steps.iter().enumerate() {
+        apply_step_live(app, terminal, step)
+            .with_context(|| format!("script step {} failed: {step:?}", i + 1))?;
+    }
+    Ok(())
+}
+
+fn apply_step_live(
+    app: &mut App,
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    step: &Step,
+) -> Result<()> {
+    match step {
+        Step::Key { key } => {
+            let event = parse_key(key)?;
+            handle_key(app, event, Some(&mut *terminal));
+        }
+        Step::Type { text } => {
+            for ch in text.chars() {
+                handle_key(
+                    app,
+                    KeyEvent::new(KeyCode::Char(ch), KeyModifiers::empty()),
+                    Some(&mut *terminal),
+                );
+            }
+        }
+        Step::Wait { ms } => std::thread::sleep(Duration::from_millis(*ms)),
+        Step::Resize { .. } => {}
+        Step::Comment { .. } => {}
+        Step::Screenshot { .. } | Step::AssertContains { .. } | Step::AssertNotContains { .. } => {
+            eprintln!("script: {step:?} skipped (no headless buffer to read on a live terminal)");
+        }
+        Step::AssertStatus { text } => {
+            if !app.status.contains(text.as_str()) {
+                bail!("expected status to contain {text:?}; got {:?}", app.status);
+            }
+        }
+    }
+    terminal.draw(|frame| draw(frame, app))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::backend::TestBackend;
 
     #[test]
     fn restoring_external_state_reinstates_pruned_original_child_nodes() {
@@ -5231,5 +5534,113 @@ fn main() {}</t><t tx="b">just notes</t></tnodes></leo_file>"#,
         paste_tree(&mut app, false);
         assert_eq!(app.document.outline.roots.len(), 1);
         assert_eq!(app.document.outline.nodes.len(), 3);
+    }
+
+    #[test]
+    fn parse_key_covers_named_keys_modifiers_and_bare_letters() {
+        assert_eq!(
+            parse_key("j").unwrap(),
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::empty())
+        );
+        assert_eq!(
+            parse_key("C").unwrap(),
+            KeyEvent::new(KeyCode::Char('C'), KeyModifiers::SHIFT)
+        );
+        assert_eq!(
+            parse_key("S-c").unwrap(),
+            KeyEvent::new(KeyCode::Char('C'), KeyModifiers::SHIFT)
+        );
+        assert_eq!(
+            parse_key("C-r").unwrap(),
+            KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL)
+        );
+        assert_eq!(
+            parse_key("C-S-Left").unwrap(),
+            KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL | KeyModifiers::SHIFT)
+        );
+        assert_eq!(
+            parse_key("Enter").unwrap(),
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::empty())
+        );
+        assert_eq!(
+            parse_key("F5").unwrap(),
+            KeyEvent::new(KeyCode::F(5), KeyModifiers::empty())
+        );
+        assert!(parse_key("NotAKey").is_err());
+    }
+
+    #[test]
+    fn script_steps_can_type_and_assert_not_just_press_keys() {
+        // A regression test written as a Vec<Step> literal: insert a node
+        // via 'i', type its headline, confirm with Enter, and assert on
+        // both the rendered screen and the status line -- the same flow a
+        // human would drive by hand, but checked automatically.
+        let mut app = editing_app();
+        let steps = vec![
+            Step::Key {
+                key: "i".to_owned(),
+            },
+            Step::AssertStatus {
+                text: "new headline".to_owned(),
+            },
+            Step::Type {
+                text: "New Node Title".to_owned(),
+            },
+            Step::Key {
+                key: "Enter".to_owned(),
+            },
+            Step::AssertContains {
+                text: "New Node Title".to_owned(),
+            },
+            Step::Key {
+                key: "Esc".to_owned(),
+            },
+        ];
+
+        run_script(&mut app, &steps).unwrap();
+
+        assert!(
+            app.document
+                .outline
+                .nodes
+                .values()
+                .any(|node| node.headline == "New Node Title")
+        );
+        assert!(app.dirty);
+    }
+
+    #[test]
+    fn script_steps_load_from_jsonl_and_drive_the_same_flow() {
+        let script = r#"
+            # comment lines and blank lines are ignored
+
+            {"type": "key", "key": "i"}
+            {"type": "type", "text": "From JSONL"}
+            {"type": "key", "key": "Enter"}
+            {"type": "assert_contains", "text": "From JSONL"}
+            {"type": "key", "key": "Esc"}
+        "#;
+        let steps = parse_script_jsonl(script).unwrap();
+        let mut app = editing_app();
+
+        run_script(&mut app, &steps).unwrap();
+
+        assert!(
+            app.document
+                .outline
+                .nodes
+                .values()
+                .any(|node| node.headline == "From JSONL")
+        );
+    }
+
+    #[test]
+    fn assert_contains_step_fails_the_script_when_the_text_is_absent() {
+        let mut app = editing_app();
+        let steps = vec![Step::AssertContains {
+            text: "text that is definitely not on screen".to_owned(),
+        }];
+        let error = run_script(&mut app, &steps).unwrap_err();
+        assert!(format!("{error:#}").contains("expected screen to contain"));
     }
 }
