@@ -95,6 +95,10 @@ struct App {
     syntax_enabled: bool,
     #[cfg(feature = "syntax")]
     highlight_cache: HashMap<PositionId, Text<'static>>,
+    #[cfg(feature = "syntax")]
+    preview_enabled: bool,
+    #[cfg(feature = "syntax")]
+    preview_cache: HashMap<PositionId, Text<'static>>,
 }
 
 impl App {
@@ -158,6 +162,10 @@ impl App {
             syntax_enabled: true,
             #[cfg(feature = "syntax")]
             highlight_cache: HashMap::new(),
+            #[cfg(feature = "syntax")]
+            preview_enabled: false,
+            #[cfg(feature = "syntax")]
+            preview_cache: HashMap::new(),
         }
     }
 
@@ -537,6 +545,14 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
                 app.status = format!(
                     "syntax highlighting {}",
                     if app.syntax_enabled { "on" } else { "off" }
+                );
+            }
+            #[cfg(feature = "syntax")]
+            KeyCode::Char('m') => {
+                app.preview_enabled = !app.preview_enabled;
+                app.status = format!(
+                    "rendered preview {}",
+                    if app.preview_enabled { "on" } else { "off" }
                 );
             }
             KeyCode::Down if app.body_full_width => app.scroll_body_lines(1),
@@ -1105,6 +1121,8 @@ fn handle_headline_input(app: &mut App, key: KeyEvent) {
             app.quit_armed = false;
             #[cfg(feature = "syntax")]
             app.highlight_cache.clear();
+            #[cfg(feature = "syntax")]
+            app.preview_cache.clear();
             if inserted_position.is_some() {
                 insert_headline(app);
             } else {
@@ -1852,6 +1870,8 @@ fn reload(app: &mut App) {
     app.body_horizontal_scroll = 0;
     #[cfg(feature = "syntax")]
     app.highlight_cache.clear();
+    #[cfg(feature = "syntax")]
+    app.preview_cache.clear();
     if let Some(node) = selected_node {
         if let Some(index) = app.rows().iter().position(|row| row.node == node) {
             app.selected = index;
@@ -2525,6 +2545,8 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full
     };
     #[cfg(feature = "syntax")]
     lines.push(Line::from("y                Toggle syntax highlighting"));
+    #[cfg(feature = "syntax")]
+    lines.push(Line::from("m                Toggle rendered preview (Markdown for now)"));
     lines.extend([
         Line::from("q or Esc         Quit"),
         Line::from(""),
@@ -2608,10 +2630,7 @@ fn highlight_matches_in_line(line: Line<'static>, pattern: &Regex) -> Line<'stat
 fn body_text(app: &mut App, row: &Row) -> Text<'static> {
     let body = app.document.outline.nodes[&row.node].body.clone();
     #[cfg(feature = "syntax")]
-    if app.syntax_enabled {
-        if let Some(cached) = app.highlight_cache.get(&row.position) {
-            return cached.clone();
-        }
+    {
         let (inherited_language, external_path) =
             syntax_context(&app.document.outline, &row.position);
         let source_path = app
@@ -2619,12 +2638,32 @@ fn body_text(app: &mut App, row: &Row) -> Text<'static> {
             .get(&row.position)
             .map(|location| location.path.as_path())
             .or(external_path.as_deref());
-        let highlighted =
-            app.syntax
-                .highlight_with_language(&body, source_path, inherited_language.as_deref());
-        app.highlight_cache
-            .insert(row.position.clone(), highlighted.clone());
-        return highlighted;
+
+        if app.preview_enabled {
+            if let Some(cached) = app.preview_cache.get(&row.position) {
+                return cached.clone();
+            }
+            if let Some(rendered) =
+                app.syntax
+                    .render_preview(&body, source_path, inherited_language.as_deref())
+            {
+                app.preview_cache
+                    .insert(row.position.clone(), rendered.clone());
+                return rendered;
+            }
+        }
+
+        if app.syntax_enabled {
+            if let Some(cached) = app.highlight_cache.get(&row.position) {
+                return cached.clone();
+            }
+            let highlighted =
+                app.syntax
+                    .highlight_with_language(&body, source_path, inherited_language.as_deref());
+            app.highlight_cache
+                .insert(row.position.clone(), highlighted.clone());
+            return highlighted;
+        }
     }
     Text::from(body)
 }
@@ -2857,6 +2896,8 @@ fn open_selected(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mu
             app.dirty_nodes.insert(row.node);
             #[cfg(feature = "syntax")]
             app.highlight_cache.clear();
+            #[cfg(feature = "syntax")]
+            app.preview_cache.clear();
             app.body_scroll = 0;
             app.body_horizontal_scroll = 0;
             app.dirty = true;
