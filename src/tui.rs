@@ -1124,6 +1124,21 @@ fn reveal_and_select(app: &mut App, position: &PositionId) {
     select_position(app, position);
 }
 
+fn cancel_headline_edit(app: &mut App) {
+    let input = app.input.take().expect("input exists");
+    if let Some(position) = input.inserted_position {
+        remove_position(&mut app.document.outline, &position);
+        app.document.outline.nodes.remove(&input.node);
+    } else {
+        app.document
+            .outline
+            .nodes
+            .get_mut(&input.node)
+            .expect("node exists")
+            .headline = input.original;
+    }
+}
+
 fn handle_headline_input(app: &mut App, key: KeyEvent) {
     let Some(input) = app.input.as_mut() else {
         return;
@@ -1179,19 +1194,18 @@ fn handle_headline_input(app: &mut App, key: KeyEvent) {
             }
         }
         KeyCode::Esc => {
-            let input = app.input.take().expect("input exists");
-            if let Some(position) = input.inserted_position {
-                remove_position(&mut app.document.outline, &position);
-                app.document.outline.nodes.remove(&input.node);
-            } else {
-                app.document
-                    .outline
-                    .nodes
-                    .get_mut(&input.node)
-                    .expect("node exists")
-                    .headline = input.original;
-            }
+            cancel_headline_edit(app);
             app.status = "headline edit cancelled".into();
+        }
+        KeyCode::Up => {
+            cancel_headline_edit(app);
+            app.status = "headline edit cancelled".into();
+            app.move_selection(-1);
+        }
+        KeyCode::Down => {
+            cancel_headline_edit(app);
+            app.status = "headline edit cancelled".into();
+            app.move_selection(1);
         }
         KeyCode::Backspace => {
             if input.selected {
@@ -3553,6 +3567,30 @@ mod tests {
             app.status,
             "@auto descendants are read-only; press o to edit the source"
         );
+    }
+
+    #[test]
+    fn arrow_key_cancels_a_chained_insert_and_moves_out() {
+        let mut app = editing_app();
+        app.selected = 1; // node "b"
+
+        insert_headline(&mut app);
+        assert!(app.input.is_some());
+
+        handle_headline_input(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+
+        assert!(app.input.is_none());
+        assert_eq!(app.document.outline.nodes.len(), 3);
+        let row = app.selected_row().unwrap();
+        assert_eq!(app.document.outline.nodes[&row.node].headline, "C");
+
+        app.selected = 1; // node "b" again
+        edit_headline(&mut app);
+        handle_headline_input(&mut app, KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+
+        assert!(app.input.is_none());
+        let row = app.selected_row().unwrap();
+        assert_eq!(app.document.outline.nodes[&row.node].headline, "A");
     }
 
     #[test]
