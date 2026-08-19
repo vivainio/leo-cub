@@ -221,7 +221,7 @@ slash-separated headline path. Paths with duplicate matching siblings are
 rejected as ambiguous.
 
 `import` creates Leo external-file nodes in `auto`, `edit`, or `clean` mode.
-Markdown, Python, Rust, C#, Go, JavaScript/JSX, and TypeScript/TSX `@auto` files
+Markdown, Python, Rust, C#, Go, JavaScript/JSX, TypeScript/TSX, and XSLT `@auto` files
 are expanded transiently with Tree-sitter when they are loaded by `inspect` or
 the TUI; the generated tree is not stored in the `.leo` file. Unsupported
 source types remain available as a plain root node. Markdown also supports

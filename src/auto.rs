@@ -39,11 +39,25 @@ enum Flavor {
 struct StaticLanguage {
     query: &'static str,
     prefixes: &'static [(&'static str, &'static str)],
+    /// Block kinds (post-`prefixes`/`leo.kind` resolution) whose headline
+    /// should also show a trivial value, when the block's content is just
+    /// one plain-text child (no nested elements) -- e.g. `param diagnose :=
+    /// true` for `<xsl:param name="diagnose">true</xsl:param>`. Empty for
+    /// languages where declarations aren't XML elements with text content.
+    trivial_value_kinds: &'static [&'static str],
 }
 
 #[derive(Debug)]
 struct StaticMatch {
     name: String,
+    /// Overrides `config.prefixes`-derived kind when the query itself
+    /// determines the block kind (e.g. an XML tag name), rather than the
+    /// language having one Tree-sitter node kind per declaration form.
+    kind: Option<String>,
+    /// The XML attribute `name` was taken from (e.g. `match`, `name`,
+    /// `test`). `find_static_blocks` uses this to relabel `match`-derived
+    /// blocks, since a match pattern isn't a name the way `name`/`test` are.
+    attr: Option<String>,
 }
 
 #[derive(Debug)]
@@ -241,6 +255,8 @@ fn parse_static(
     while let Some(query_match) = matches.next() {
         let mut node = None;
         let mut name = None;
+        let mut kind = None;
+        let mut attr = None;
         for capture in query_match.captures {
             match capture_names[capture.index as usize] {
                 "leo.node" => node = Some(capture.node),
@@ -249,19 +265,32 @@ fn parse_static(
                         .node
                         .utf8_text(source.as_bytes())
                         .ok()
-                        .map(str::to_owned)
+                        .map(unquote)
+                }
+                "leo.kind" => {
+                    kind = capture
+                        .node
+                        .utf8_text(source.as_bytes())
+                        .ok()
+                        .map(local_name)
+                }
+                "leo.attr" => {
+                    attr = capture.node.utf8_text(source.as_bytes()).ok().map(str::to_owned)
                 }
                 _ => {}
             }
         }
         if let (Some(node), Some(name)) = (node, name) {
-            structural.insert((node.start_byte(), node.end_byte()), StaticMatch { name });
+            structural.insert(
+                (node.start_byte(), node.end_byte()),
+                StaticMatch { name, kind, attr },
+            );
         }
     }
 
     let starts = line_starts(source);
     let line_count = starts.len();
-    let mut blocks = find_static_blocks(syntax_root, line_count, config, &structural);
+    let mut blocks = find_static_blocks(syntax_root, source, line_count, config, &structural);
     assign_owned_starts(&mut blocks, 0);
     let preamble_end = blocks.first().map_or(0, |block| block.syntax_start);
     if let Some(first) = blocks.first_mut() {
@@ -315,6 +344,7 @@ fn parse_static(
 
 fn find_static_blocks(
     parent: TsNode<'_>,
+    source: &str,
     line_count: usize,
     config: &StaticLanguage,
     structural: &HashMap<(usize, usize), StaticMatch>,
@@ -327,7 +357,7 @@ fn find_static_blocks(
             let end_pos = child.end_position();
             let end = (end_pos.row + usize::from(end_pos.column > 0)).min(line_count);
             let container = child.child_by_field_name("body").unwrap_or(child);
-            let children = find_static_blocks(container, line_count, config, structural);
+            let children = find_static_blocks(container, source, line_count, config, structural);
             // The body's opening delimiter belongs to the declaration node,
             // including languages such as C# that put `{` on its own line. But
             // when a nested block shares that same line (e.g. a single-line
@@ -339,14 +369,31 @@ fn find_static_blocks(
                 .map_or((container.start_position().row + 1).min(end), |first| {
                     first.syntax_start
                 });
-            let prefix = config
-                .prefixes
-                .iter()
-                .find_map(|(kind, prefix)| (*kind == child.kind()).then_some(*prefix))
-                .unwrap_or(child.kind());
+            // A `match` pattern isn't a name the way `name`/`test` are (an
+            // `xsl:template match="foo"` isn't a template *named* foo), so
+            // label those blocks by the attribute itself rather than the tag.
+            let kind = if item.attr.as_deref() == Some("match") {
+                "match".to_owned()
+            } else {
+                item.kind.clone().unwrap_or_else(|| {
+                    config
+                        .prefixes
+                        .iter()
+                        .find_map(|(kind, prefix)| (*kind == child.kind()).then_some(*prefix))
+                        .unwrap_or(child.kind())
+                        .to_owned()
+                })
+            };
+            let name = if children.is_empty() && config.trivial_value_kinds.contains(&kind.as_str())
+            {
+                xml_trivial_value(child, source)
+                    .map_or_else(|| item.name.clone(), |value| format!("{} := {value}", item.name))
+            } else {
+                item.name.clone()
+            };
             blocks.push(Block {
-                kind: prefix.to_owned(),
-                name: item.name.clone(),
+                kind,
+                name,
                 syntax_start,
                 body_start,
                 start: syntax_start,
@@ -355,7 +402,7 @@ fn find_static_blocks(
                 children,
             });
         } else {
-            blocks.extend(find_static_blocks(child, line_count, config, structural));
+            blocks.extend(find_static_blocks(child, source, line_count, config, structural));
         }
     }
     blocks
@@ -729,6 +776,7 @@ const C_SHARP: StaticLanguage = StaticLanguage {
         ("method_declaration", "method"),
         ("constructor_declaration", "constructor"),
     ],
+    trivial_value_kinds: &[],
 };
 
 const JAVASCRIPT: StaticLanguage = StaticLanguage {
@@ -744,6 +792,7 @@ const JAVASCRIPT: StaticLanguage = StaticLanguage {
         ("generator_function_declaration", "function"),
         ("method_definition", "method"),
     ],
+    trivial_value_kinds: &[],
 };
 
 const TYPESCRIPT: StaticLanguage = StaticLanguage {
@@ -769,6 +818,7 @@ const TYPESCRIPT: StaticLanguage = StaticLanguage {
         ("generator_function_declaration", "function"),
         ("method_definition", "method"),
     ],
+    trivial_value_kinds: &[],
 };
 
 const GO: StaticLanguage = StaticLanguage {
@@ -782,6 +832,77 @@ const GO: StaticLanguage = StaticLanguage {
         ("function_declaration", "func"),
         ("method_declaration", "method"),
     ],
+    trivial_value_kinds: &[],
+};
+
+/// Strips an XML namespace prefix (`xsl:template` -> `template`) so tag
+/// names read like the other languages' declaration keywords.
+fn local_name(qualified: &str) -> String {
+    qualified.rsplit(':').next().unwrap_or(qualified).to_owned()
+}
+
+/// For a `param`/`variable`-like element whose entire content is one run of
+/// plain text (no nested elements, comments, or processing instructions),
+/// returns that text normalized to one line -- e.g. the `true` in
+/// `<xsl:param name="diagnose">true</xsl:param>`. `None` for anything with
+/// element content (a complex default that can't sit on a headline).
+fn xml_trivial_value(node: TsNode<'_>, source: &str) -> Option<String> {
+    let mut cursor = node.walk();
+    let content = node
+        .named_children(&mut cursor)
+        .find(|child| child.kind() == "content")?;
+    let mut inner = content.walk();
+    let mut named = content.named_children(&mut inner);
+    let only = named.next()?;
+    if named.next().is_some() || only.kind() != "CharData" {
+        return None;
+    }
+    let text = only.utf8_text(source.as_bytes()).ok()?;
+    let value = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!value.is_empty()).then_some(value)
+}
+
+/// Strips the surrounding quotes Tree-sitter's XML grammar keeps on
+/// `AttValue` nodes, so an attribute value reads as plain text. XSLT
+/// expressions (`test`, `match`, `select`, ...) are also often hand-wrapped
+/// across source lines with heavy indentation, which would otherwise leak
+/// into the headline as a multi-line value full of stray whitespace; collapse
+/// all whitespace runs to single spaces so the headline stays one line.
+fn unquote(value: &str) -> String {
+    let inner = value
+        .strip_prefix('"')
+        .or_else(|| value.strip_prefix('\''))
+        .unwrap_or(value);
+    let inner = inner
+        .strip_suffix('"')
+        .or_else(|| inner.strip_suffix('\''))
+        .unwrap_or(inner);
+    inner.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// XSLT stylesheets are XML, so Tree-sitter's generic XML grammar has no
+/// dedicated node kind per element (everything is `element`); the block
+/// kind and name instead come straight from the query, keyed off whichever
+/// declaration-identifying attribute (`name`, `match`, `test`, `id`) the
+/// matched element carries. Elements without one of those attributes (e.g.
+/// literal result elements, `<xsl:otherwise>`) are left as plain body text.
+const XSLT: StaticLanguage = StaticLanguage {
+    query: r#"
+        (
+          (element
+            (STag
+              (Name) @leo.kind
+              (Attribute
+                (Name) @leo.attr
+                (AttValue) @leo.name
+              )
+            )
+          ) @leo.node
+          (#any-of? @leo.attr "name" "match" "test" "id")
+        )
+    "#,
+    prefixes: &[],
+    trivial_value_kinds: &["param", "variable"],
 };
 
 fn language_for(path: &Path) -> Result<(Flavor, Language, &'static str), AutoError> {
@@ -804,6 +925,11 @@ fn language_for(path: &Path) -> Result<(Flavor, Language, &'static str), AutoErr
             "csharp",
         )),
         "go" => Ok((Flavor::Static(&GO), tree_sitter_go::LANGUAGE.into(), "go")),
+        "xsl" | "xslt" => Ok((
+            Flavor::Static(&XSLT),
+            tree_sitter_xml::LANGUAGE_XML.into(),
+            "xslt",
+        )),
         "js" | "jsx" | "mjs" | "cjs" => Ok((
             Flavor::Static(&JAVASCRIPT),
             tree_sitter_javascript::LANGUAGE.into(),
@@ -1161,6 +1287,11 @@ mod tests {
                 "package p\ntype S struct{}\nfunc (S) M() {}\nfunc F() {}\n",
                 vec!["type S", "method M", "func F"],
             ),
+            (
+                "x.xslt",
+                "<xsl:stylesheet version=\"1.0\">\n  <xsl:template match=\"/\">\n    <xsl:if test=\"@x\">y</xsl:if>\n  </xsl:template>\n  <xsl:function name=\"f\">\n    <xsl:param name=\"p\"/>\n  </xsl:function>\n</xsl:stylesheet>\n",
+                vec!["match /", "if @x", "function f"],
+            ),
         ];
         for (path, source, expected) in cases {
             let auto = AutoFile::parse(Path::new(path), NodeId::from("root"), source).unwrap();
@@ -1171,6 +1302,66 @@ mod tests {
                 .collect::<Vec<_>>();
             assert_eq!(headlines, expected, "{path}");
         }
+    }
+
+    #[test]
+    fn xslt_attribute_values_are_normalized_to_a_single_line_headline() {
+        // Hand-wrapped, padded attribute values (common in real-world XSLT)
+        // must not leak their raw whitespace or line breaks into a headline,
+        // which is expected to render as one line.
+        let source = "<xsl:stylesheet version=\"1.0\">\n  <xsl:template match=\"/\">\n    <xsl:if test=\" $terminate = 'assert' \">y</xsl:if>\n    <xsl:if test=\"doc-available(\n                      resolve-uri($x))\">y</xsl:if>\n  </xsl:template>\n</xsl:stylesheet>\n";
+        let auto = AutoFile::parse(Path::new("x.xslt"), NodeId::from("root"), source).unwrap();
+        let headlines = rows(&auto)
+            .into_iter()
+            .skip(1)
+            .map(|(_, headline, _)| headline)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            headlines,
+            vec![
+                "match /",
+                "if $terminate = 'assert'",
+                "if doc-available( resolve-uri($x))",
+            ]
+        );
+    }
+
+    #[test]
+    fn xslt_template_match_is_headlined_by_the_pattern_not_the_tag() {
+        // `xsl:template match="foo"` isn't a template *named* foo -- "foo" is
+        // a match pattern, not an identifier -- so it should read "match
+        // foo". A `name=` template genuinely has a name, so it keeps
+        // "template <name>".
+        let source = "<xsl:stylesheet version=\"1.0\">\n  <xsl:template match=\"cd\">\n    <p/>\n  </xsl:template>\n  <xsl:template name=\"do-foo\">\n    <p/>\n  </xsl:template>\n</xsl:stylesheet>\n";
+        let auto = AutoFile::parse(Path::new("x.xslt"), NodeId::from("root"), source).unwrap();
+        let headlines = rows(&auto)
+            .into_iter()
+            .skip(1)
+            .map(|(_, headline, _)| headline)
+            .collect::<Vec<_>>();
+        assert_eq!(headlines, vec!["match cd", "template do-foo"]);
+    }
+
+    #[test]
+    fn xslt_trivial_param_and_variable_values_fold_into_the_headline() {
+        let source = "<xsl:stylesheet version=\"1.0\">\n  <xsl:param name=\"diagnose\">true</xsl:param>\n  <xsl:variable name=\"x\"><b>bold</b></xsl:variable>\n  <xsl:param name=\"empty\"></xsl:param>\n  <xsl:template match=\"/\">\n    <p/>\n  </xsl:template>\n</xsl:stylesheet>\n";
+        let auto = AutoFile::parse(Path::new("x.xslt"), NodeId::from("root"), source).unwrap();
+        let headlines = rows(&auto)
+            .into_iter()
+            .skip(1)
+            .map(|(_, headline, _)| headline)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            headlines,
+            vec![
+                "param diagnose := true",
+                // Element content (not plain text) can't fold into a headline.
+                "variable x",
+                // Empty content has no trivial value to show.
+                "param empty",
+                "match /",
+            ]
+        );
     }
 
     #[test]
