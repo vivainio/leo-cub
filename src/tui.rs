@@ -99,6 +99,8 @@ struct App {
     preview_enabled: bool,
     #[cfg(feature = "syntax")]
     preview_cache: HashMap<PositionId, Text<'static>>,
+    #[cfg(feature = "syntax")]
+    wrap_before_preview: Option<bool>,
 }
 
 impl App {
@@ -166,6 +168,8 @@ impl App {
             preview_enabled: false,
             #[cfg(feature = "syntax")]
             preview_cache: HashMap::new(),
+            #[cfg(feature = "syntax")]
+            wrap_before_preview: None,
         }
     }
 
@@ -248,6 +252,23 @@ impl App {
             .body_horizontal_scroll
             .saturating_add_signed(columns)
             .min(self.body_horizontal_scroll_max);
+    }
+
+    #[cfg(feature = "syntax")]
+    fn toggle_preview(&mut self) {
+        self.preview_enabled = !self.preview_enabled;
+        if self.preview_enabled {
+            self.wrap_before_preview = Some(self.body_wrap);
+            self.body_wrap = true;
+        } else if let Some(previous_wrap) = self.wrap_before_preview.take() {
+            self.body_wrap = previous_wrap;
+        }
+        self.body_scroll = 0;
+        self.body_horizontal_scroll = 0;
+        self.status = format!(
+            "rendered preview {}",
+            if self.preview_enabled { "on" } else { "off" }
+        );
     }
 
     fn toggle_body_wrap(&mut self) {
@@ -548,13 +569,7 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
                 );
             }
             #[cfg(feature = "syntax")]
-            KeyCode::Char('m') => {
-                app.preview_enabled = !app.preview_enabled;
-                app.status = format!(
-                    "rendered preview {}",
-                    if app.preview_enabled { "on" } else { "off" }
-                );
-            }
+            KeyCode::Char('m') => app.toggle_preview(),
             KeyCode::Down if app.body_full_width => app.scroll_body_lines(1),
             KeyCode::Up if app.body_full_width => app.scroll_body_lines(-1),
             KeyCode::Down => app.move_selection(1),
@@ -3921,6 +3936,43 @@ mod tests {
         assert!(!app.body_wrap);
         assert_eq!(app.status, "word wrap disabled");
         assert_eq!(node_title(app.body_wrap), " Node ");
+    }
+
+    #[cfg(feature = "syntax")]
+    #[test]
+    fn toggling_preview_forces_wrap_on_and_restores_it_afterward() {
+        let mut app = editing_app();
+        assert!(!app.body_wrap);
+        app.body_scroll = 3;
+        app.body_horizontal_scroll = 7;
+
+        app.toggle_preview();
+
+        assert!(app.preview_enabled);
+        assert!(app.body_wrap);
+        assert_eq!(app.body_scroll, 0);
+        assert_eq!(app.body_horizontal_scroll, 0);
+        assert_eq!(app.status, "rendered preview on");
+
+        app.toggle_preview();
+
+        assert!(!app.preview_enabled);
+        assert!(!app.body_wrap);
+        assert_eq!(app.status, "rendered preview off");
+    }
+
+    #[cfg(feature = "syntax")]
+    #[test]
+    fn toggling_preview_does_not_clobber_an_explicit_wrap_preference() {
+        let mut app = editing_app();
+        app.toggle_body_wrap();
+        assert!(app.body_wrap);
+
+        app.toggle_preview();
+        assert!(app.body_wrap);
+        app.toggle_preview();
+
+        assert!(app.body_wrap, "wrap was on before preview, should stay on");
     }
 
     #[test]
