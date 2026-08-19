@@ -2124,7 +2124,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
                 "  "
             };
             let clone_count = clone_count(&app.document.outline, &row.node);
-            let clone = if clone_count > 1 {
+            let clone = if is_clone_root(&app.document.outline, &row.position, &row.node) {
                 format!(" ⧉×{clone_count}")
             } else {
                 String::new()
@@ -3228,6 +3228,25 @@ fn clone_count(outline: &Outline, id: &NodeId) -> usize {
     count(&outline.roots, id)
 }
 
+/// Whether `position` is where a clone actually originates, rather than a
+/// descendant that only repeats because an ancestor of it was cloned. A
+/// node's occurrences that are fully explained by its immediate parent's own
+/// occurrence count (i.e. it shows up once per parent occurrence) inherit
+/// the clone relationship instead of being an independent clone point.
+fn is_clone_root(outline: &Outline, position: &PositionId, id: &NodeId) -> bool {
+    let count = clone_count(outline, id);
+    if count <= 1 {
+        return false;
+    }
+    let parent_count = match split_position(position) {
+        Some((Some(parent), _)) => outline
+            .position(&parent)
+            .map_or(1, |p| clone_count(outline, &p.node)),
+        _ => 1,
+    };
+    count > parent_count
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4293,6 +4312,20 @@ fn main() {}</t><t tx="b">just notes</t></tnodes></leo_file>"#,
         assert_eq!(app.document.outline.roots[0], app.document.outline.roots[1]);
         assert_eq!(clone_count(&app.document.outline, &NodeId::from("a")), 2);
         assert_eq!(app.document.outline.nodes.len(), 3);
+
+        let outline = &app.document.outline;
+        assert!(is_clone_root(outline, &PositionId("0".into()), &NodeId::from("a")));
+        assert!(is_clone_root(outline, &PositionId("1".into()), &NodeId::from("a")));
+        assert!(!is_clone_root(
+            outline,
+            &PositionId("0/0".into()),
+            &NodeId::from("b")
+        ));
+        assert!(!is_clone_root(
+            outline,
+            &PositionId("1/0".into()),
+            &NodeId::from("b")
+        ));
     }
 
     #[test]
