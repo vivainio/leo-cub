@@ -260,13 +260,7 @@ fn parse_static(
         for capture in query_match.captures {
             match capture_names[capture.index as usize] {
                 "leo.node" => node = Some(capture.node),
-                "leo.name" => {
-                    name = capture
-                        .node
-                        .utf8_text(source.as_bytes())
-                        .ok()
-                        .map(unquote)
-                }
+                "leo.name" => name = capture.node.utf8_text(source.as_bytes()).ok().map(unquote),
                 "leo.kind" => {
                     kind = capture
                         .node
@@ -275,7 +269,11 @@ fn parse_static(
                         .map(local_name)
                 }
                 "leo.attr" => {
-                    attr = capture.node.utf8_text(source.as_bytes()).ok().map(str::to_owned)
+                    attr = capture
+                        .node
+                        .utf8_text(source.as_bytes())
+                        .ok()
+                        .map(str::to_owned)
                 }
                 _ => {}
             }
@@ -386,8 +384,10 @@ fn find_static_blocks(
             };
             let name = if children.is_empty() && config.trivial_value_kinds.contains(&kind.as_str())
             {
-                xml_trivial_value(child, source)
-                    .map_or_else(|| item.name.clone(), |value| format!("{} := {value}", item.name))
+                xml_trivial_value(child, source).map_or_else(
+                    || item.name.clone(),
+                    |value| format!("{} := {value}", item.name),
+                )
             } else {
                 item.name.clone()
             };
@@ -402,7 +402,9 @@ fn find_static_blocks(
                 children,
             });
         } else {
-            blocks.extend(find_static_blocks(child, source, line_count, config, structural));
+            blocks.extend(find_static_blocks(
+                child, source, line_count, config, structural,
+            ));
         }
     }
     blocks
