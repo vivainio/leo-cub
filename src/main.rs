@@ -2,12 +2,16 @@ use anyhow::{Context, Result, bail};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use leo::{
     DerivedFile, ExternalFilter, ImportMode, ImportOptions, InspectSelector, LeoDocument, NodeId,
-    OperationBatch, PositionId, import_files, load_matching_external_files, render_compact,
-    render_outline_with_options, render_search_compact, search_outline, select_subtrees,
-    sync_document,
+    OperationBatch, PositionId, import_files, json_tree, load_matching_external_files,
+    render_compact, render_outline_with_options, render_search_compact, search_outline,
+    select_subtrees, sync_document,
 };
 use regex::Regex;
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    io::Read,
+    path::{Path, PathBuf},
+};
 
 mod install;
 #[cfg(all(feature = "tui", feature = "syntax"))]
@@ -34,6 +38,11 @@ enum InspectFormat {
     #[default]
     Compact,
     Json,
+    /// Nested JSON addressable by headline path (`get "A" | get "B"` in
+    /// nu), instead of by GNX or position index. Fails if any two siblings
+    /// share a headline or a headline collides with a reserved _gnx/_body
+    /// key, rather than silently degrading.
+    JsonTree,
 }
 
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
@@ -169,19 +178,51 @@ enum Command {
   {"op":"set-body","node":"<gnx>","body":"new","expected":"old"}
   {"op":"insert","parent":"<parent-gnx>","index":0,
    "node":{"id":"<new-gnx>","headline":"New node","body":""}}
+  {"op":"insert-tree","parent":"<parent-gnx>","index":0,
+   "tree":{"Headline":{"_gnx":"<optional-gnx>","_body":"text",
+   "Child headline":{"_body":"..."}}}}
   {"op":"clone","parent":"<parent-gnx>","index":0,"node":"<gnx>"}
   {"op":"remove","position":"<position>"}
+  {"op":"replace-tree","headline":"Slash/Path/To/Node",
+   "tree":{"New headline":{"_body":"..."}}}
+  {"op":"merge-tree","parent":"<parent-gnx>",
+   "tree":{"Existing headline":{"_body":"updated",
+   "New headline":{"_body":"..."}}}}
 
   "parent" is a GNX and may be null for the outline root. Inserting below a
   cloned parent affects all its occurrences. "index" and "expected" are
   optional. "position" is an index path such as "0/2/1" and identifies one
   clone occurrence. The complete batch is committed only if every operation
-  succeeds.
+  succeeds. Pass "-" for OPERATIONS to read the batch from stdin.
+
+  "insert-tree" adds a whole subtree (or several sibling subtrees) in one
+  operation, using the same shape "inspect --format json-tree" prints: a map
+  from headline to a node with reserved "_gnx"/"_body" keys plus one key per
+  child headline. Both are optional: "_body" defaults to "", and a node
+  missing "_gnx" gets a fresh id from the batch's top-level "gnx-prefix"
+  (default "cub"), formatted like the ids "import" generates.
+
+  "replace-tree" removes a node's defining occurrence and its subtree, then
+  inserts a fresh "tree" (same shape as "insert-tree") in its place at the
+  same parent/index. The target is either "node" (a GNX) or "headline" (a
+  slash-separated headline path, resolved the same way as "cub add"'s
+  paths) — exactly one of the two. The removed node's GNX is discarded; the
+  new tree's nodes get fresh ids unless they set their own "_gnx".
+
+  "merge-tree" merges "tree" into "parent"'s children (same shape again),
+  matching each entry to an existing child by headline. A match updates
+  that child's body (only if "_body" is given — omitting it, unlike
+  "insert-tree", leaves the existing body alone) and merges its children
+  the same way, recursively. No match inserts that entry fresh, same as
+  "insert-tree". "merge-tree" never removes a node; a headline matching
+  more than one sibling fails the batch.
 
 EXAMPLE:
-  {"operations":[{"op":"set-body","node":"ekr.1","expected":"old","body":"new"}]}"#)]
+  {"gnx-prefix":"acme",
+   "operations":[{"op":"set-body","node":"ekr.1","expected":"old","body":"new"}]}"#)]
     Apply {
         file: PathBuf,
+        /// Path to the operations JSON file, or "-" to read it from stdin.
         operations: PathBuf,
         #[arg(long)]
         dry_run: bool,
@@ -320,12 +361,19 @@ fn main() -> Result<()> {
                     InspectFormat::Json => {
                         println!("{}", serde_json::to_string_pretty(&matches)?)
                     }
+                    InspectFormat::JsonTree => {
+                        bail!("--format json-tree does not support --search")
+                    }
                 }
             } else {
                 match format {
                     InspectFormat::Compact => print!("{}", render_compact(&selected)),
                     InspectFormat::Json => {
                         println!("{}", serde_json::to_string_pretty(&selected)?)
+                    }
+                    InspectFormat::JsonTree => {
+                        let tree = json_tree(&selected)?;
+                        println!("{}", serde_json::to_string_pretty(&tree)?);
                     }
                 }
             }
@@ -422,9 +470,16 @@ fn main() -> Result<()> {
             dry_run,
         } => {
             let mut doc = LeoDocument::open(&file)?;
-            let batch: OperationBatch = serde_json::from_str(
-                &fs::read_to_string(operations).context("read operations file")?,
-            )?;
+            let source = if operations == Path::new("-") {
+                let mut buffer = String::new();
+                std::io::stdin()
+                    .read_to_string(&mut buffer)
+                    .context("read operations from stdin")?;
+                buffer
+            } else {
+                fs::read_to_string(&operations).context("read operations file")?
+            };
+            let batch: OperationBatch = serde_json::from_str(&source)?;
             let report = doc.outline.apply(&batch)?;
             if !dry_run {
                 doc.save(file)?;
@@ -500,6 +555,16 @@ mod tests {
         assert!(cli.command.is_none());
         assert_eq!(cli.file, Some(PathBuf::from("notes.leo")));
         assert!(!cli.no_derived);
+    }
+
+    #[test]
+    fn apply_accepts_a_dash_as_the_operations_path() {
+        let cli = Cli::try_parse_from(["cub", "apply", "notes.leo", "-"]).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Some(Command::Apply { operations, .. }) if operations == Path::new("-")
+        ));
     }
 
     #[test]

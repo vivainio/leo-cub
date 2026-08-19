@@ -343,7 +343,8 @@ fn children_for_parent<'a>(
     find(roots, parent)
 }
 
-struct IdGenerator {
+pub(crate) struct IdGenerator {
+    prefix: String,
     used: HashSet<NodeId>,
     seconds: u64,
     nanos: u32,
@@ -352,10 +353,15 @@ struct IdGenerator {
 
 impl IdGenerator {
     fn new(used: HashSet<NodeId>) -> Self {
+        Self::with_prefix("cub".to_owned(), used)
+    }
+
+    pub(crate) fn with_prefix(prefix: String, used: HashSet<NodeId>) -> Self {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default();
         Self {
+            prefix,
             used,
             seconds: now.as_secs(),
             nanos: now.subsec_nanos(),
@@ -363,12 +369,12 @@ impl IdGenerator {
         }
     }
 
-    fn next(&mut self) -> NodeId {
+    pub(crate) fn next(&mut self) -> NodeId {
         loop {
             self.sequence += 1;
             let id = NodeId(format!(
-                "cub.{}.{}.{}",
-                self.seconds, self.nanos, self.sequence
+                "{}.{}.{}.{}",
+                self.prefix, self.seconds, self.nanos, self.sequence
             ));
             if self.used.insert(id.clone()) {
                 return id;
