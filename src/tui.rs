@@ -101,6 +101,8 @@ struct App {
     preview_cache: HashMap<PositionId, Text<'static>>,
     #[cfg(feature = "syntax")]
     wrap_before_preview: Option<bool>,
+    #[cfg(feature = "syntax")]
+    wrap_by_language: HashMap<String, bool>,
 }
 
 impl App {
@@ -170,6 +172,8 @@ impl App {
             preview_cache: HashMap::new(),
             #[cfg(feature = "syntax")]
             wrap_before_preview: None,
+            #[cfg(feature = "syntax")]
+            wrap_by_language: HashMap::new(),
         }
     }
 
@@ -245,7 +249,7 @@ impl App {
     }
 
     fn scroll_body_horizontal(&mut self, columns: isize) {
-        if self.body_wrap {
+        if self.wrap_for(self.selected_position().as_ref()) {
             return;
         }
         self.body_horizontal_scroll = self
@@ -254,17 +258,54 @@ impl App {
             .min(self.body_horizontal_scroll_max);
     }
 
+    fn selected_position(&self) -> Option<PositionId> {
+        self.rows().get(self.selected).map(|row| row.position.clone())
+    }
+
+    #[cfg(feature = "syntax")]
+    fn language_at(&self, position: &PositionId) -> Option<String> {
+        syntax_context(&self.document.outline, position).0
+    }
+
+    /// The word-wrap preference for `position`'s detected language (via
+    /// `@language`/inherited context, not raw file extension), or the shared
+    /// default bucket (`body_wrap`) when there's no detected language, no
+    /// selection, or the `syntax` feature is disabled.
+    fn wrap_for(&self, position: Option<&PositionId>) -> bool {
+        #[cfg(feature = "syntax")]
+        if let Some(position) = position
+            && let Some(language) = self.language_at(position)
+        {
+            return self.wrap_by_language.get(&language).copied().unwrap_or(false);
+        }
+        self.body_wrap
+    }
+
+    fn set_wrap_for(&mut self, position: Option<&PositionId>, value: bool) {
+        #[cfg(feature = "syntax")]
+        if let Some(position) = position
+            && let Some(language) = self.language_at(position)
+        {
+            self.wrap_by_language.insert(language, value);
+            self.body_scroll = 0;
+            self.body_horizontal_scroll = 0;
+            return;
+        }
+        self.body_wrap = value;
+        self.body_scroll = 0;
+        self.body_horizontal_scroll = 0;
+    }
+
     #[cfg(feature = "syntax")]
     fn toggle_preview(&mut self) {
         self.preview_enabled = !self.preview_enabled;
+        let position = self.selected_position();
         if self.preview_enabled {
-            self.wrap_before_preview = Some(self.body_wrap);
-            self.body_wrap = true;
+            self.wrap_before_preview = Some(self.wrap_for(position.as_ref()));
+            self.set_wrap_for(position.as_ref(), true);
         } else if let Some(previous_wrap) = self.wrap_before_preview.take() {
-            self.body_wrap = previous_wrap;
+            self.set_wrap_for(position.as_ref(), previous_wrap);
         }
-        self.body_scroll = 0;
-        self.body_horizontal_scroll = 0;
         self.status = format!(
             "rendered preview {}",
             if self.preview_enabled { "on" } else { "off" }
@@ -272,17 +313,10 @@ impl App {
     }
 
     fn toggle_body_wrap(&mut self) {
-        self.body_wrap = !self.body_wrap;
-        self.body_scroll = 0;
-        self.body_horizontal_scroll = 0;
-        self.status = format!(
-            "word wrap {}",
-            if self.body_wrap {
-                "enabled"
-            } else {
-                "disabled"
-            }
-        );
+        let position = self.selected_position();
+        let wrap = !self.wrap_for(position.as_ref());
+        self.set_wrap_for(position.as_ref(), wrap);
+        self.status = format!("word wrap {}", if wrap { "enabled" } else { "disabled" });
     }
 
     fn toggle(&mut self, expand: bool) {
@@ -2184,12 +2218,15 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
                         }
                     },
                 ]),
-                None => Line::from(node_title(app.body_wrap)),
+                None => Line::from(node_title(
+                    app.wrap_for(rows.get(app.selected).map(|row| &row.position)),
+                )),
             })
             .borders(Borders::ALL);
         let node_area = node_block.inner(columns[1]);
         frame.render_widget(node_block, columns[1]);
         if let Some(row) = rows.get(app.selected) {
+            let wrap = app.wrap_for(Some(&row.position));
             let mut body = if let Some((_, _, _, text)) = output_info {
                 Text::from(text)
             } else {
@@ -2205,13 +2242,13 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
             }
             let body_width = body.width();
             let mut paragraph = Paragraph::new(body);
-            if app.body_wrap {
+            if wrap {
                 paragraph = paragraph.wrap(Wrap { trim: false });
             }
             app.body_page_size = usize::from(node_area.height).max(1);
             let body_height = paragraph.line_count(node_area.width);
             app.body_scroll_max = body_height.saturating_sub(app.body_page_size);
-            app.body_horizontal_scroll_max = if app.body_wrap {
+            app.body_horizontal_scroll_max = if wrap {
                 0
             } else {
                 body_width.saturating_sub(usize::from(node_area.width))
@@ -3973,6 +4010,46 @@ mod tests {
         app.toggle_preview();
 
         assert!(app.body_wrap, "wrap was on before preview, should stay on");
+    }
+
+    #[cfg(feature = "syntax")]
+    #[test]
+    fn wrap_preference_is_remembered_per_language_with_a_separate_default_bucket() {
+        let document = LeoDocument::parse(
+            r#"<leo_file><vnodes><v t="a"><vh>rust body</vh></v><v t="b"><vh>plain body</vh></v></vnodes><tnodes><t tx="a">@language rust
+fn main() {}</t><t tx="b">just notes</t></tnodes></leo_file>"#,
+        )
+        .unwrap();
+        let mut app = App::new(
+            document,
+            PathBuf::from("test.leo"),
+            String::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashSet::new(),
+            HashMap::new(),
+            OriginalExternalState::default(),
+            false,
+        );
+
+        app.selected = 0;
+        assert!(!app.wrap_for(app.selected_position().as_ref()));
+        app.toggle_body_wrap();
+        assert!(app.wrap_for(app.selected_position().as_ref()));
+
+        app.selected = 1;
+        assert!(
+            !app.wrap_for(app.selected_position().as_ref()),
+            "the default bucket must not pick up the rust node's wrap state"
+        );
+        app.toggle_body_wrap();
+        assert!(app.wrap_for(app.selected_position().as_ref()));
+
+        app.selected = 0;
+        assert!(
+            app.wrap_for(app.selected_position().as_ref()),
+            "the rust node's wrap state must not be clobbered by the default bucket"
+        );
     }
 
     #[test]
