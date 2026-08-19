@@ -90,7 +90,9 @@ enum Command {
     Add {
         /// Outline to modify.
         file: PathBuf,
-        /// Headline paths, for example "Project/Tasks/First task".
+        /// Headline paths, for example "Project/Tasks/First task". Write
+        /// "\/" for a literal slash and "\\" for a literal backslash within
+        /// one headline.
         #[arg(required = true)]
         paths: Vec<String>,
     },
@@ -206,6 +208,15 @@ enum Command {
   child headline. Both are optional: "_body" defaults to "", and a node
   missing "_gnx" gets a fresh id from the batch's top-level "gnx-prefix"
   (default "cub"), formatted like the ids "import" generates.
+
+  "insert-tree" and "merge-tree" may give "parent-headline" instead of
+  "parent": a slash-separated headline path, resolved and created the same
+  way "cub add" resolves its paths — reusing any existing prefix and adding
+  only the missing segments. At most one of "parent"/"parent-headline" may
+  be given; omitting both means the outline root. Write "\/" for a literal
+  slash and "\\" for a literal backslash within one path component, for
+  headlines that contain a "/" themselves (a branch-name-style PR title,
+  say); any other backslash is kept as-is.
 
   "replace-tree" removes a node's defining occurrence and its subtree, then
   inserts a fresh "tree" (same shape as "insert-tree") in its place at the

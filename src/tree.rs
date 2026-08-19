@@ -1,11 +1,9 @@
-use std::{
-    collections::{HashMap, HashSet},
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::collections::HashMap;
 
 use serde::Serialize;
 use thiserror::Error;
 
+use crate::import::IdGenerator;
 use crate::{Node, NodeId, Outline, Position};
 
 #[derive(Clone, Debug, Serialize)]
@@ -59,7 +57,8 @@ impl Outline {
             .map(|path| path_parts(path).map(|parts| (path, parts)))
             .collect::<Result<Vec<_>, _>>()?;
         let mut next = self.clone();
-        let mut ids = IdGenerator::new(next.nodes.keys().cloned().collect());
+        let mut ids =
+            IdGenerator::with_prefix("cub".to_owned(), next.nodes.keys().cloned().collect());
         let mut created = 0;
         for (path, parts) in parsed {
             ensure_path(
@@ -77,13 +76,51 @@ impl Outline {
             paths: paths.to_vec(),
         })
     }
+
+    /// Resolve a single slash-separated headline path, creating any missing
+    /// segments (reusing existing ones) the same way `add_headline_paths`
+    /// does, and return the leaf node's id.
+    pub(crate) fn ensure_headline_path(
+        &mut self,
+        path: &str,
+        ids: &mut IdGenerator,
+    ) -> Result<NodeId, HeadlinePathError> {
+        let parts = path_parts(path)?;
+        let mut created = 0;
+        ensure_path(
+            &mut self.roots,
+            &mut self.nodes,
+            ids,
+            &parts,
+            path,
+            &mut created,
+        )
+    }
 }
 
-fn path_parts(path: &str) -> Result<Vec<&str>, HeadlinePathError> {
+/// Split a slash-separated headline path into its components. `\/` is a
+/// literal slash and `\\` a literal backslash, so a headline that itself
+/// contains a `/` (a branch-name-style PR title, say) can still be written
+/// as one path component; any other backslash is kept as-is.
+fn path_parts(path: &str) -> Result<Vec<String>, HeadlinePathError> {
     if path.is_empty() {
         return Err(HeadlinePathError::Empty);
     }
-    let parts: Vec<_> = path.split('/').collect();
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut chars = path.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' if matches!(chars.peek(), Some('/') | Some('\\')) => {
+                current.push(chars.next().unwrap());
+            }
+            '/' => {
+                parts.push(std::mem::take(&mut current));
+            }
+            _ => current.push(c),
+        }
+    }
+    parts.push(current);
     if parts.iter().any(|part| part.is_empty()) {
         return Err(HeadlinePathError::EmptyComponent(path.to_owned()));
     }
@@ -94,10 +131,10 @@ fn ensure_path(
     siblings: &mut Vec<Position>,
     nodes: &mut HashMap<NodeId, Node>,
     ids: &mut IdGenerator,
-    parts: &[&str],
+    parts: &[String],
     full_path: &str,
     created: &mut usize,
-) -> Result<(), HeadlinePathError> {
+) -> Result<NodeId, HeadlinePathError> {
     let matches: Vec<_> = siblings
         .iter()
         .enumerate()
@@ -135,42 +172,9 @@ fn ensure_path(
             &parts[1..],
             full_path,
             created,
-        )?;
-    }
-    Ok(())
-}
-
-struct IdGenerator {
-    used: HashSet<NodeId>,
-    seconds: u64,
-    nanos: u32,
-    sequence: u64,
-}
-
-impl IdGenerator {
-    fn new(used: HashSet<NodeId>) -> Self {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default();
-        Self {
-            used,
-            seconds: now.as_secs(),
-            nanos: now.subsec_nanos(),
-            sequence: 0,
-        }
-    }
-
-    fn next(&mut self) -> NodeId {
-        loop {
-            self.sequence += 1;
-            let id = NodeId(format!(
-                "cub.{}.{}.{}",
-                self.seconds, self.nanos, self.sequence
-            ));
-            if self.used.insert(id.clone()) {
-                return id;
-            }
-        }
+        )
+    } else {
+        Ok(siblings[index].node.clone())
     }
 }
 
@@ -215,6 +219,44 @@ mod tests {
         assert_eq!(
             outline.resolve_headline_path("A//B"),
             Err(HeadlinePathError::EmptyComponent("A//B".into()))
+        );
+    }
+
+    #[test]
+    fn backslash_escapes_a_literal_slash_or_backslash_in_a_component() {
+        let mut outline = Outline::default();
+        outline
+            .add_headline_paths(&[r"Imports/PRs/fix a\/b bug".into()])
+            .unwrap();
+        let prs = outline.resolve_headline_path("Imports/PRs").unwrap();
+        assert_eq!(outline.roots[0].children[0].node, prs);
+        let leaf = &outline.nodes[&outline.roots[0].children[0].children[0].node];
+        assert_eq!(leaf.headline, "fix a/b bug");
+        assert_eq!(
+            outline
+                .resolve_headline_path(r"Imports/PRs/fix a\/b bug")
+                .unwrap(),
+            leaf.id
+        );
+
+        outline
+            .add_headline_paths(&[r"Escaped\\slash".into()])
+            .unwrap();
+        assert_eq!(
+            outline.roots[1].node,
+            outline.resolve_headline_path(r"Escaped\\slash").unwrap()
+        );
+        assert_eq!(
+            outline.nodes[&outline.roots[1].node].headline,
+            r"Escaped\slash"
+        );
+
+        // A backslash not followed by "/" or "\\" is kept as a literal
+        // character, not treated as the start of an escape.
+        outline.add_headline_paths(&[r"Plain\path".into()]).unwrap();
+        assert_eq!(
+            outline.nodes[&outline.roots[2].node].headline,
+            r"Plain\path"
         );
     }
 }

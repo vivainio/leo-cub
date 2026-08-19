@@ -96,6 +96,26 @@ written in — the same ordering `json-tree` output has. Give siblings
 headlines that already sort the way you want, or add one `insert`/index
 move afterward, if exact order matters.
 
+`insert-tree` and `merge-tree` also accept `"parent-headline"` instead of
+`"parent"`: a slash-separated headline path, resolved the same way as
+`cub add`'s paths — but unlike `replace-tree`'s `"headline"`, a missing
+path is *created* rather than treated as an error, reusing whatever
+prefix already exists. This saves a `cub add` (or a GNX lookup) before a
+script's first `apply` when the destination section may not exist yet:
+
+```json
+{"op": "insert-tree", "parent-headline": "Imports/PRs", "tree": {"...": {}}}
+```
+
+Give at most one of `"parent"`/`"parent-headline"`; omitting both means
+the outline root.
+
+Headline paths — `"parent-headline"` here, `replace-tree`'s `"headline"`,
+and `cub add`'s arguments — treat `/` as a separator, so a headline that
+contains one itself (a branch-name-style PR title, say) needs escaping:
+write `\/` for a literal slash and `\\` for a literal backslash within one
+path component; any other backslash is kept as-is.
+
 To regenerate a section wholesale rather than append to it, `replace-tree`
 removes an existing node's defining occurrence and its whole subtree, then
 inserts a fresh `insert-tree`-shaped `tree` at that same parent/index. Point

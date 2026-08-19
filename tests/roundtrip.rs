@@ -86,6 +86,7 @@ fn insert_tree_generates_gnxs_with_the_batch_prefix_and_keeps_explicit_ones() {
             gnx_prefix: "acme".into(),
             operations: vec![Operation::InsertTree {
                 parent: None,
+                parent_headline: None,
                 index: None,
                 tree,
             }],
@@ -118,6 +119,7 @@ fn insert_tree_defaults_to_the_cub_gnx_prefix() {
         .apply(&OperationBatch {
             operations: vec![Operation::InsertTree {
                 parent: None,
+                parent_headline: None,
                 index: None,
                 tree,
             }],
@@ -131,6 +133,89 @@ fn insert_tree_defaults_to_the_cub_gnx_prefix() {
         .find(|p| outline.nodes[&p.node].headline == "Note")
         .unwrap();
     assert!(outline.nodes[&note_position.node].id.0.starts_with("cub."));
+}
+
+#[test]
+fn insert_tree_creates_a_missing_parent_headline_path_and_reuses_it_next_time() {
+    let mut outline = LeoDocument::parse(SAMPLE).unwrap().outline;
+    let tree: BTreeMap<String, TreeNode> = serde_json::from_value(json!({
+        "First": { "_body": "one" }
+    }))
+    .unwrap();
+    outline
+        .apply(&OperationBatch {
+            operations: vec![Operation::InsertTree {
+                parent: None,
+                parent_headline: Some("Imports/PRs".into()),
+                index: None,
+                tree,
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+
+    let imports = outline
+        .roots
+        .iter()
+        .find(|p| outline.nodes[&p.node].headline == "Imports")
+        .unwrap();
+    assert_eq!(imports.children.len(), 1);
+    let prs = &imports.children[0];
+    assert_eq!(outline.nodes[&prs.node].headline, "PRs");
+    assert_eq!(prs.children.len(), 1);
+    assert_eq!(outline.nodes[&prs.children[0].node].headline, "First");
+
+    let tree: BTreeMap<String, TreeNode> = serde_json::from_value(json!({
+        "Second": { "_body": "two" }
+    }))
+    .unwrap();
+    outline
+        .apply(&OperationBatch {
+            operations: vec![Operation::InsertTree {
+                parent: None,
+                parent_headline: Some("Imports/PRs".into()),
+                index: None,
+                tree,
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+
+    // Reuses the same "Imports/PRs" nodes rather than creating duplicates.
+    assert_eq!(
+        outline
+            .roots
+            .iter()
+            .filter(|p| outline.nodes[&p.node].headline == "Imports")
+            .count(),
+        1
+    );
+    let imports = outline
+        .roots
+        .iter()
+        .find(|p| outline.nodes[&p.node].headline == "Imports")
+        .unwrap();
+    assert_eq!(imports.children.len(), 1);
+    assert_eq!(imports.children[0].children.len(), 2);
+}
+
+#[test]
+fn insert_tree_rejects_both_parent_and_parent_headline() {
+    let mut outline = LeoDocument::parse(SAMPLE).unwrap().outline;
+    let tree: BTreeMap<String, TreeNode> = serde_json::from_value(json!({
+        "Note": { "_body": "" }
+    }))
+    .unwrap();
+    let batch = OperationBatch {
+        operations: vec![Operation::InsertTree {
+            parent: Some(NodeId::from("a")),
+            parent_headline: Some("Root".into()),
+            index: None,
+            tree,
+        }],
+        ..Default::default()
+    };
+    assert!(outline.apply(&batch).is_err());
 }
 
 #[test]
@@ -218,7 +303,11 @@ fn merge_tree_updates_matching_body_and_adds_missing_children_without_deleting()
 
     outline
         .apply(&OperationBatch {
-            operations: vec![Operation::MergeTree { parent: None, tree }],
+            operations: vec![Operation::MergeTree {
+                parent: None,
+                parent_headline: None,
+                tree,
+            }],
             ..Default::default()
         })
         .unwrap();
@@ -250,12 +339,44 @@ fn merge_tree_leaves_body_unchanged_when_not_given() {
 
     outline
         .apply(&OperationBatch {
-            operations: vec![Operation::MergeTree { parent: None, tree }],
+            operations: vec![Operation::MergeTree {
+                parent: None,
+                parent_headline: None,
+                tree,
+            }],
             ..Default::default()
         })
         .unwrap();
 
     assert_eq!(outline.nodes[&NodeId::from("a")].body, "body & text");
+}
+
+#[test]
+fn merge_tree_creates_a_missing_parent_headline_path() {
+    let mut outline = LeoDocument::parse(SAMPLE).unwrap().outline;
+    let tree: BTreeMap<String, TreeNode> = serde_json::from_value(json!({
+        "Note": { "_body": "" }
+    }))
+    .unwrap();
+
+    outline
+        .apply(&OperationBatch {
+            operations: vec![Operation::MergeTree {
+                parent: None,
+                parent_headline: Some("Imports".into()),
+                tree,
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+
+    let imports = outline
+        .roots
+        .iter()
+        .find(|p| outline.nodes[&p.node].headline == "Imports")
+        .unwrap();
+    assert_eq!(imports.children.len(), 1);
+    assert_eq!(outline.nodes[&imports.children[0].node].headline, "Note");
 }
 
 #[test]
@@ -283,7 +404,11 @@ fn merge_tree_rejects_an_ambiguous_headline() {
     }))
     .unwrap();
     let batch = OperationBatch {
-        operations: vec![Operation::MergeTree { parent: None, tree }],
+        operations: vec![Operation::MergeTree {
+            parent: None,
+            parent_headline: None,
+            tree,
+        }],
         ..Default::default()
     };
     assert!(outline.apply(&batch).is_err());

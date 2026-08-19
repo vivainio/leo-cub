@@ -40,9 +40,13 @@ pub enum Operation {
     },
     /// Insert a whole subtree (or several sibling subtrees) in one operation.
     /// Any node whose `_gnx` is omitted gets a fresh id from the batch's
-    /// `gnx-prefix`.
+    /// `gnx-prefix`. "parent" may be given instead as "parent-headline", a
+    /// slash-separated headline path that is created (reusing any existing
+    /// prefix) if it doesn't already exist.
     InsertTree {
         parent: Option<NodeId>,
+        #[serde(rename = "parent-headline", default)]
+        parent_headline: Option<String>,
         index: Option<usize>,
         tree: BTreeMap<String, TreeNode>,
     },
@@ -79,8 +83,12 @@ pub enum Operation {
     /// A headline already present is updated in place (its `_body`, if
     /// given, and its children merged recursively); a headline not present
     /// is inserted fresh, the same as `insert-tree`. Never removes a node.
+    /// "parent" may be given instead as "parent-headline", the same as
+    /// `insert-tree`.
     MergeTree {
         parent: Option<NodeId>,
+        #[serde(rename = "parent-headline", default)]
+        parent_headline: Option<String>,
         tree: BTreeMap<String, TreeNode>,
     },
 }
@@ -178,9 +186,11 @@ impl Outline {
             }
             Operation::InsertTree {
                 parent,
+                parent_headline,
                 index,
                 tree,
             } => {
+                let parent = resolve_parent(self, parent, parent_headline, ids)?;
                 let children = children_for_parent(self, parent.as_ref())
                     .ok_or_else(|| ApplyError::NodeNotFound(parent.as_ref().unwrap().0.clone()))?;
                 let at = index.unwrap_or(children.len());
@@ -290,11 +300,39 @@ impl Outline {
                 let children = children_for_parent(self, parent.as_ref()).unwrap();
                 children.splice(index..index, inserted);
             }
-            Operation::MergeTree { parent, tree } => {
+            Operation::MergeTree {
+                parent,
+                parent_headline,
+                tree,
+            } => {
+                let parent = resolve_parent(self, parent, parent_headline, ids)?;
                 merge_tree(self, parent.as_ref(), tree, ids)?;
             }
         }
         Ok(())
+    }
+}
+
+/// Resolve an operation's "parent"/"parent-headline" pair to a parent GNX
+/// (`None` for the outline root). At most one of the two may be given;
+/// "parent-headline" creates any missing segments of the path, reusing an
+/// existing prefix, the same way `cub add` does.
+fn resolve_parent(
+    outline: &mut Outline,
+    parent: &Option<NodeId>,
+    parent_headline: &Option<String>,
+    ids: &mut IdGenerator,
+) -> Result<Option<NodeId>, ApplyError> {
+    match (parent, parent_headline) {
+        (Some(_), Some(_)) => Err(ApplyError::Invalid(
+            "at most one of \"parent\" or \"parent-headline\" may be given".to_owned(),
+        )),
+        (Some(parent), None) => Ok(Some(parent.clone())),
+        (None, Some(headline)) => outline
+            .ensure_headline_path(headline, ids)
+            .map(Some)
+            .map_err(|error| ApplyError::Invalid(error.to_string())),
+        (None, None) => Ok(None),
     }
 }
 

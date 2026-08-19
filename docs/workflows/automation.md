@@ -67,6 +67,35 @@ scripted nodes easy to spot later. `_body` defaults to `""`. Since the tree
 is a JSON object, siblings come out sorted by headline rather than in
 writing order.
 
+## Targeting a parent by headline that might not exist yet
+
+A recurring import script — pulling in GitHub PRs or issues, say — usually
+knows a stable destination like `"Imports/PRs"` but not its GNX, and the
+destination may not exist on the first run. `insert-tree` and `merge-tree`
+accept `"parent-headline"` in place of `"parent"` for exactly this: it
+resolves the path the same way `cub add` does, reusing any prefix that
+already exists, and creates whatever segments are missing instead of
+failing:
+
+```json
+{
+  "operations": [
+    {
+      "op": "insert-tree",
+      "parent-headline": "Imports/PRs",
+      "tree": {
+        "PR #142: Fix flaky retry": { "_body": "https://github.com/.../142" }
+      }
+    }
+  ]
+}
+```
+
+Running that batch again with a different PR under the same
+`"parent-headline"` reuses the existing `Imports/PRs` nodes rather than
+creating duplicates. Give at most one of `"parent"`/`"parent-headline"`;
+omitting both targets the outline root.
+
 ## Regenerating a section by its headline
 
 A script that regenerates content — a changelog, a generated report section —
