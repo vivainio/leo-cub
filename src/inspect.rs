@@ -36,9 +36,7 @@ pub enum InspectError {
         "{parent} has more than one child headlined {headline:?}; json-tree requires unique sibling headlines"
     )]
     DuplicateHeadline { parent: String, headline: String },
-    #[error(
-        "node {gnx} is headlined {headline:?}, which collides with a json-tree reserved key"
-    )]
+    #[error("node {gnx} is headlined {headline:?}, which collides with a json-tree reserved key")]
     ReservedHeadline { gnx: String, headline: String },
 }
 
