@@ -327,10 +327,17 @@ fn find_static_blocks(
             let end_pos = child.end_position();
             let end = (end_pos.row + usize::from(end_pos.column > 0)).min(line_count);
             let container = child.child_by_field_name("body").unwrap_or(child);
-            // The body's opening delimiter belongs to the declaration node,
-            // including languages such as C# that put `{` on its own line.
-            let body_start = (container.start_position().row + 1).min(end);
             let children = find_static_blocks(container, line_count, config, structural);
+            // The body's opening delimiter belongs to the declaration node,
+            // including languages such as C# that put `{` on its own line. But
+            // when a nested block shares that same line (e.g. a single-line
+            // `class C { m() {} }`), skipping to the next line would run past
+            // the nested block's own content, leaving it with an empty body;
+            // anchor to the first nested block's actual line instead.
+            let body_start = children.first().map_or(
+                (container.start_position().row + 1).min(end),
+                |first| first.syntax_start,
+            );
             let prefix = config
                 .prefixes
                 .iter()
@@ -1163,6 +1170,36 @@ mod tests {
                 .collect::<Vec<_>>();
             assert_eq!(headlines, expected, "{path}");
         }
+    }
+
+    #[test]
+    fn nested_single_line_static_blocks_keep_their_body() {
+        // A nested block sharing its declaration's line (e.g. a one-line
+        // `class C { m() {} }`) used to compute its owned line range as
+        // starting *after* that line, past its own content, leaving its
+        // body completely empty even though the source clearly has one.
+        // Line-based slicing can't perfectly split two constructs that
+        // share one physical line, but it must not drop the nested one.
+        let auto = AutoFile::parse(
+            Path::new("x.js"),
+            NodeId::from("root"),
+            "class C { m() { return 1; } }\n",
+        )
+        .unwrap();
+        let bodies: Vec<_> = rows(&auto)
+            .into_iter()
+            .skip(1)
+            .map(|(_, headline, body)| (headline, body))
+            .collect();
+        let method = bodies
+            .iter()
+            .find(|(headline, _)| headline == "method m")
+            .expect("method m should still be present");
+        assert!(
+            !method.1.is_empty(),
+            "nested single-line block body should not be empty"
+        );
+        assert!(method.1.contains("return 1"));
     }
 
     #[test]
