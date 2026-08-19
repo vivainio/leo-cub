@@ -3453,11 +3453,11 @@ fn copy_location_to_clipboard(app: &mut App) {
         .or_else(|| app.source_nodes.get(&row.node).cloned())
     {
         Some(location) => format!(
-            "{}:{}: {headline}",
+            "{}:{}: [{headline}]",
             display_path(&location.path),
             location.line
         ),
-        None => format!("{}: {headline}", display_path(&app.path)),
+        None => format!("{}: [{headline}]", display_path(&app.path)),
     };
     match execute!(
         io::stdout(),
@@ -5443,7 +5443,7 @@ fn main() {}</t><t tx="b">just notes</t></tnodes></leo_file>"#,
 
         assert_eq!(
             app.status,
-            "copied to clipboard: /workspace/src/example.py:42: B"
+            "copied to clipboard: /workspace/src/example.py:42: [B]"
         );
     }
 
@@ -5454,7 +5454,7 @@ fn main() {}</t><t tx="b">just notes</t></tnodes></leo_file>"#,
 
         copy_location_to_clipboard(&mut app);
 
-        assert_eq!(app.status, "copied to clipboard: /workspace/test.leo: A");
+        assert_eq!(app.status, "copied to clipboard: /workspace/test.leo: [A]");
     }
 
     #[test]
