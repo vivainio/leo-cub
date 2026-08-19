@@ -215,7 +215,11 @@ impl SyntaxHighlighter {
                     .and_then(|extension| {
                         // The bundled XML grammar's file_extensions list has
                         // "xslt" but not "xsl".
-                        let extension = if extension == "xsl" { "xslt" } else { extension };
+                        let extension = if extension == "xsl" {
+                            "xslt"
+                        } else {
+                            extension
+                        };
                         self.syntaxes.find_syntax_by_extension(extension)
                     })
             })
