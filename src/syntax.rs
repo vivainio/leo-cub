@@ -212,7 +212,12 @@ impl SyntaxHighlighter {
                 source_path
                     .and_then(Path::extension)
                     .and_then(|extension| extension.to_str())
-                    .and_then(|extension| self.syntaxes.find_syntax_by_extension(extension))
+                    .and_then(|extension| {
+                        // The bundled XML grammar's file_extensions list has
+                        // "xslt" but not "xsl".
+                        let extension = if extension == "xsl" { "xslt" } else { extension };
+                        self.syntaxes.find_syntax_by_extension(extension)
+                    })
             })
             .unwrap_or_else(|| self.syntaxes.find_syntax_plain_text())
     }
@@ -400,9 +405,19 @@ mod tests {
             ("x.js", "javascript"),
             ("x.ts", "typescript"),
             ("x.tsx", "typescript"),
+            ("x.xslt", "xslt"),
         ] {
             let syntax = highlighter.syntax_for("", Some(Path::new(path)), Some(language));
             assert_ne!(syntax.name, "Plain Text", "{path} / {language}");
+        }
+    }
+
+    #[test]
+    fn xsl_and_xslt_extensions_resolve_to_xml_without_a_language_directive() {
+        let highlighter = SyntaxHighlighter::new();
+        for path in ["x.xsl", "x.xslt"] {
+            let syntax = highlighter.syntax_for("", Some(Path::new(path)), None);
+            assert_eq!(syntax.name, "XML", "{path}");
         }
     }
 
