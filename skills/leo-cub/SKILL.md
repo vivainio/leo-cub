@@ -17,8 +17,10 @@ cub add outline.leo "Project/Tasks/First task" "Project/Notes"
 ```
 
 `add` accepts one or more slash-separated headline paths, reuses shared or
-existing prefixes, and rejects ambiguous duplicate siblings. To import below a
-node, pass either its exact GNX or its unique headline path:
+existing prefixes, and rejects ambiguous duplicate siblings. Write `\/` for a
+literal slash and `\\` for a literal backslash within one headline (a
+branch-name-style PR title, say). To import below a node, pass either its
+exact GNX or its unique headline path:
 
 ```bash
 cub import outline.leo README.md --parent "Project/Notes"
