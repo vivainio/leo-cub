@@ -16,12 +16,12 @@ pub use clean::propagate_clean_changes;
 pub use derived::{DerivedFile, SentinelError};
 pub use import::{ImportError, ImportItem, ImportMode, ImportOptions, ImportReport, import_files};
 pub use inspect::{
-    ExternalFilter, InspectError, InspectSelector, SearchExcerpt, SearchMatch,
-    load_matching_external_files, render_compact, render_outline, render_outline_with_options,
-    render_search_compact, search_outline, select_subtrees,
+    ExternalFilter, InspectError, InspectSelector, JsonTree, JsonTreeNode, SearchExcerpt,
+    SearchMatch, json_tree, load_matching_external_files, render_compact, render_outline,
+    render_outline_with_options, render_search_compact, search_outline, select_subtrees,
 };
 pub use model::{Node, NodeId, Outline, Position, PositionId, ValidationError};
-pub use operation::{ApplyError, ApplyReport, Operation, OperationBatch, Target};
+pub use operation::{ApplyError, ApplyReport, Operation, OperationBatch, Target, TreeNode};
 pub use sync::{SyncError, SyncItem, SyncReport, render_thin, sync_document};
 pub use tree::{AddPathsReport, HeadlinePathError};
 pub use xml::{LeoDocument, LeoXmlError};

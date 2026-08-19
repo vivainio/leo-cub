@@ -1,7 +1,7 @@
 //! Select logical subtrees for machine-readable inspection.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fmt::Write,
     fs,
     path::{Path, PathBuf},
@@ -32,6 +32,12 @@ pub enum InspectError {
     Derived { path: PathBuf, message: String },
     #[error("failed to parse @auto file {path}: {message}")]
     Auto { path: PathBuf, message: String },
+    #[error(
+        "{parent} has more than one child headlined {headline:?}; json-tree requires unique sibling headlines"
+    )]
+    DuplicateHeadline { parent: String, headline: String },
+    #[error("node {gnx} is headlined {headline:?}, which collides with a json-tree reserved key")]
+    ReservedHeadline { gnx: String, headline: String },
 }
 
 pub enum ExternalFilter<'a> {
@@ -634,6 +640,67 @@ fn collect_file(
     }
 }
 
+/// A `json-tree` node: metadata under reserved `_gnx`/`_body` keys, children
+/// addressable by their own headline via `#[serde(flatten)]`.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct JsonTreeNode {
+    #[serde(rename = "_gnx")]
+    pub gnx: String,
+    #[serde(rename = "_body")]
+    pub body: String,
+    #[serde(flatten)]
+    pub children: JsonTree,
+}
+
+/// Root of a `json-tree` view: outline headlines mapped to their subtrees.
+pub type JsonTree = BTreeMap<String, JsonTreeNode>;
+
+/// Reshape `outline` into a tree addressable by headline path instead of by
+/// position index or GNX (handy for `nu`'s `get "Headline" | get "Child"`
+/// chaining). Every `get` step is guaranteed to return one node record, so
+/// sibling headlines must be unique and none may collide with the reserved
+/// `_gnx`/`_body` keys; either violation fails the whole conversion rather
+/// than silently degrading one node to an array or an error sentinel.
+pub fn json_tree(outline: &Outline) -> Result<JsonTree, InspectError> {
+    fn build(
+        outline: &Outline,
+        positions: &[Position],
+        parent: &str,
+    ) -> Result<JsonTree, InspectError> {
+        let mut children = JsonTree::new();
+        for position in positions {
+            let Some(node) = outline.nodes.get(&position.node) else {
+                continue;
+            };
+            let headline = node.headline.clone();
+            if headline == "_gnx" || headline == "_body" {
+                return Err(InspectError::ReservedHeadline {
+                    gnx: position.node.0.clone(),
+                    headline,
+                });
+            }
+            let tree_node = JsonTreeNode {
+                gnx: position.node.0.clone(),
+                body: node.body.clone(),
+                children: build(outline, &position.children, &position.node.0)?,
+            };
+            if children.insert(headline.clone(), tree_node).is_some() {
+                return Err(InspectError::DuplicateHeadline {
+                    parent: if parent.is_empty() {
+                        "the outline root".to_owned()
+                    } else {
+                        format!("node {parent}")
+                    },
+                    headline,
+                });
+            }
+        }
+        Ok(children)
+    }
+
+    build(outline, &outline.roots, "")
+}
+
 fn collect_ids(position: &Position, ids: &mut HashSet<NodeId>) {
     ids.insert(position.node.clone());
     for child in &position.children {
@@ -951,6 +1018,80 @@ mod tests {
             "Target.needle"
         );
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn json_tree_addresses_nodes_by_headline_path() {
+        let tree = json_tree(&outline()).unwrap();
+        let file_node = tree.get("@file main.rs").unwrap();
+        assert_eq!(file_node.gnx, "file");
+        let child_node = file_node.children.get("child").unwrap();
+        assert_eq!(child_node.gnx, "child");
+        assert_eq!(child_node.body, "body");
+        assert!(child_node.children.is_empty());
+    }
+
+    #[test]
+    fn json_tree_serializes_metadata_and_children_at_one_level() {
+        let mut single = Outline {
+            nodes: HashMap::new(),
+            roots: vec![Position {
+                node: NodeId("only".into()),
+                children: vec![],
+            }],
+        };
+        single.nodes.insert(
+            NodeId("only".into()),
+            Node {
+                id: NodeId("only".into()),
+                headline: "Only".into(),
+                body: "text".into(),
+                vnode_attributes: HashMap::new(),
+                tnode_attributes: HashMap::new(),
+            },
+        );
+        let tree = json_tree(&single).unwrap();
+        let value = serde_json::to_value(&tree).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({ "Only": { "_gnx": "only", "_body": "text" } })
+        );
+    }
+
+    #[test]
+    fn json_tree_rejects_duplicate_sibling_headlines() {
+        let mut outline = outline();
+        outline
+            .nodes
+            .get_mut(&NodeId("other".into()))
+            .unwrap()
+            .headline = "paths".into();
+        let error = json_tree(&outline).unwrap_err();
+        assert_eq!(
+            error,
+            InspectError::DuplicateHeadline {
+                parent: "the outline root".to_owned(),
+                headline: "paths".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn json_tree_rejects_headline_colliding_with_reserved_key() {
+        let mut outline = outline();
+        outline
+            .nodes
+            .get_mut(&NodeId("other".into()))
+            .unwrap()
+            .headline = "_gnx".into();
+        let error = json_tree(&outline).unwrap_err();
+        assert_eq!(
+            error,
+            InspectError::ReservedHeadline {
+                gnx: "other".to_owned(),
+                headline: "_gnx".to_owned(),
+            }
+        );
     }
 
     #[test]
