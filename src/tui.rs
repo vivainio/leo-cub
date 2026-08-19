@@ -626,10 +626,8 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
             }
             KeyCode::Char('W') => app.toggle_body_wrap(),
             KeyCode::Char('/') if key.modifiers.is_empty() => start_search(app),
-            KeyCode::Char('a') if key.modifiers.is_empty() => start_palette(app),
-            KeyCode::Char('A') if key.modifiers == KeyModifiers::SHIFT => {
-                start_command_palette(app);
-            }
+            KeyCode::Char('a') if key.modifiers.is_empty() => start_command_palette(app),
+            KeyCode::Char('A') if key.modifiers == KeyModifiers::SHIFT => start_palette(app),
             KeyCode::Char('i') if key.modifiers.is_empty() => insert_headline(app),
             KeyCode::Char('h') if key.modifiers.is_empty() => edit_headline(app),
             #[cfg(feature = "syntax")]
@@ -852,7 +850,7 @@ fn handle_search_input(app: &mut App, key: KeyEvent) {
 }
 
 /// An `@action` node is a runnable node: its body is executed as a script
-/// when chosen from the action palette (`a`). Any node, anywhere in the
+/// when chosen from the action palette (`Shift-A`). Any node, anywhere in the
 /// outline, can be an action; the name shown in the palette is the headline
 /// with the `@action` marker stripped.
 fn is_action_headline(headline: &str) -> bool {
@@ -962,8 +960,8 @@ fn cycle_palette_match(app: &mut App, delta: isize) {
     palette.active = (palette.active as isize + delta).rem_euclid(len) as usize;
 }
 
-/// General-purpose editor commands, run by name from `Shift-A`. Unlike the
-/// `@action` palette (`a`), these aren't outline nodes; they're built-in
+/// General-purpose editor commands, run by name from `a`. Unlike the
+/// `@action` palette (`Shift-A`), these aren't outline nodes; they're built-in
 /// operations such as importing new files, chosen with `available` so the
 /// list only shows commands that make sense for the current selection.
 fn start_command_palette(app: &mut App) {
@@ -2654,7 +2652,7 @@ fn draw_finder_panel(
     frame.render_widget(Paragraph::new(lines), area);
 }
 
-/// Renders the docked action palette (`a`), listing `@action` node names
+/// Renders the docked action palette (`Shift-A`), listing `@action` node names
 /// rather than full headlines. Laid out the same as `draw_finder_panel`.
 fn draw_palette_panel(
     frame: &mut ratatui::Frame<'_>,
@@ -2702,7 +2700,7 @@ fn draw_palette_panel(
     frame.render_widget(Paragraph::new(lines), area);
 }
 
-/// Renders the docked command palette (`Shift-A`), listing built-in editor
+/// Renders the docked command palette (`a`), listing built-in editor
 /// commands (see `COMMANDS`). Laid out the same as `draw_palette_panel`.
 fn draw_command_palette_panel(frame: &mut ratatui::Frame<'_>, area: Rect, state: &CommandPalette) {
     let shown = state
@@ -2823,17 +2821,17 @@ fn headline_spans(headline: &str) -> Vec<Span<'_>> {
 fn controls(body_full_width: bool, outline_full_width: bool) -> &'static str {
     if body_full_width {
         #[cfg(feature = "syntax")]
-        return "? help  arrows scroll  W wrap  c/x/v/V tree  f split  F outline  s split dir  o open/edit  Ctrl-P find  / search  a actions  Shift-A commands  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  y syntax  q quit";
+        return "? help  arrows scroll  W wrap  c/x/v/V tree  f split  F outline  s split dir  o open/edit  Ctrl-P find  / search  a commands  Shift-A actions  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  y syntax  q quit";
         #[cfg(not(feature = "syntax"))]
-        return "? help  arrows scroll  W wrap  c/x/v/V tree  f split  F outline  s split dir  o open/edit  Ctrl-P find  / search  a actions  Shift-A commands  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  q quit";
+        return "? help  arrows scroll  W wrap  c/x/v/V tree  f split  F outline  s split dir  o open/edit  Ctrl-P find  / search  a commands  Shift-A actions  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  q quit";
     }
     if outline_full_width {
-        return "? help  arrows navigate  W wrap  c/x/v/V tree  F split view  s split dir  o open/edit  Ctrl-P find  / search  a actions  Shift-A commands  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  q quit";
+        return "? help  arrows navigate  W wrap  c/x/v/V tree  F split view  s split dir  o open/edit  Ctrl-P find  / search  a commands  Shift-A actions  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  q quit";
     }
     #[cfg(feature = "syntax")]
-    return "? help  arrows navigate  PgUp/PgDn body  W wrap  c/x/v/V tree  f body  F outline  s split dir  o open/edit  Ctrl-P find  / search  a actions  Shift-A commands  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  y syntax  q quit";
+    return "? help  arrows navigate  PgUp/PgDn body  W wrap  c/x/v/V tree  f body  F outline  s split dir  o open/edit  Ctrl-P find  / search  a commands  Shift-A actions  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  y syntax  q quit";
     #[cfg(not(feature = "syntax"))]
-    "? help  arrows navigate  PgUp/PgDn body  W wrap  c/x/v/V tree  f body  F outline  s split dir  o open/edit  Ctrl-P find  / search  a actions  Shift-A commands  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  q quit"
+    "? help  arrows navigate  PgUp/PgDn body  W wrap  c/x/v/V tree  f body  F outline  s split dir  o open/edit  Ctrl-P find  / search  a commands  Shift-A actions  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  q quit"
 }
 
 fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full_width: bool) {
@@ -2862,8 +2860,8 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full
             Line::from("h                Rename the headline"),
             Line::from("Ctrl-↑↓←→        Move selected tree(s)"),
             Line::from("Ctrl-P           Find a headline"),
-            Line::from("a                Run an @action node"),
-            Line::from("Shift-A          Command palette"),
+            Line::from("a                Command palette"),
+            Line::from("Shift-A          Run an @action node"),
             Line::from("/                Search headlines and body text"),
             Line::from("Ctrl-R           Reload from disk"),
             Line::from("Ctrl-S           Save"),
@@ -2883,8 +2881,8 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full
             Line::from("c/x/v/V          Copy/cut/paste/clone"),
             Line::from("Shift-C          Copy path:line to clipboard"),
             Line::from("Ctrl-P           Find a headline"),
-            Line::from("a                Run an @action node"),
-            Line::from("Shift-A          Command palette"),
+            Line::from("a                Command palette"),
+            Line::from("Shift-A          Run an @action node"),
             Line::from("/                Search headlines and body text"),
             Line::from("i                Insert a sibling"),
             Line::from("h                Rename the headline"),
@@ -2906,8 +2904,8 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full
             Line::from("PageUp/PageDown  Scroll the body pane"),
             Line::from("Shift-W          Toggle body word wrap"),
             Line::from("Ctrl-P           Find a headline"),
-            Line::from("a                Run an @action node"),
-            Line::from("Shift-A          Command palette"),
+            Line::from("a                Command palette"),
+            Line::from("Shift-A          Run an @action node"),
             Line::from("/                Search headlines and body text"),
             Line::from("i                Insert a sibling"),
             Line::from("h                Rename the headline"),
