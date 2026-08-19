@@ -2,12 +2,16 @@ use anyhow::{Context, Result, bail};
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use leo::{
     DerivedFile, ExternalFilter, ImportMode, ImportOptions, InspectSelector, LeoDocument, NodeId,
-    OperationBatch, PositionId, import_files, load_matching_external_files, render_compact,
-    render_outline_with_options, render_search_compact, search_outline, select_subtrees,
-    sync_document,
+    OperationBatch, PositionId, import_files, json_tree, load_matching_external_files,
+    render_compact, render_outline_with_options, render_search_compact, search_outline,
+    select_subtrees, sync_document,
 };
 use regex::Regex;
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    io::Read,
+    path::{Path, PathBuf},
+};
 
 mod install;
 #[cfg(all(feature = "tui", feature = "syntax"))]
@@ -34,6 +38,11 @@ enum InspectFormat {
     #[default]
     Compact,
     Json,
+    /// Nested JSON addressable by headline path (`get "A" | get "B"` in
+    /// nu), instead of by GNX or position index. Fails if any two siblings
+    /// share a headline or a headline collides with a reserved _gnx/_body
+    /// key, rather than silently degrading.
+    JsonTree,
 }
 
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
@@ -176,12 +185,13 @@ enum Command {
   cloned parent affects all its occurrences. "index" and "expected" are
   optional. "position" is an index path such as "0/2/1" and identifies one
   clone occurrence. The complete batch is committed only if every operation
-  succeeds.
+  succeeds. Pass "-" for OPERATIONS to read the batch from stdin.
 
 EXAMPLE:
   {"operations":[{"op":"set-body","node":"ekr.1","expected":"old","body":"new"}]}"#)]
     Apply {
         file: PathBuf,
+        /// Path to the operations JSON file, or "-" to read it from stdin.
         operations: PathBuf,
         #[arg(long)]
         dry_run: bool,
@@ -320,12 +330,19 @@ fn main() -> Result<()> {
                     InspectFormat::Json => {
                         println!("{}", serde_json::to_string_pretty(&matches)?)
                     }
+                    InspectFormat::JsonTree => {
+                        bail!("--format json-tree does not support --search")
+                    }
                 }
             } else {
                 match format {
                     InspectFormat::Compact => print!("{}", render_compact(&selected)),
                     InspectFormat::Json => {
                         println!("{}", serde_json::to_string_pretty(&selected)?)
+                    }
+                    InspectFormat::JsonTree => {
+                        let tree = json_tree(&selected)?;
+                        println!("{}", serde_json::to_string_pretty(&tree)?);
                     }
                 }
             }
@@ -422,9 +439,16 @@ fn main() -> Result<()> {
             dry_run,
         } => {
             let mut doc = LeoDocument::open(&file)?;
-            let batch: OperationBatch = serde_json::from_str(
-                &fs::read_to_string(operations).context("read operations file")?,
-            )?;
+            let source = if operations == Path::new("-") {
+                let mut buffer = String::new();
+                std::io::stdin()
+                    .read_to_string(&mut buffer)
+                    .context("read operations from stdin")?;
+                buffer
+            } else {
+                fs::read_to_string(&operations).context("read operations file")?
+            };
+            let batch: OperationBatch = serde_json::from_str(&source)?;
             let report = doc.outline.apply(&batch)?;
             if !dry_run {
                 doc.save(file)?;
@@ -500,6 +524,16 @@ mod tests {
         assert!(cli.command.is_none());
         assert_eq!(cli.file, Some(PathBuf::from("notes.leo")));
         assert!(!cli.no_derived);
+    }
+
+    #[test]
+    fn apply_accepts_a_dash_as_the_operations_path() {
+        let cli = Cli::try_parse_from(["cub", "apply", "notes.leo", "-"]).unwrap();
+
+        assert!(matches!(
+            cli.command,
+            Some(Command::Apply { operations, .. }) if operations == Path::new("-")
+        ));
     }
 
     #[test]
