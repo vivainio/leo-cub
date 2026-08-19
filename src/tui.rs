@@ -78,6 +78,7 @@ struct App {
     find: Option<FindInput>,
     search: Option<FindInput>,
     palette: Option<ActionPalette>,
+    command_palette: Option<CommandPalette>,
     action_output: Option<ActionOutput>,
     dirty: bool,
     dirty_nodes: HashSet<NodeId>,
@@ -149,6 +150,7 @@ impl App {
             find: None,
             search: None,
             palette: None,
+            command_palette: None,
             action_output: None,
             dirty: false,
             dirty_nodes: HashSet::new(),
@@ -393,6 +395,24 @@ struct ActionPalette {
     active: usize,
 }
 
+struct CommandPalette {
+    query: String,
+    matches: Vec<usize>,
+    active: usize,
+}
+
+struct CommandSpec {
+    name: &'static str,
+    available: fn(&App) -> bool,
+    run: fn(&mut App),
+}
+
+const COMMANDS: &[CommandSpec] = &[CommandSpec {
+    name: "Import new files into @path",
+    available: command_import_available,
+    run: command_import_run,
+}];
+
 struct ActionOutput {
     node: NodeId,
     name: String,
@@ -497,6 +517,7 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
                 && app.find.is_none()
                 && app.search.is_none()
                 && app.palette.is_none()
+                && app.command_palette.is_none()
                 && !app.help
             {
                 handle_mouse(app, terminal.size()?.into(), mouse);
@@ -521,6 +542,10 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
         }
         if app.palette.is_some() {
             handle_palette_input(app, key);
+            continue;
+        }
+        if app.command_palette.is_some() {
+            handle_command_palette_input(app, key);
             continue;
         }
         if app.help {
@@ -602,6 +627,9 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
             KeyCode::Char('W') => app.toggle_body_wrap(),
             KeyCode::Char('/') if key.modifiers.is_empty() => start_search(app),
             KeyCode::Char('a') if key.modifiers.is_empty() => start_palette(app),
+            KeyCode::Char('A') if key.modifiers == KeyModifiers::SHIFT => {
+                start_command_palette(app);
+            }
             KeyCode::Char('i') if key.modifiers.is_empty() => insert_headline(app),
             KeyCode::Char('h') if key.modifiers.is_empty() => edit_headline(app),
             #[cfg(feature = "syntax")]
@@ -932,6 +960,220 @@ fn cycle_palette_match(app: &mut App, delta: isize) {
     }
     let len = palette.matches.len() as isize;
     palette.active = (palette.active as isize + delta).rem_euclid(len) as usize;
+}
+
+/// General-purpose editor commands, run by name from `Shift-A`. Unlike the
+/// `@action` palette (`a`), these aren't outline nodes; they're built-in
+/// operations such as importing new files, chosen with `available` so the
+/// list only shows commands that make sense for the current selection.
+fn start_command_palette(app: &mut App) {
+    app.command_palette = Some(CommandPalette {
+        query: String::new(),
+        matches: available_commands(app),
+        active: 0,
+    });
+    app.status = "run command: type to filter, Enter runs, Esc cancels".into();
+}
+
+fn available_commands(app: &App) -> Vec<usize> {
+    COMMANDS
+        .iter()
+        .enumerate()
+        .filter(|(_, command)| (command.available)(app))
+        .map(|(index, _)| index)
+        .collect()
+}
+
+fn handle_command_palette_input(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Enter => {
+            let index = app
+                .command_palette
+                .as_ref()
+                .and_then(|palette| palette.matches.get(palette.active).copied());
+            app.command_palette = None;
+            if let Some(index) = index {
+                (COMMANDS[index].run)(app);
+            } else {
+                app.status = "no matching command".into();
+            }
+        }
+        KeyCode::Esc => {
+            app.command_palette = None;
+            app.status = "command palette cancelled".into();
+        }
+        KeyCode::Backspace => {
+            app.command_palette
+                .as_mut()
+                .expect("command palette input exists")
+                .query
+                .pop();
+            update_command_palette_matches(app);
+        }
+        KeyCode::Down => cycle_command_palette_match(app, 1),
+        KeyCode::Up => cycle_command_palette_match(app, -1),
+        KeyCode::Char(character)
+            if !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
+            app.command_palette
+                .as_mut()
+                .expect("command palette input exists")
+                .query
+                .push(character);
+            update_command_palette_matches(app);
+        }
+        _ => {}
+    }
+}
+
+fn update_command_palette_matches(app: &mut App) {
+    let query = app
+        .command_palette
+        .as_ref()
+        .expect("command palette input exists")
+        .query
+        .to_lowercase();
+    let matches: Vec<usize> = available_commands(app)
+        .into_iter()
+        .filter(|&index| COMMANDS[index].name.to_lowercase().contains(&query))
+        .collect();
+    let palette = app
+        .command_palette
+        .as_mut()
+        .expect("command palette input exists");
+    palette.active = palette.active.min(matches.len().saturating_sub(1));
+    palette.matches = matches;
+}
+
+fn cycle_command_palette_match(app: &mut App, delta: isize) {
+    let palette = app
+        .command_palette
+        .as_mut()
+        .expect("command palette input exists");
+    if palette.matches.is_empty() {
+        return;
+    }
+    let len = palette.matches.len() as isize;
+    palette.active = (palette.active as isize + delta).rem_euclid(len) as usize;
+}
+
+fn command_import_available(app: &App) -> bool {
+    app.selected_row().is_some_and(|row| {
+        path_directive(&app.document.outline.nodes[&row.node].headline).is_some()
+    })
+}
+
+/// Scans the selected `@path` node's directory for files that don't already
+/// have a matching `@auto`/`@file`/... child, and adds one `@auto <name>`
+/// node per new file. Only the directory's direct files are considered;
+/// subdirectories are left for a later import once they have their own
+/// `@path` node. Content isn't fetched here — save and reload (Ctrl-S,
+/// Ctrl-R) load it the same way any other `@auto` node does.
+fn command_import_run(app: &mut App) {
+    let Some(row) = app.selected_row() else {
+        app.status = "select a @path node to import into".into();
+        return;
+    };
+    if path_directive(&app.document.outline.nodes[&row.node].headline).is_none() {
+        app.status = "select a @path node to import into".into();
+        return;
+    }
+    if !app.editable(&row) {
+        return;
+    }
+    let Some(position) = app.document.outline.position(&row.position) else {
+        return;
+    };
+    let existing: HashSet<String> = position
+        .children
+        .iter()
+        .filter_map(|child| {
+            derived_filename(&app.document.outline.nodes[&child.node].headline)
+                .map(|(_, _, filename)| filename.to_owned())
+        })
+        .collect();
+
+    let directory = resolved_directory(app, &row);
+    let entries = match fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(error) => {
+            app.status = format!("import failed to read {}: {error}", directory.display());
+            return;
+        }
+    };
+    let mut new_files: Vec<String> = entries
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| !existing.contains(name))
+        .collect();
+    new_files.sort();
+
+    if new_files.is_empty() {
+        app.status = format!("no new files to import from {}", directory.display());
+        return;
+    }
+
+    let count = new_files.len();
+    for filename in new_files {
+        let mut id = fresh_node_id();
+        while app.document.outline.nodes.contains_key(&id) {
+            id = fresh_node_id();
+        }
+        app.document.outline.nodes.insert(
+            id.clone(),
+            leo::Node {
+                id: id.clone(),
+                headline: format!("@auto {filename}"),
+                body: String::new(),
+                vnode_attributes: HashMap::new(),
+                tnode_attributes: HashMap::new(),
+            },
+        );
+        let Some(children) = children_mut(&mut app.document.outline, Some(&row.position)) else {
+            continue;
+        };
+        children.push(Position {
+            node: id,
+            children: Vec::new(),
+        });
+    }
+
+    app.dirty = true;
+    app.quit_armed = false;
+    app.status = format!(
+        "imported {count} new file(s) as @auto nodes (Ctrl-S to save, Ctrl-R to load content)"
+    );
+}
+
+/// Resolves a node's on-disk directory the same way derived `@auto`/`@file`
+/// bodies are located: the outline's own directory plus every ancestor
+/// (and the node's own) `@path` directive, in order.
+fn resolved_directory(app: &App, row: &Row) -> PathBuf {
+    let mut path = app
+        .path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    let mut prefix = String::new();
+    for component in row.position.0.split('/') {
+        if !prefix.is_empty() {
+            prefix.push('/');
+        }
+        prefix.push_str(component);
+        let Some(position) = app.document.outline.position(&PositionId(prefix.clone())) else {
+            break;
+        };
+        let node = &app.document.outline.nodes[&position.node];
+        if let Some(directory) =
+            path_directive(&node.headline).or_else(|| path_directive(&node.body))
+        {
+            path.push(directory);
+        }
+    }
+    path
 }
 
 /// Maps an `@language` directive (see `syntax::language_directive`) to the
@@ -2121,6 +2363,9 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
     } else if let Some(palette) = app.palette.as_ref() {
         let max_visible = frame.area().height.saturating_sub(6).max(1);
         palette.matches.len().min(usize::from(max_visible)) as u16 + 1
+    } else if let Some(palette) = app.command_palette.as_ref() {
+        let max_visible = frame.area().height.saturating_sub(6).max(1);
+        palette.matches.len().min(usize::from(max_visible)) as u16 + 1
     } else {
         1
     };
@@ -2332,6 +2577,8 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
         );
     } else if let Some(palette) = &app.palette {
         draw_palette_panel(frame, areas[1], palette, &app.document.outline);
+    } else if let Some(palette) = &app.command_palette {
+        draw_command_palette_panel(frame, areas[1], palette);
     } else {
         let mut status = vec![Span::styled("[", Style::default().fg(Color::DarkGray))];
         status.push(Span::styled(
@@ -2455,6 +2702,41 @@ fn draw_palette_panel(
     frame.render_widget(Paragraph::new(lines), area);
 }
 
+/// Renders the docked command palette (`Shift-A`), listing built-in editor
+/// commands (see `COMMANDS`). Laid out the same as `draw_palette_panel`.
+fn draw_command_palette_panel(frame: &mut ratatui::Frame<'_>, area: Rect, state: &CommandPalette) {
+    let shown = state
+        .matches
+        .len()
+        .min(usize::from(area.height.saturating_sub(1)));
+    let first = state.active.saturating_sub(shown.saturating_sub(1));
+    let mut lines: Vec<Line> = state
+        .matches
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(shown)
+        .map(|(index, &command_index)| {
+            let marker = if index == state.active { "› " } else { "  " };
+            Line::from(format!("{marker}{}", COMMANDS[command_index].name))
+        })
+        .collect();
+    let count = if state.matches.is_empty() {
+        "no matching commands".to_owned()
+    } else {
+        format!("{} of {}", state.active + 1, state.matches.len())
+    };
+    lines.push(Line::from(vec![
+        Span::styled("Run command: ", Style::default().fg(Color::DarkGray)),
+        Span::raw(format!("{}▏", state.query)),
+        Span::styled(
+            format!("   {count}   ↑↓ cycle · Enter run · Esc cancel"),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]));
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
 fn dirty_marker(dirty: bool) -> Span<'static> {
     if dirty {
         Span::styled("* ", Style::default().fg(Color::LightRed))
@@ -2541,17 +2823,17 @@ fn headline_spans(headline: &str) -> Vec<Span<'_>> {
 fn controls(body_full_width: bool, outline_full_width: bool) -> &'static str {
     if body_full_width {
         #[cfg(feature = "syntax")]
-        return "? help  arrows scroll  W wrap  c/x/v/V tree  f split  F outline  s split dir  o open/edit  Ctrl-P find  / search  a actions  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  y syntax  q quit";
+        return "? help  arrows scroll  W wrap  c/x/v/V tree  f split  F outline  s split dir  o open/edit  Ctrl-P find  / search  a actions  Shift-A commands  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  y syntax  q quit";
         #[cfg(not(feature = "syntax"))]
-        return "? help  arrows scroll  W wrap  c/x/v/V tree  f split  F outline  s split dir  o open/edit  Ctrl-P find  / search  a actions  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  q quit";
+        return "? help  arrows scroll  W wrap  c/x/v/V tree  f split  F outline  s split dir  o open/edit  Ctrl-P find  / search  a actions  Shift-A commands  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  q quit";
     }
     if outline_full_width {
-        return "? help  arrows navigate  W wrap  c/x/v/V tree  F split view  s split dir  o open/edit  Ctrl-P find  / search  a actions  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  q quit";
+        return "? help  arrows navigate  W wrap  c/x/v/V tree  F split view  s split dir  o open/edit  Ctrl-P find  / search  a actions  Shift-A commands  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  q quit";
     }
     #[cfg(feature = "syntax")]
-    return "? help  arrows navigate  PgUp/PgDn body  W wrap  c/x/v/V tree  f body  F outline  s split dir  o open/edit  Ctrl-P find  / search  a actions  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  y syntax  q quit";
+    return "? help  arrows navigate  PgUp/PgDn body  W wrap  c/x/v/V tree  f body  F outline  s split dir  o open/edit  Ctrl-P find  / search  a actions  Shift-A commands  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  y syntax  q quit";
     #[cfg(not(feature = "syntax"))]
-    "? help  arrows navigate  PgUp/PgDn body  W wrap  c/x/v/V tree  f body  F outline  s split dir  o open/edit  Ctrl-P find  / search  a actions  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  q quit"
+    "? help  arrows navigate  PgUp/PgDn body  W wrap  c/x/v/V tree  f body  F outline  s split dir  o open/edit  Ctrl-P find  / search  a actions  Shift-A commands  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  q quit"
 }
 
 fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full_width: bool) {
@@ -2581,6 +2863,7 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full
             Line::from("Ctrl-↑↓←→        Move selected tree(s)"),
             Line::from("Ctrl-P           Find a headline"),
             Line::from("a                Run an @action node"),
+            Line::from("Shift-A          Command palette"),
             Line::from("/                Search headlines and body text"),
             Line::from("Ctrl-R           Reload from disk"),
             Line::from("Ctrl-S           Save"),
@@ -2601,6 +2884,7 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full
             Line::from("Shift-C          Copy path:line to clipboard"),
             Line::from("Ctrl-P           Find a headline"),
             Line::from("a                Run an @action node"),
+            Line::from("Shift-A          Command palette"),
             Line::from("/                Search headlines and body text"),
             Line::from("i                Insert a sibling"),
             Line::from("h                Rename the headline"),
@@ -2623,6 +2907,7 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full
             Line::from("Shift-W          Toggle body word wrap"),
             Line::from("Ctrl-P           Find a headline"),
             Line::from("a                Run an @action node"),
+            Line::from("Shift-A          Command palette"),
             Line::from("/                Search headlines and body text"),
             Line::from("i                Insert a sibling"),
             Line::from("h                Rename the headline"),
@@ -3511,6 +3796,73 @@ mod tests {
         );
         let palette = app.palette.as_ref().unwrap();
         assert_eq!(palette.matches, vec![PositionId("0".into())]);
+    }
+
+    #[test]
+    fn command_palette_only_offers_import_on_a_path_node() {
+        let mut app = editing_app();
+        app.document
+            .outline
+            .nodes
+            .get_mut(&NodeId::from("a"))
+            .unwrap()
+            .headline = "@path src".into();
+        app.selected = 0;
+        start_command_palette(&mut app);
+        assert_eq!(app.command_palette.as_ref().unwrap().matches.len(), 1);
+
+        let child_index = app
+            .rows()
+            .iter()
+            .position(|row| row.node == NodeId::from("b"))
+            .unwrap();
+        app.selected = child_index;
+        start_command_palette(&mut app);
+        assert!(app.command_palette.as_ref().unwrap().matches.is_empty());
+    }
+
+    #[test]
+    fn command_import_adds_only_new_files_under_the_selected_path_node() {
+        let directory = env::temp_dir().join(format!(
+            "leo-cub-tui-import-{}-{}",
+            std::process::id(),
+            fresh_node_id().0
+        ));
+        fs::create_dir_all(directory.join("src")).unwrap();
+        fs::write(directory.join("src/a.txt"), "old").unwrap();
+        fs::write(directory.join("src/b.txt"), "new").unwrap();
+
+        let mut app = editing_app();
+        app.path = directory.join("outline.leo");
+        app.document
+            .outline
+            .nodes
+            .get_mut(&NodeId::from("a"))
+            .unwrap()
+            .headline = "@path src".into();
+        app.document
+            .outline
+            .nodes
+            .get_mut(&NodeId::from("b"))
+            .unwrap()
+            .headline = "@auto a.txt".into();
+        app.document.outline.roots[0].children.truncate(1);
+        app.document.outline.nodes.remove(&NodeId::from("c"));
+        app.selected = 0;
+
+        command_import_run(&mut app);
+
+        let path_position = &app.document.outline.roots[0];
+        assert_eq!(path_position.children.len(), 2);
+        let added = &app.document.outline.nodes[&path_position.children[1].node];
+        assert_eq!(added.headline, "@auto b.txt");
+        assert!(app.dirty);
+        assert!(app.status.starts_with("imported 1 new file(s)"));
+
+        command_import_run(&mut app);
+        assert!(app.status.starts_with("no new files to import"));
+
+        fs::remove_dir_all(&directory).unwrap();
     }
 
     #[test]
