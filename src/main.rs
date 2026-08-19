@@ -103,6 +103,11 @@ enum Command {
         /// Show only the hierarchy stored directly in the .leo XML.
         #[arg(long)]
         no_derived: bool,
+        /// Replay a JSONL script (see the `Step` docs in tui.rs) against
+        /// the app before handing control back to the keyboard -- for
+        /// reproducing a bug by scripting the steps that lead up to it.
+        #[arg(long, value_name = "FILE")]
+        script: Option<PathBuf>,
     },
     Inspect {
         file: PathBuf,
@@ -259,6 +264,7 @@ fn main() -> Result<()> {
         (None, Some(file)) => Command::Tui {
             file,
             no_derived: cli.no_derived,
+            script: None,
         },
         (None, None) => {
             Cli::command().print_help()?;
@@ -320,7 +326,14 @@ fn main() -> Result<()> {
         }
         Command::InstallSkills => install::install_skills()?,
         #[cfg(feature = "tui")]
-        Command::Tui { file, no_derived } => tui::run(file, !no_derived)?,
+        Command::Tui {
+            file,
+            no_derived,
+            script,
+        } => match script {
+            Some(script) => tui::run_with_script(file, !no_derived, script)?,
+            None => tui::run(file, !no_derived)?,
+        },
         Command::Inspect {
             file,
             external,
