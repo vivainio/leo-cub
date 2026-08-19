@@ -1,7 +1,8 @@
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
-use leo::{LeoDocument, Node, NodeId, Operation, OperationBatch};
-use std::collections::HashMap;
+use leo::{LeoDocument, Node, NodeId, Operation, OperationBatch, TreeNode};
+use serde_json::json;
 
 const SAMPLE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <leo_file><leo_header file_format="2"/><globals custom="keep"/><vnodes>
@@ -27,6 +28,7 @@ fn batch_is_atomic_on_failed_precondition() {
             body: "new".into(),
             expected: Some("wrong".into()),
         }],
+        ..Default::default()
     };
     assert!(outline.apply(&batch).is_err());
     assert_eq!(outline, before);
@@ -49,6 +51,7 @@ fn insert_uses_parent_gnx_and_updates_the_shared_clone_subtree() {
                     tnode_attributes: HashMap::new(),
                 },
             }],
+            ..Default::default()
         })
         .unwrap();
 
@@ -62,6 +65,228 @@ fn insert_uses_parent_gnx_and_updates_the_shared_clone_subtree() {
         NodeId::from("c")
     );
     assert!(reparsed.outline.roots[1].children.is_empty());
+}
+
+#[test]
+fn insert_tree_generates_gnxs_with_the_batch_prefix_and_keeps_explicit_ones() {
+    let mut outline = LeoDocument::parse(SAMPLE).unwrap().outline;
+    let tree: BTreeMap<String, TreeNode> = serde_json::from_value(json!({
+        "Plan": {
+            "_body": "top",
+            "Milestone": {
+                "_gnx": "explicit.1",
+                "_body": "pinned"
+            }
+        }
+    }))
+    .unwrap();
+
+    outline
+        .apply(&OperationBatch {
+            gnx_prefix: "acme".into(),
+            operations: vec![Operation::InsertTree {
+                parent: None,
+                index: None,
+                tree,
+            }],
+        })
+        .unwrap();
+
+    let plan_position = outline
+        .roots
+        .iter()
+        .find(|p| outline.nodes[&p.node].headline == "Plan")
+        .unwrap();
+    let plan = &outline.nodes[&plan_position.node];
+    assert!(plan.id.0.starts_with("acme."));
+    assert_eq!(plan.body, "top");
+
+    let milestone_position = &plan_position.children[0];
+    assert_eq!(milestone_position.node, NodeId::from("explicit.1"));
+    assert_eq!(outline.nodes[&milestone_position.node].body, "pinned");
+}
+
+#[test]
+fn insert_tree_defaults_to_the_cub_gnx_prefix() {
+    let mut outline = LeoDocument::parse(SAMPLE).unwrap().outline;
+    let tree: BTreeMap<String, TreeNode> = serde_json::from_value(json!({
+        "Note": { "_body": "" }
+    }))
+    .unwrap();
+
+    outline
+        .apply(&OperationBatch {
+            operations: vec![Operation::InsertTree {
+                parent: None,
+                index: None,
+                tree,
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+
+    let note_position = outline
+        .roots
+        .iter()
+        .find(|p| outline.nodes[&p.node].headline == "Note")
+        .unwrap();
+    assert!(outline.nodes[&note_position.node].id.0.starts_with("cub."));
+}
+
+#[test]
+fn replace_tree_by_headline_swaps_the_subtree_at_the_same_position() {
+    let mut outline = LeoDocument::parse(SAMPLE).unwrap().outline;
+    let tree: BTreeMap<String, TreeNode> = serde_json::from_value(json!({
+        "New Root": { "_body": "fresh" }
+    }))
+    .unwrap();
+
+    outline
+        .apply(&OperationBatch {
+            operations: vec![Operation::ReplaceTree {
+                node: None,
+                headline: Some("Root".into()),
+                tree,
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+
+    assert_eq!(outline.roots.len(), 2);
+    assert_eq!(outline.nodes[&outline.roots[0].node].headline, "New Root");
+    assert_ne!(outline.roots[0].node, NodeId::from("a"));
+    assert!(!outline.nodes.contains_key(&NodeId::from("a")));
+}
+
+#[test]
+fn replace_tree_by_node_keeps_the_clone_occurrence_still_referencing_it() {
+    let mut outline = LeoDocument::parse(SAMPLE).unwrap().outline;
+    let tree: BTreeMap<String, TreeNode> = serde_json::from_value(json!({
+        "Grandchild": { "_body": "" }
+    }))
+    .unwrap();
+
+    outline
+        .apply(&OperationBatch {
+            operations: vec![Operation::ReplaceTree {
+                node: Some(NodeId::from("b")),
+                headline: None,
+                tree,
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+
+    // "b" is a clone: only its defining occurrence under "a" is replaced.
+    // The bare second root still references the original node "b", keeping
+    // it alive with its original headline.
+    assert!(outline.nodes.contains_key(&NodeId::from("b")));
+    assert_eq!(outline.roots[1].node, NodeId::from("b"));
+    assert_eq!(outline.nodes[&NodeId::from("b")].headline, "Child");
+
+    assert_ne!(outline.roots[0].children[0].node, NodeId::from("b"));
+    assert_eq!(
+        outline.nodes[&outline.roots[0].children[0].node].headline,
+        "Grandchild"
+    );
+}
+
+#[test]
+fn replace_tree_requires_exactly_one_target() {
+    let mut outline = LeoDocument::parse(SAMPLE).unwrap().outline;
+    let batch = OperationBatch {
+        operations: vec![Operation::ReplaceTree {
+            node: None,
+            headline: None,
+            tree: BTreeMap::new(),
+        }],
+        ..Default::default()
+    };
+    assert!(outline.apply(&batch).is_err());
+}
+
+#[test]
+fn merge_tree_updates_matching_body_and_adds_missing_children_without_deleting() {
+    let mut outline = LeoDocument::parse(SAMPLE).unwrap().outline;
+    let tree: BTreeMap<String, TreeNode> = serde_json::from_value(json!({
+        "Root": {
+            "_body": "updated body",
+            "New Child": { "_body": "added" }
+        }
+    }))
+    .unwrap();
+
+    outline
+        .apply(&OperationBatch {
+            operations: vec![Operation::MergeTree { parent: None, tree }],
+            ..Default::default()
+        })
+        .unwrap();
+
+    // Existing root "a" keeps its GNX and gains an updated body.
+    assert_eq!(outline.roots.len(), 2);
+    assert_eq!(outline.roots[0].node, NodeId::from("a"));
+    assert_eq!(outline.nodes[&NodeId::from("a")].body, "updated body");
+
+    // Its existing child "b" is untouched, and "New Child" is added beside it.
+    assert_eq!(outline.roots[0].children.len(), 2);
+    assert!(outline.nodes.contains_key(&NodeId::from("b")));
+    assert_eq!(outline.nodes[&NodeId::from("b")].body, "child");
+    assert!(
+        outline.roots[0]
+            .children
+            .iter()
+            .any(|p| outline.nodes[&p.node].headline == "New Child")
+    );
+}
+
+#[test]
+fn merge_tree_leaves_body_unchanged_when_not_given() {
+    let mut outline = LeoDocument::parse(SAMPLE).unwrap().outline;
+    let tree: BTreeMap<String, TreeNode> = serde_json::from_value(json!({
+        "Root": {}
+    }))
+    .unwrap();
+
+    outline
+        .apply(&OperationBatch {
+            operations: vec![Operation::MergeTree { parent: None, tree }],
+            ..Default::default()
+        })
+        .unwrap();
+
+    assert_eq!(outline.nodes[&NodeId::from("a")].body, "body & text");
+}
+
+#[test]
+fn merge_tree_rejects_an_ambiguous_headline() {
+    let mut outline = LeoDocument::parse(SAMPLE).unwrap().outline;
+    outline
+        .apply(&OperationBatch {
+            operations: vec![Operation::Insert {
+                parent: None,
+                index: None,
+                node: Node {
+                    id: NodeId::from("c"),
+                    headline: "Root".into(),
+                    body: String::new(),
+                    vnode_attributes: HashMap::new(),
+                    tnode_attributes: HashMap::new(),
+                },
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+
+    let tree: BTreeMap<String, TreeNode> = serde_json::from_value(json!({
+        "Root": { "_body": "x" }
+    }))
+    .unwrap();
+    let batch = OperationBatch {
+        operations: vec![Operation::MergeTree { parent: None, tree }],
+        ..Default::default()
+    };
+    assert!(outline.apply(&batch).is_err());
 }
 
 #[test]
