@@ -97,13 +97,25 @@ impl SyntaxHighlighter {
     ) -> Option<Text<'static>> {
         let syntax = self.syntax_for(body, source_path, inherited_language);
         let styler = scope_styler_for(&syntax.name)?;
+        // The bundled Markdown grammar doesn't embed other languages into
+        // its own fenced-code scope (the fence's content gets no
+        // distinguishing scope at all), so fenced code is highlighted as a
+        // separate pass and spliced in by line index rather than through
+        // the scope walk below.
+        let fence_lines = self.fenced_code_lines(body);
         let mut parse_state = ParseState::new(syntax);
         let mut scope_stack = ScopeStack::new();
         let mut lines = Vec::new();
-        for source_line in body.split_inclusive('\n') {
+        for (line_index, source_line) in body.split_inclusive('\n').enumerate() {
             let Ok(ops) = parse_state.parse_line(source_line, &self.syntaxes) else {
-                let text = source_line.strip_suffix('\n').unwrap_or(source_line);
-                lines.push(Line::from(text.to_owned()));
+                match fence_lines.get(line_index) {
+                    Some(FenceLine::Hidden) => {}
+                    Some(FenceLine::Content(line)) => lines.push(line.clone()),
+                    _ => {
+                        let text = source_line.strip_suffix('\n').unwrap_or(source_line);
+                        lines.push(Line::from(text.to_owned()));
+                    }
+                }
                 continue;
             };
             let mut spans = Vec::new();
@@ -118,9 +130,50 @@ impl SyntaxHighlighter {
             if cursor < source_line.len() {
                 push_scoped_span(&mut spans, &source_line[cursor..], &scope_stack, styler);
             }
-            lines.push(Line::from(spans));
+            match fence_lines.get(line_index) {
+                Some(FenceLine::Hidden) => {}
+                Some(FenceLine::Content(line)) => lines.push(line.clone()),
+                _ => lines.push(Line::from(spans)),
+            }
         }
         Some(Text::from(lines))
+    }
+
+    /// Classifies each line of `body` for fenced-code splicing: the fence
+    /// delimiter lines themselves (hidden, like other Markdown markup), the
+    /// fenced content re-rendered through `highlight_with_language` for its
+    /// declared language, or left alone (normal Markdown scope styling)
+    /// when the fence has no language tag or is never closed.
+    fn fenced_code_lines(&self, body: &str) -> Vec<FenceLine> {
+        let source_lines: Vec<&str> = body.split_inclusive('\n').collect();
+        let mut result: Vec<FenceLine> = (0..source_lines.len())
+            .map(|_| FenceLine::None)
+            .collect();
+        let mut index = 0;
+        while index < source_lines.len() {
+            let Some(language) = fence_open(source_lines[index]) else {
+                index += 1;
+                continue;
+            };
+            let content_start = index + 1;
+            let close_index = (content_start..source_lines.len())
+                .find(|&candidate| is_fence_close(source_lines[candidate]));
+            let Some(close_index) = close_index else {
+                break; // Unterminated fence: leave the rest as normal Markdown.
+            };
+
+            result[index] = FenceLine::Hidden;
+            result[close_index] = FenceLine::Hidden;
+            if !language.is_empty() {
+                let content: String = source_lines[content_start..close_index].concat();
+                let highlighted = self.highlight_with_language(&content, None, Some(language));
+                for (offset, line) in highlighted.lines.into_iter().enumerate() {
+                    result[content_start + offset] = FenceLine::Content(line);
+                }
+            }
+            index = close_index + 1;
+        }
+        result
     }
 
     fn syntax_for<'a>(
@@ -148,6 +201,36 @@ impl SyntaxHighlighter {
             })
             .unwrap_or_else(|| self.syntaxes.find_syntax_plain_text())
     }
+}
+
+/// How a source line participates in a fenced code block, per
+/// `SyntaxHighlighter::fenced_code_lines`.
+#[derive(Clone)]
+enum FenceLine {
+    /// Not part of a (recognized) fenced code block.
+    None,
+    /// A fence delimiter line (` ```lang ` or ` ``` `) — hidden in preview,
+    /// like other Markdown markup.
+    Hidden,
+    /// A line of fenced content, already highlighted for its language.
+    Content(Line<'static>),
+}
+
+/// Detects a fence-opening line like "```rust" or a bare "```", returning
+/// the language token (empty string if none given). Handles exact
+/// triple-backtick fences only, which covers ordinary notes; four-or-more
+/// backtick fences, tilde fences, and indented fences aren't recognized.
+fn fence_open(line: &str) -> Option<&str> {
+    let trimmed = line.trim_end_matches(['\n', '\r']).trim_start();
+    let rest = trimmed.strip_prefix("```")?;
+    if rest.starts_with('`') {
+        return None;
+    }
+    Some(rest.trim())
+}
+
+fn is_fence_close(line: &str) -> bool {
+    line.trim_end_matches(['\n', '\r']).trim() == "```"
 }
 
 /// Maps a syntect scope stack (rendered as a space-separated string, e.g.
@@ -309,6 +392,63 @@ mod tests {
             None,
         );
         assert!(text.is_none());
+    }
+
+    #[test]
+    fn markdown_preview_highlights_fenced_code_by_its_own_language() {
+        let text = SyntaxHighlighter::new()
+            .render_preview(
+                "Before.\n\n```rust\nlet x = 1;\n```\n\nAfter.\n",
+                Some(Path::new("x.md")),
+                None,
+            )
+            .expect("markdown has a preview renderer");
+        let rendered: Vec<String> = text
+            .lines
+            .iter()
+            .map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect())
+            .collect();
+        // The ``` delimiter lines are gone; the fenced line survives intact.
+        assert_eq!(rendered, vec!["Before.", "", "let x = 1;", "", "After."]);
+
+        let code_line = &text.lines[2];
+        assert!(
+            code_line.spans.len() > 1,
+            "fenced content should carry per-token highlighting, not one plain span"
+        );
+        let number_span = code_line
+            .spans
+            .iter()
+            .find(|span| span.content.as_ref() == "1")
+            .expect("the literal 1 is highlighted as its own span");
+        assert_ne!(
+            number_span.style,
+            code_line.spans[0].style,
+            "the number should be styled differently than surrounding code"
+        );
+    }
+
+    #[test]
+    fn markdown_preview_hides_fence_delimiters_even_without_a_language_tag() {
+        let text = SyntaxHighlighter::new()
+            .render_preview("```\nplain block\n```\n", Some(Path::new("x.md")), None)
+            .expect("markdown has a preview renderer");
+        let rendered: Vec<String> = text
+            .lines
+            .iter()
+            .map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect())
+            .collect();
+        assert_eq!(rendered, vec!["plain block"]);
+    }
+
+    #[test]
+    fn markdown_preview_leaves_an_unterminated_fence_as_plain_markdown() {
+        let text = SyntaxHighlighter::new()
+            .render_preview("```rust\nlet x = 1;\n", Some(Path::new("x.md")), None)
+            .expect("markdown has a preview renderer");
+        // No panic, and the fence marker line is still present since it was
+        // never recognized as closed.
+        assert_eq!(text.lines.len(), 2);
     }
 
     #[test]
