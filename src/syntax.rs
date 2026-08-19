@@ -78,7 +78,10 @@ impl SyntaxHighlighter {
                         .collect()
                 })
                 .unwrap_or_else(|_| vec![Span::raw(source_line.trim_end_matches('\n').to_owned())]);
-            match fence_lines.as_ref().and_then(|fence_lines| fence_lines.get(line_index)) {
+            match fence_lines
+                .as_ref()
+                .and_then(|fence_lines| fence_lines.get(line_index))
+            {
                 Some(FenceLine::Content(content_line)) => lines.push(content_line.clone()),
                 _ => lines.push(Line::from(spans)),
             }
@@ -131,7 +134,12 @@ impl SyntaxHighlighter {
             let mut cursor = 0usize;
             for (index, op) in ops {
                 if index > cursor {
-                    push_scoped_span(&mut spans, &source_line[cursor..index], &scope_stack, styler);
+                    push_scoped_span(
+                        &mut spans,
+                        &source_line[cursor..index],
+                        &scope_stack,
+                        styler,
+                    );
                 }
                 let _ = scope_stack.apply(&op);
                 cursor = index;
@@ -155,9 +163,7 @@ impl SyntaxHighlighter {
     /// when the fence has no language tag or is never closed.
     fn fenced_code_lines(&self, body: &str) -> Vec<FenceLine> {
         let source_lines: Vec<&str> = body.split_inclusive('\n').collect();
-        let mut result: Vec<FenceLine> = (0..source_lines.len())
-            .map(|_| FenceLine::None)
-            .collect();
+        let mut result: Vec<FenceLine> = (0..source_lines.len()).map(|_| FenceLine::None).collect();
         let mut index = 0;
         while index < source_lines.len() {
             let Some(language) = fence_open(source_lines[index]) else {
@@ -356,18 +362,17 @@ mod tests {
         let rendered: Vec<String> = text
             .lines
             .iter()
-            .map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect())
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
             .collect();
         // Unlike preview, delimiters (** and ```rust/```) stay in the text.
         assert_eq!(
             rendered,
-            vec![
-                "Some **bold** text.",
-                "",
-                "```rust",
-                "let x = 1;",
-                "```"
-            ]
+            vec!["Some **bold** text.", "", "```rust", "let x = 1;", "```"]
         );
 
         let code_line = &text.lines[3];
@@ -381,8 +386,7 @@ mod tests {
             .find(|span| span.content.as_ref() == "1")
             .expect("the literal 1 is highlighted as its own span");
         assert_ne!(
-            number_span.style,
-            code_line.spans[0].style,
+            number_span.style, code_line.spans[0].style,
             "the number should be styled differently than surrounding code"
         );
     }
@@ -414,7 +418,12 @@ mod tests {
         let rendered: Vec<String> = text
             .lines
             .iter()
-            .map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect())
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
             .collect();
         assert_eq!(rendered, vec!["Title", "", "Some bold and italic text."]);
 
@@ -456,7 +465,12 @@ mod tests {
         let rendered: Vec<String> = text
             .lines
             .iter()
-            .map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect())
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
             .collect();
         // The ``` delimiter lines are gone; the fenced line survives intact.
         assert_eq!(rendered, vec!["Before.", "", "let x = 1;", "", "After."]);
@@ -472,8 +486,7 @@ mod tests {
             .find(|span| span.content.as_ref() == "1")
             .expect("the literal 1 is highlighted as its own span");
         assert_ne!(
-            number_span.style,
-            code_line.spans[0].style,
+            number_span.style, code_line.spans[0].style,
             "the number should be styled differently than surrounding code"
         );
     }
@@ -486,7 +499,12 @@ mod tests {
         let rendered: Vec<String> = text
             .lines
             .iter()
-            .map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect())
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
             .collect();
         assert_eq!(rendered, vec!["plain block"]);
     }

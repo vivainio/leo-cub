@@ -334,10 +334,11 @@ fn find_static_blocks(
             // `class C { m() {} }`), skipping to the next line would run past
             // the nested block's own content, leaving it with an empty body;
             // anchor to the first nested block's actual line instead.
-            let body_start = children.first().map_or(
-                (container.start_position().row + 1).min(end),
-                |first| first.syntax_start,
-            );
+            let body_start = children
+                .first()
+                .map_or((container.start_position().row + 1).min(end), |first| {
+                    first.syntax_start
+                });
             let prefix = config
                 .prefixes
                 .iter()

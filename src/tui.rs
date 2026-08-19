@@ -260,7 +260,9 @@ impl App {
     }
 
     fn selected_position(&self) -> Option<PositionId> {
-        self.rows().get(self.selected).map(|row| row.position.clone())
+        self.rows()
+            .get(self.selected)
+            .map(|row| row.position.clone())
     }
 
     #[cfg(feature = "syntax")]
@@ -277,7 +279,11 @@ impl App {
         if let Some(position) = position
             && let Some(language) = self.language_at(position)
         {
-            return self.wrap_by_language.get(&language).copied().unwrap_or(false);
+            return self
+                .wrap_by_language
+                .get(&language)
+                .copied()
+                .unwrap_or(false);
         }
         self.body_wrap
     }
@@ -2633,7 +2639,9 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full
     #[cfg(feature = "syntax")]
     lines.push(Line::from("y                Toggle syntax highlighting"));
     #[cfg(feature = "syntax")]
-    lines.push(Line::from("m                Toggle rendered preview (Markdown for now)"));
+    lines.push(Line::from(
+        "m                Toggle rendered preview (Markdown for now)",
+    ));
     lines.extend([
         Line::from("q or Esc         Quit"),
         Line::from(""),
@@ -2744,9 +2752,11 @@ fn body_text(app: &mut App, row: &Row) -> Text<'static> {
             if let Some(cached) = app.highlight_cache.get(&row.position) {
                 return cached.clone();
             }
-            let highlighted =
-                app.syntax
-                    .highlight_with_language(&body, source_path, inherited_language.as_deref());
+            let highlighted = app.syntax.highlight_with_language(
+                &body,
+                source_path,
+                inherited_language.as_deref(),
+            );
             app.highlight_cache
                 .insert(row.position.clone(), highlighted.clone());
             return highlighted;
@@ -3005,10 +3015,17 @@ fn copy_location_to_clipboard(app: &mut App) {
         .or_else(|| app.source_locations.get(&row.position).cloned())
         .or_else(|| app.source_nodes.get(&row.node).cloned())
     {
-        Some(location) => format!("{}:{}: {headline}", display_path(&location.path), location.line),
+        Some(location) => format!(
+            "{}:{}: {headline}",
+            display_path(&location.path),
+            location.line
+        ),
         None => format!("{}: {headline}", display_path(&app.path)),
     };
-    match execute!(io::stdout(), CopyToClipboard::to_clipboard_from(text.clone())) {
+    match execute!(
+        io::stdout(),
+        CopyToClipboard::to_clipboard_from(text.clone())
+    ) {
         Ok(()) => app.status = format!("copied to clipboard: {text}"),
         Err(error) => app.status = format!("clipboard copy failed: {error}"),
     }
@@ -4400,8 +4417,16 @@ fn main() {}</t><t tx="b">just notes</t></tnodes></leo_file>"#,
         assert_eq!(app.document.outline.nodes.len(), 3);
 
         let outline = &app.document.outline;
-        assert!(is_clone_root(outline, &PositionId("0".into()), &NodeId::from("a")));
-        assert!(is_clone_root(outline, &PositionId("1".into()), &NodeId::from("a")));
+        assert!(is_clone_root(
+            outline,
+            &PositionId("0".into()),
+            &NodeId::from("a")
+        ));
+        assert!(is_clone_root(
+            outline,
+            &PositionId("1".into()),
+            &NodeId::from("a")
+        ));
         assert!(!is_clone_root(
             outline,
             &PositionId("0/0".into()),
@@ -4535,10 +4560,16 @@ fn main() {}</t><t tx="b">just notes</t></tnodes></leo_file>"#,
     #[test]
     fn tildify_replaces_a_home_prefix_with_tilde() {
         assert_eq!(
-            tildify(Path::new("/home/v/r/leo-rs/src/tui.rs"), Some(Path::new("/home/v"))),
+            tildify(
+                Path::new("/home/v/r/leo-rs/src/tui.rs"),
+                Some(Path::new("/home/v"))
+            ),
             "~/r/leo-rs/src/tui.rs"
         );
-        assert_eq!(tildify(Path::new("/home/v"), Some(Path::new("/home/v"))), "~");
+        assert_eq!(
+            tildify(Path::new("/home/v"), Some(Path::new("/home/v"))),
+            "~"
+        );
         assert_eq!(
             tildify(Path::new("/etc/hosts"), Some(Path::new("/home/v"))),
             "/etc/hosts"
