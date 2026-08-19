@@ -1379,9 +1379,10 @@ fn cut_selected(app: &mut App) {
     if rows.is_empty() {
         return;
     }
-    if rows.iter().any(|row| {
-        app.readonly_derived(&row.node) || position_contains_readonly_derived(app, &row.position)
-    }) {
+    if rows
+        .iter()
+        .any(|row| cut_would_orphan_derived_content(app, &row.position))
+    {
         app.status = "@auto subtrees cannot be cut".into();
         return;
     }
@@ -1411,8 +1412,17 @@ fn paste_tree(app: &mut App, as_clone: bool) {
         app.status = "tree clipboard is empty".into();
         return;
     };
+    if as_clone
+        && clipboard
+            .roots
+            .iter()
+            .any(|root| app.readonly_derived(&root.node))
+    {
+        app.status = "cannot clone @auto derived content; only its root can be cloned".into();
+        return;
+    }
     let (parent, insert_at) = if let Some(row) = app.selected_row() {
-        if !app.editable(&row) || position_contains_readonly_derived(app, &row.position) {
+        if !app.editable(&row) {
             app.status = "cannot paste beside an @auto subtree".into();
             return;
         }
@@ -1983,17 +1993,21 @@ fn referenced_nodes(positions: &[Position]) -> HashSet<NodeId> {
     result
 }
 
-fn position_contains_readonly_derived(app: &App, id: &PositionId) -> bool {
+/// Whether cutting `position` would remove the only remaining occurrence of
+/// some read-only derived node beneath it (including `position` itself).
+/// A duplicate occurrence (its node id also appears elsewhere, e.g. because
+/// its @auto root was cloned) is safe to cut: the content survives via the
+/// other occurrence.
+fn cut_would_orphan_derived_content(app: &App, position: &PositionId) -> bool {
+    fn walk(app: &App, position: &Position) -> bool {
+        (app.readonly_derived(&position.node)
+            && clone_count(&app.document.outline, &position.node) <= 1)
+            || position.children.iter().any(|child| walk(app, child))
+    }
     app.document
         .outline
-        .position(id)
-        .is_some_and(|position| subtree_contains_readonly(app, &position.children))
-}
-
-fn subtree_contains_readonly(app: &App, positions: &[Position]) -> bool {
-    positions.iter().any(|position| {
-        app.readonly_derived(&position.node) || subtree_contains_readonly(app, &position.children)
-    })
+        .position(position)
+        .is_some_and(|position| walk(app, position))
 }
 
 fn split_position(id: &PositionId) -> Option<(Option<PositionId>, usize)> {
@@ -4326,6 +4340,70 @@ fn main() {}</t><t tx="b">just notes</t></tnodes></leo_file>"#,
             &PositionId("1/0".into()),
             &NodeId::from("b")
         ));
+    }
+
+    #[test]
+    fn cloning_an_auto_root_in_place_is_not_blocked_by_its_derived_children() {
+        let mut app = editing_app();
+        app.derived_nodes.insert(NodeId::from("b"));
+        app.derived_nodes.insert(NodeId::from("c"));
+
+        // Copying and immediately pasting-as-clone beside the same selected
+        // row is the natural way to clone a node, including an @auto root
+        // whose children are read-only derived content.
+        copy_selected(&mut app);
+        paste_tree(&mut app, true);
+
+        assert_eq!(app.document.outline.roots.len(), 2);
+        assert_eq!(app.document.outline.roots[0], app.document.outline.roots[1]);
+        assert_eq!(app.status, "1 tree(s) pasted as clones (Ctrl-S to save)");
+    }
+
+    #[test]
+    fn cloning_a_derived_descendant_directly_is_blocked() {
+        let mut app = editing_app();
+        app.derived_nodes.insert(NodeId::from("b"));
+        app.derived_nodes.insert(NodeId::from("c"));
+
+        app.selected = 1; // row "b", a derived descendant, not the @auto root
+        copy_selected(&mut app);
+        paste_tree(&mut app, true);
+
+        assert_eq!(app.document.outline.roots.len(), 1);
+        assert_eq!(
+            app.status,
+            "cannot clone @auto derived content; only its root can be cloned"
+        );
+    }
+
+    #[test]
+    fn cutting_the_sole_auto_occurrence_is_blocked() {
+        let mut app = editing_app();
+        app.derived_nodes.insert(NodeId::from("b"));
+        app.derived_nodes.insert(NodeId::from("c"));
+
+        cut_selected(&mut app);
+
+        assert_eq!(app.document.outline.roots.len(), 1);
+        assert_eq!(app.status, "@auto subtrees cannot be cut");
+    }
+
+    #[test]
+    fn cutting_a_duplicate_auto_occurrence_is_allowed() {
+        let mut app = editing_app();
+        app.derived_nodes.insert(NodeId::from("b"));
+        app.derived_nodes.insert(NodeId::from("c"));
+        copy_selected(&mut app);
+        paste_tree(&mut app, true);
+        assert_eq!(app.document.outline.roots.len(), 2);
+
+        app.selected = 0;
+        app.selection_anchor = None;
+        cut_selected(&mut app);
+
+        assert_eq!(app.document.outline.roots.len(), 1);
+        assert_ne!(app.status, "@auto subtrees cannot be cut");
+        assert_eq!(app.document.outline.roots[0].node, NodeId::from("a"));
     }
 
     #[test]
