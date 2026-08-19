@@ -39,10 +39,16 @@ impl SyntaxHighlighter {
         inherited_language: Option<&str>,
     ) -> Text<'static> {
         let syntax = self.syntax_for(body, source_path, inherited_language);
+        // Markdown's fenced code content gets no distinguishing scope of its
+        // own (see `render_preview`), so splice in a per-language highlight
+        // here too. Unlike preview, the fence delimiter lines themselves
+        // stay put: this mode shows raw source with color, not a rendering
+        // that hides markup.
+        let fence_lines = (syntax.name == "Markdown").then(|| self.fenced_code_lines(body));
         let theme = &self.themes.themes["base16-ocean.dark"];
         let mut highlighter = HighlightLines::new(syntax, theme);
         let mut lines = Vec::new();
-        for source_line in body.split_inclusive('\n') {
+        for (line_index, source_line) in body.split_inclusive('\n').enumerate() {
             let spans = highlighter
                 .highlight_line(source_line, &self.syntaxes)
                 .map(|ranges| {
@@ -72,7 +78,10 @@ impl SyntaxHighlighter {
                         .collect()
                 })
                 .unwrap_or_else(|_| vec![Span::raw(source_line.trim_end_matches('\n').to_owned())]);
-            lines.push(Line::from(spans));
+            match fence_lines.as_ref().and_then(|fence_lines| fence_lines.get(line_index)) {
+                Some(FenceLine::Content(content_line)) => lines.push(content_line.clone()),
+                _ => lines.push(Line::from(spans)),
+            }
         }
         Text::from(lines)
     }
@@ -335,6 +344,47 @@ mod tests {
         );
         assert_eq!(text.lines.len(), 3);
         assert_eq!(text.lines[1].width(), 8);
+    }
+
+    #[test]
+    fn plain_syntax_highlighting_colors_fenced_code_but_keeps_markup_visible() {
+        let text = SyntaxHighlighter::new().highlight_with_language(
+            "Some **bold** text.\n\n```rust\nlet x = 1;\n```\n",
+            Some(Path::new("x.md")),
+            None,
+        );
+        let rendered: Vec<String> = text
+            .lines
+            .iter()
+            .map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect())
+            .collect();
+        // Unlike preview, delimiters (** and ```rust/```) stay in the text.
+        assert_eq!(
+            rendered,
+            vec![
+                "Some **bold** text.",
+                "",
+                "```rust",
+                "let x = 1;",
+                "```"
+            ]
+        );
+
+        let code_line = &text.lines[3];
+        assert!(
+            code_line.spans.len() > 1,
+            "fenced content should carry per-token highlighting, not one plain span"
+        );
+        let number_span = code_line
+            .spans
+            .iter()
+            .find(|span| span.content.as_ref() == "1")
+            .expect("the literal 1 is highlighted as its own span");
+        assert_ne!(
+            number_span.style,
+            code_line.spans[0].style,
+            "the number should be styled differently than surrounding code"
+        );
     }
 
     #[test]
