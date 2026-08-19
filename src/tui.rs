@@ -20,7 +20,7 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use leo::{
-    AutoFile, DerivedFile, LeoDocument, NodeId, Outline, Position, PositionId, render_thin,
+    AutoFile, DerivedFile, LeoDocument, Node, NodeId, Outline, Position, PositionId, render_thin,
     search_outline,
 };
 use ratatui::{
@@ -45,6 +45,14 @@ struct Row {
 struct OriginalExternalState {
     children: HashMap<NodeId, Vec<Position>>,
     bodies: HashMap<NodeId, String>,
+    /// Node entries for `children`'s subtree, captured at load time. A
+    /// derived container's live children get replaced by freshly generated
+    /// ones (auto.rs's merge prunes `outline.nodes` down to what the live
+    /// tree references), so by save time the *original* child ids are often
+    /// gone from `outline.nodes` even though `children` still points at
+    /// them. Restoring `children` for serialization needs these node
+    /// bodies/headlines to still resolve.
+    nodes: HashMap<NodeId, Node>,
 }
 
 #[derive(Clone)]
@@ -465,6 +473,7 @@ pub fn run(path: PathBuf, load_derived: bool) -> Result<()> {
             OriginalExternalState {
                 children: report.original_children,
                 bodies: report.original_bodies,
+                nodes: report.original_nodes,
             },
         )
     } else {
@@ -1366,6 +1375,35 @@ fn all_rows(outline: &Outline) -> Vec<Row> {
     rows
 }
 
+/// Captures which *nodes* (not positions) are currently expanded, so their
+/// expand state can survive a structural edit that shifts `PositionId`
+/// index paths out from under them (paste, cut, move/indent/outdent).
+fn snapshot_expanded_nodes(app: &App) -> HashSet<NodeId> {
+    app.expanded
+        .iter()
+        .filter_map(|position| {
+            app.document
+                .outline
+                .position(position)
+                .map(|entry| entry.node.clone())
+        })
+        .collect()
+}
+
+/// Re-locates the nodes captured by `snapshot_expanded_nodes` in the
+/// (now mutated) outline and rebuilds `app.expanded` from their current
+/// positions, dropping any that were removed by the edit.
+fn restore_expanded_nodes(app: &mut App, nodes: HashSet<NodeId>) {
+    if nodes.is_empty() {
+        return;
+    }
+    app.expanded = all_rows(&app.document.outline)
+        .into_iter()
+        .filter(|row| nodes.contains(&row.node))
+        .map(|row| row.position)
+        .collect();
+}
+
 fn reveal_and_select(app: &mut App, position: &PositionId) {
     let components = position.0.split('/').collect::<Vec<_>>();
     for end in 1..components.len() {
@@ -1638,6 +1676,7 @@ fn cut_selected(app: &mut App) {
     }
     copy_selected(app);
     rows.sort_by_key(|row| path_indices(&row.position));
+    let expanded_nodes = snapshot_expanded_nodes(app);
     for row in rows.iter().rev() {
         remove_position(&mut app.document.outline, &row.position);
     }
@@ -1648,6 +1687,12 @@ fn cut_selected(app: &mut App) {
         .retain(|id, _| referenced.contains(id));
     app.dirty = true;
     app.quit_armed = false;
+    #[cfg(feature = "syntax")]
+    app.highlight_cache.clear();
+    #[cfg(feature = "syntax")]
+    app.preview_cache.clear();
+    app.source_locations.clear();
+    restore_expanded_nodes(app, expanded_nodes);
     app.selected = app.selected.min(app.rows().len().saturating_sub(1));
     app.selection_anchor = None;
     app.status = format!(
@@ -1702,6 +1747,7 @@ fn paste_tree(app: &mut App, as_clone: bool) {
                 .entry(id.clone())
                 .or_insert_with(|| node.clone());
         }
+        let expanded_nodes = snapshot_expanded_nodes(app);
         let Some(siblings) = children_mut(&mut app.document.outline, parent.as_ref()) else {
             return;
         };
@@ -1710,6 +1756,12 @@ fn paste_tree(app: &mut App, as_clone: bool) {
         let target = join_position(parent.as_ref(), insert_at);
         app.dirty = true;
         app.quit_armed = false;
+        #[cfg(feature = "syntax")]
+        app.highlight_cache.clear();
+        #[cfg(feature = "syntax")]
+        app.preview_cache.clear();
+        app.source_locations.clear();
+        restore_expanded_nodes(app, expanded_nodes);
         select_position(app, &target);
         app.status = format!("{count} tree(s) pasted as clones (Ctrl-S to save)");
         app.flash = Some((format!("PASTED {count} TREE(S) AS CLONES"), Instant::now()));
@@ -1746,6 +1798,7 @@ fn paste_tree(app: &mut App, as_clone: bool) {
         node.id.clone_from(&id);
         app.document.outline.nodes.insert(id, node);
     }
+    let expanded_nodes = snapshot_expanded_nodes(app);
     let Some(siblings) = children_mut(&mut app.document.outline, parent.as_ref()) else {
         return;
     };
@@ -1754,6 +1807,12 @@ fn paste_tree(app: &mut App, as_clone: bool) {
     let target = join_position(parent.as_ref(), insert_at);
     app.dirty = true;
     app.quit_armed = false;
+    #[cfg(feature = "syntax")]
+    app.highlight_cache.clear();
+    #[cfg(feature = "syntax")]
+    app.preview_cache.clear();
+    app.source_locations.clear();
+    restore_expanded_nodes(app, expanded_nodes);
     select_position(app, &target);
     app.status = format!("{count} tree(s) pasted (Ctrl-S to save)");
     app.flash = Some((
@@ -1803,6 +1862,7 @@ fn move_selected(app: &mut App, direction: MoveDirection) {
     let Some((parent, index)) = split_position(&row.position) else {
         return;
     };
+    let mut expanded_nodes = snapshot_expanded_nodes(app);
     let target = match direction {
         MoveDirection::Up | MoveDirection::Down => {
             let Some(siblings) = children_mut(&mut app.document.outline, parent.as_ref()) else {
@@ -1832,9 +1892,9 @@ fn move_selected(app: &mut App, direction: MoveDirection) {
             };
             let position = siblings.remove(index);
             let child_index = siblings[previous].children.len();
+            expanded_nodes.insert(siblings[previous].node.clone());
             siblings[previous].children.push(position);
             let previous_path = join_position(parent.as_ref(), previous);
-            app.expanded.insert(previous_path.clone());
             join_position(Some(&previous_path), child_index)
         }
         MoveDirection::Left => {
@@ -1864,6 +1924,12 @@ fn move_selected(app: &mut App, direction: MoveDirection) {
     app.dirty = true;
     app.dirty_nodes.insert(row.node);
     app.quit_armed = false;
+    #[cfg(feature = "syntax")]
+    app.highlight_cache.clear();
+    #[cfg(feature = "syntax")]
+    app.preview_cache.clear();
+    app.source_locations.clear();
+    restore_expanded_nodes(app, expanded_nodes);
     select_position(app, &target);
     app.status = "node moved (Ctrl-S to save)".into();
 }
@@ -1889,6 +1955,7 @@ fn move_selected_block(app: &mut App, direction: MoveDirection, rows: Vec<Row>) 
     let parent = locations[0].0.clone();
     let start = locations[0].1;
     let count = rows.len();
+    let mut expanded_nodes = snapshot_expanded_nodes(app);
     let (first, last) = match direction {
         MoveDirection::Up => {
             let Some(insert_at) = start.checked_sub(1) else {
@@ -1925,9 +1992,9 @@ fn move_selected_block(app: &mut App, direction: MoveDirection, rows: Vec<Row>) 
             let siblings = children_mut(&mut app.document.outline, parent.as_ref()).unwrap();
             let block: Vec<_> = siblings.drain(start..start + count).collect();
             let child_index = siblings[previous].children.len();
+            expanded_nodes.insert(siblings[previous].node.clone());
             siblings[previous].children.extend(block);
             let parent_path = join_position(parent.as_ref(), previous);
-            app.expanded.insert(parent_path.clone());
             (
                 join_position(Some(&parent_path), child_index),
                 join_position(Some(&parent_path), child_index + count - 1),
@@ -1957,6 +2024,12 @@ fn move_selected_block(app: &mut App, direction: MoveDirection, rows: Vec<Row>) 
     app.dirty = true;
     app.dirty_nodes.extend(rows.into_iter().map(|row| row.node));
     app.quit_armed = false;
+    #[cfg(feature = "syntax")]
+    app.highlight_cache.clear();
+    #[cfg(feature = "syntax")]
+    app.preview_cache.clear();
+    app.source_locations.clear();
+    restore_expanded_nodes(app, expanded_nodes);
     select_position(app, &first);
     let first_index = app.selected;
     select_position(app, &last);
@@ -1977,6 +2050,7 @@ fn save(app: &mut App) {
         &mut persisted.outline,
         &app.original_external.children,
         &app.original_external.bodies,
+        &app.original_external.nodes,
     );
     let referenced = referenced_nodes(&persisted.outline.roots);
     persisted
@@ -2165,6 +2239,7 @@ fn reload(app: &mut App) {
             OriginalExternalState {
                 children: report.original_children,
                 bodies: report.original_bodies,
+                nodes: report.original_nodes,
             },
             status,
         )
@@ -2209,8 +2284,18 @@ fn restore_external_state(
     outline: &mut Outline,
     children: &HashMap<NodeId, Vec<Position>>,
     bodies: &HashMap<NodeId, String>,
+    nodes: &HashMap<NodeId, Node>,
 ) {
     restore_derived_children(&mut outline.roots, children);
+    // The restored children can reference ids that were pruned from
+    // outline.nodes once the live tree stopped using them; reinstate them
+    // from the load-time snapshot so serialization can still resolve them.
+    for (id, node) in nodes {
+        outline
+            .nodes
+            .entry(id.clone())
+            .or_insert_with(|| node.clone());
+    }
     for (id, body) in bodies {
         if let Some(node) = outline.nodes.get_mut(id) {
             node.body.clone_from(body);
@@ -3094,6 +3179,7 @@ struct LoadReport {
     writable_external: HashMap<NodeId, WritableExternalFile>,
     original_children: HashMap<NodeId, Vec<Position>>,
     original_bodies: HashMap<NodeId, String>,
+    original_nodes: HashMap<NodeId, Node>,
 }
 
 struct DerivedJob {
@@ -3140,6 +3226,15 @@ fn load_derived_files(outline: &mut Outline, outline_path: &Path) -> LoadReport 
                     .map(|position| position.children.clone())
                     .unwrap_or_default();
                 let original_body = outline.nodes[&root_node].body.clone();
+                // Captured before merge_into prunes outline.nodes down to
+                // what the freshly generated tree references: these ids
+                // otherwise vanish from outline.nodes even though
+                // original_children (restored just before serializing)
+                // still points at them.
+                let original_nodes: HashMap<NodeId, Node> = referenced_nodes(&original_children)
+                    .into_iter()
+                    .filter_map(|id| outline.nodes.get(&id).cloned().map(|node| (id, node)))
+                    .collect();
                 if job.auto {
                     let auto = AutoFile::parse_with_directive(
                         &job.path,
@@ -3231,6 +3326,9 @@ fn load_derived_files(outline: &mut Outline, outline_path: &Path) -> LoadReport 
                     .original_bodies
                     .entry(job.root.clone())
                     .or_insert(original_body);
+                for (id, node) in original_nodes {
+                    report.original_nodes.entry(id).or_insert(node);
+                }
                 Ok(())
             });
         match result {
@@ -3637,6 +3735,63 @@ fn is_clone_root(outline: &Outline, position: &PositionId, id: &NodeId) -> bool 
 mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
+
+    #[test]
+    fn restoring_external_state_reinstates_pruned_original_child_nodes() {
+        // A derived container's on-disk children (captured into
+        // original_children/original_nodes before the fresh auto/derived
+        // content is merged in) can reference node ids that auto.rs's
+        // merge_into then prunes out of outline.nodes entirely, since the
+        // live tree no longer uses them. restore_external_state reattaches
+        // those original children before serializing, so it must also bring
+        // their node entries back — otherwise the resulting tree has
+        // positions pointing at node ids missing from outline.nodes, and
+        // serializing it panics.
+        let mut document = LeoDocument::parse(
+            r#"<leo_file><vnodes><v t="container"><vh>@auto x.py</vh><v t="fresh"><vh>fresh</vh></v></v></vnodes><tnodes><t tx="container"></t><t tx="fresh">fresh body</t></tnodes></leo_file>"#,
+        )
+        .unwrap();
+
+        let old_child = NodeId::from("stale-on-disk-child");
+        let original_children = HashMap::from([(
+            NodeId::from("container"),
+            vec![Position {
+                node: old_child.clone(),
+                children: vec![],
+            }],
+        )]);
+        let original_nodes = HashMap::from([(
+            old_child.clone(),
+            Node {
+                id: old_child.clone(),
+                headline: "stale headline".into(),
+                body: "stale body".into(),
+                vnode_attributes: HashMap::new(),
+                tnode_attributes: HashMap::new(),
+            },
+        )]);
+        // Simulates merge_into's blanket prune: the live tree only
+        // references "fresh", so the stale id is already gone from
+        // outline.nodes even though original_children still points at it.
+        assert!(!document.outline.nodes.contains_key(&old_child));
+
+        restore_external_state(
+            &mut document.outline,
+            &original_children,
+            &HashMap::new(),
+            &original_nodes,
+        );
+
+        assert_eq!(
+            document.outline.roots[0].children,
+            vec![Position {
+                node: old_child.clone(),
+                children: vec![],
+            }]
+        );
+        assert!(document.outline.nodes.contains_key(&old_child));
+        assert!(document.to_xml().is_ok());
+    }
 
     fn editing_app() -> App {
         let document = LeoDocument::parse(
@@ -4322,6 +4477,28 @@ mod tests {
     }
 
     #[test]
+    fn promoting_a_node_right_still_auto_expands_its_new_parent() {
+        // The new-parent auto-expand used to be a direct app.expanded.insert
+        // performed mid-move; restoring the pre-move expanded snapshot
+        // afterward (to survive index shifts elsewhere) silently discarded
+        // it. The auto-expand must be tracked through the same node-identity
+        // snapshot/restore path so it isn't clobbered.
+        let mut app = editing_app();
+        select_position(&mut app, &PositionId("0/1".into())); // "c"
+        move_selected(&mut app, MoveDirection::Right);
+
+        assert_eq!(
+            app.document.outline.roots[0].children[0].node,
+            NodeId::from("b")
+        );
+        assert!(
+            app.expanded.contains(&PositionId("0/0".into())),
+            "b should be auto-expanded to reveal its newly promoted child c"
+        );
+        assert_eq!(app.rows().len(), 3, "c should be visible under b");
+    }
+
+    #[test]
     fn moves_an_auto_container_but_not_its_derived_descendants() {
         let document = LeoDocument::parse(
             r#"<leo_file><vnodes><v t="a"><vh>A</vh><v t="b"><vh>B</vh></v><v t="c"><vh>C</vh></v></v><v t="d"><vh>D</vh></v></vnodes><tnodes><t tx="a"></t><t tx="b"></t><t tx="c"></t><t tx="d"></t></tnodes></leo_file>"#,
@@ -4728,6 +4905,7 @@ fn main() {}</t><t tx="b">just notes</t></tnodes></leo_file>"#,
             &mut outline,
             &HashMap::new(),
             &HashMap::from([(NodeId::from("file"), String::new())]),
+            &HashMap::new(),
         );
         assert!(outline.nodes[&NodeId::from("file")].body.is_empty());
     }
@@ -4752,6 +4930,75 @@ fn main() {}</t><t tx="b">just notes</t></tnodes></leo_file>"#,
         assert_eq!(
             app.flash.as_ref().map(|(message, _)| message.as_str()),
             Some("PASTED 1 INDEPENDENT TREE(S)")
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "syntax")]
+    fn pasting_clears_stale_position_keyed_render_caches() {
+        // highlight_cache/preview_cache are keyed by PositionId, a structural
+        // index path, not a stable node identity. Inserting a tree shifts
+        // sibling indices, so a position that previously held one node's
+        // rendered content can be reassigned to a different node; without
+        // invalidating the caches the new node inherits the old rendering
+        // (e.g. an empty body) until the next reload.
+        let mut app = editing_app();
+        select_position(&mut app, &PositionId("0".into()));
+        copy_selected(&mut app);
+        app.highlight_cache
+            .insert(PositionId("1".into()), Text::from("stale"));
+        app.preview_cache
+            .insert(PositionId("1".into()), Text::from("stale"));
+
+        paste_tree(&mut app, false);
+
+        assert!(app.highlight_cache.is_empty());
+        assert!(app.preview_cache.is_empty());
+    }
+
+    #[test]
+    fn pasting_before_a_sibling_preserves_its_expanded_state_and_source_location() {
+        let document = LeoDocument::parse(
+            r#"<leo_file><vnodes><v t="x"><vh>X</vh><v t="b"><vh>B</vh></v></v><v t="y"><vh>Y</vh></v></vnodes><tnodes><t tx="x"></t><t tx="b"></t><t tx="y"></t></tnodes></leo_file>"#,
+        )
+        .unwrap();
+        let mut app = App::new(
+            document,
+            PathBuf::from("test.leo"),
+            String::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashSet::new(),
+            HashMap::new(),
+            OriginalExternalState::default(),
+            false,
+        );
+        // App::new expands every root, so "y" (index 1) starts expanded.
+        assert!(app.expanded.contains(&PositionId("1".into())));
+        app.source_locations.insert(
+            PositionId("1".into()),
+            SourceLocation {
+                path: PathBuf::from("y.txt"),
+                line: 1,
+            },
+        );
+
+        select_position(&mut app, &PositionId("0".into())); // "x"
+        copy_selected(&mut app);
+        paste_tree(&mut app, false); // inserts after "x", shifting "y" from index 1 to 2
+
+        assert_eq!(app.document.outline.roots[2].node, NodeId::from("y"));
+        assert!(
+            app.expanded.contains(&PositionId("2".into())),
+            "y's expanded state should follow it to its new position"
+        );
+        assert!(
+            !app.expanded.contains(&PositionId("1".into())),
+            "the freshly pasted node should not inherit y's old expanded state"
+        );
+        assert!(
+            app.source_locations.is_empty(),
+            "stale position-keyed source locations must not survive a structural edit"
         );
     }
 
