@@ -1,0 +1,98 @@
+%YAML 1.2
+---
+# Vendored from princemaple/nushell-sublime-syntax at commit
+# 6b6ceebc99d7b691c0bb07f655887fec70b06427.
+# Source: Nushell.sublime-syntax
+# License: syntaxes/LICENSE.nushell-sublime-syntax
+name: Nushell
+scope: source.nu
+version: 1
+
+file_extensions:
+  - nu
+
+contexts:
+  not-module:
+    - include: comments
+    - include: source
+    - include: use
+    - include: export
+    - include: alias
+    - include: def
+    - include: let
+    - include: controls
+    - include: variables
+
+  controls:
+    - match: \b(for|if|in)\b
+      scope: keyword.control.flow.nu
+
+  variables:
+    - match: (\$)\w+\b
+      scope: variable.other.read.nu
+      captures:
+        1: keyword.other.variable.definition.powershell
+
+  main:
+    - include: module
+    - include: not-module
+
+  source:
+    - match: (source)\s+([\w/.~:]+)\n
+      captures:
+        1: keyword.control.source.nu
+        2: string.nu
+
+  use:
+    - match: (use)\s+(\w+)
+      captures:
+        1: keyword.control.use.nu
+        2: entity.name.variable.nu
+
+  export:
+    - match: (export(?:\s+(extern))?)\s+([\w-]+|\"[^"]+\")
+      captures:
+        1: keyword.control.export.nu
+        2: keyword.control.extern.nu
+        3: entity.name.variable.nu
+
+  comments:
+    - match: "#"
+      scope: punctuation.definition.comment.nu
+      push:
+        - meta_scope: comment.line.number-sign.nu
+        - match: \n
+          pop: true
+
+  module:
+    - match: \b(module)\s+(\w+)\s+(\{)
+      captures:
+        1: keyword.declaration.module.nu
+        2: entity.name.module.nu
+        3: punctuation.block.start.nu
+      push:
+        - meta_scope: module.nu
+        - include: not-module
+        - match: \}
+          pop: true
+
+  alias:
+    - match: (alias)\s+([a-z]\w*)\s*(=)\s*([^\n]+)
+      captures:
+        1: keyword.control.alias.nu
+        2: entity.name.alias.nu
+        3: punctuation.assignment.nu
+        4: string.nu
+
+  def:
+    - match: (def)\s+([\w-]+|\"[^"]+\")
+      captures:
+        1: keyword.declaration.function.nu
+        2: entity.name.function.nu
+
+  let:
+    - match: (let(?:-env)?)\s+(\w+)\s+(=)
+      captures:
+        1: keyword.declaration.variable.nu
+        2: entity.name.variable.nu
+        3: punctuation.assignment.nu
