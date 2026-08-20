@@ -27,6 +27,14 @@ pub enum HeadlinePathError {
 impl Outline {
     /// Resolve a slash-separated path of headlines to one node occurrence.
     pub fn resolve_headline_path(&self, path: &str) -> Result<NodeId, HeadlinePathError> {
+        self.resolve_headline_position(path)
+            .map(|position| position.node.clone())
+    }
+
+    /// Resolve a slash-separated path of headlines to one node occurrence,
+    /// returning the full `Position` (including its children) rather than
+    /// just its node id.
+    pub fn resolve_headline_position(&self, path: &str) -> Result<&Position, HeadlinePathError> {
         let parts = path_parts(path)?;
         let mut siblings = self.roots.as_slice();
         let mut selected = None;
@@ -44,7 +52,7 @@ impl Outline {
                 _ => return Err(HeadlinePathError::Ambiguous(path.to_owned())),
             }
         }
-        Ok(selected.unwrap().node.clone())
+        Ok(selected.unwrap())
     }
 
     /// Ensure slash-separated headline paths exist, reusing existing nodes.
