@@ -26,6 +26,7 @@ nav = [
   ] },
   { "Workflows" = [
     { "Automation and AI tools" = "workflows/automation.md" },
+    { "Scripting with Rhai" = "workflows/scripting.md" },
   ] },
 ]
 

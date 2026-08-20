@@ -14,6 +14,8 @@ use std::{
 };
 
 mod install;
+#[cfg(feature = "rhai")]
+mod rhai_run;
 #[cfg(all(feature = "tui", feature = "syntax"))]
 mod syntax;
 #[cfg(feature = "tui")]
@@ -105,11 +107,29 @@ enum Command {
         /// Show only the hierarchy stored directly in the .leo XML.
         #[arg(long)]
         no_derived: bool,
-        /// Replay a JSONL script (see the `Step` docs in tui.rs) against
-        /// the app before handing control back to the keyboard -- for
-        /// reproducing a bug by scripting the steps that lead up to it.
-        #[arg(long, value_name = "FILE")]
-        script: Option<PathBuf>,
+    },
+    /// Run a Rhai test script against an outline.
+    #[cfg(feature = "rhai")]
+    #[command(
+        after_help = r#"The script drives an outline through a small API instead of
+pressing keys, so it works as a scriptable replacement for a jsonl/TUI-driven
+integration test:
+
+  let doc = open("notes.leo");     // load an outline
+  let gnx = doc.add("A/B/C");      // ensure a headline path exists
+  doc.set_body(gnx, "hello");
+  assert_eq(doc.headline(gnx), "C");
+  doc.save();                      // write back to notes.leo
+
+Other Doc methods: gnx(path), headline(gnx), set_headline(gnx, text),
+body(gnx), render(), validate(), apply(json) (a "cub apply"-style operation
+batch, returns the report as JSON), count(), save_as(path). `assert(cond)`,
+`assert(cond, msg)`, and `assert_eq(a, b)` abort the script with a non-zero
+exit on failure; `print`/`debug` go straight to stdout/stderr."#
+    )]
+    Run {
+        /// Rhai script to execute.
+        script: PathBuf,
     },
     Inspect {
         file: PathBuf,
@@ -285,7 +305,6 @@ fn main() -> Result<()> {
         (None, Some(file)) => Command::Tui {
             file,
             no_derived: cli.no_derived,
-            script: None,
         },
         (None, None) => {
             Cli::command().print_help()?;
@@ -347,14 +366,9 @@ fn main() -> Result<()> {
         }
         Command::InstallSkills => install::install_skills()?,
         #[cfg(feature = "tui")]
-        Command::Tui {
-            file,
-            no_derived,
-            script,
-        } => match script {
-            Some(script) => tui::run_with_script(file, !no_derived, script)?,
-            None => tui::run(file, !no_derived)?,
-        },
+        Command::Tui { file, no_derived } => tui::run(file, !no_derived)?,
+        #[cfg(feature = "rhai")]
+        Command::Run { script } => rhai_run::run(&script)?,
         Command::Inspect {
             file,
             external,
