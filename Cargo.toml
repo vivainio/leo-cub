@@ -43,5 +43,8 @@ tree-sitter-xml = "0.7.0"
 
 [features]
 default = ["tui", "syntax"]
-tui = ["dep:ratatui", "dep:crossterm", "dep:rhai"]
+tui = ["dep:ratatui", "dep:crossterm", "rhai"]
+# Embedded Rhai scripting: `@language rhai` action bodies (tui feature) and
+# the standalone `cub run` test-script command.
+rhai = ["dep:rhai"]
 syntax = ["dep:syntect"]
