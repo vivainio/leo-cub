@@ -20,8 +20,10 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use leo::{
-    AutoFile, DerivedFile, LeoDocument, Node, NodeId, OperationBatch, Outline, Position,
-    PositionId, RelativeFile, render_relative, render_thin, search_outline,
+    AutoFile, DerivedFile, ExternalFormat, LeoDocument, Node, NodeId, OperationBatch,
+    OriginalExternalState, Outline, Position, PositionId, RelativeFile, WritableExternalFile,
+    comment_delimiters, external_snapshot, format_for_directive, prepare_external_updates,
+    referenced_nodes, restore_external_state, search_outline, write_external_updates,
 };
 use ratatui::{
     Terminal,
@@ -51,40 +53,6 @@ struct Row {
 struct BodySelection {
     anchor: (usize, usize),
     cursor: (usize, usize),
-}
-
-#[derive(Default)]
-struct OriginalExternalState {
-    children: HashMap<NodeId, Vec<Position>>,
-    bodies: HashMap<NodeId, String>,
-    /// Node entries for `children`'s subtree, captured at load time. A
-    /// derived container's live children get replaced by freshly generated
-    /// ones (auto.rs's merge prunes `outline.nodes` down to what the live
-    /// tree references), so by save time the *original* child ids are often
-    /// gone from `outline.nodes` even though `children` still points at
-    /// them. Restoring `children` for serialization needs these node
-    /// bodies/headlines to still resolve.
-    nodes: HashMap<NodeId, Node>,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ExternalFormat {
-    /// 5-thin sentinels (`@file`/`@thin`/`@file-thin`): absolute `*N*`
-    /// depth, every node keeps its gnx.
-    Thin,
-    /// cub-1-thin sentinels (`@f`, leo-cub's own format tag -- not an
-    /// official Leo version): depth relative to the preceding node, gnx
-    /// omitted except for the root, clones, and UA-bearing nodes.
-    Relative,
-}
-
-#[derive(Clone)]
-struct WritableExternalFile {
-    path: PathBuf,
-    start_delimiter: String,
-    end_delimiter: String,
-    original: Outline,
-    format: ExternalFormat,
 }
 
 struct App {
@@ -2514,13 +2482,14 @@ fn move_selected_block(app: &mut App, direction: MoveDirection, rows: Vec<Row>) 
 }
 
 fn save(app: &mut App) {
-    let external_updates = match prepare_external_updates(app) {
-        Ok(updates) => updates,
-        Err(error) => {
-            app.status = format!("save failed: {error}");
-            return;
-        }
-    };
+    let external_updates =
+        match prepare_external_updates(&app.document.outline, &app.writable_external) {
+            Ok(updates) => updates,
+            Err(error) => {
+                app.status = format!("save failed: {error}");
+                return;
+            }
+        };
     let mut persisted = app.document.clone();
     restore_external_state(
         &mut persisted.outline,
@@ -2552,145 +2521,6 @@ fn save(app: &mut App) {
         }
         Err(error) => app.status = format!("save failed: {error}"),
     }
-}
-
-struct ExternalUpdate {
-    root: NodeId,
-    path: PathBuf,
-    rendered: String,
-    snapshot: Outline,
-}
-
-fn prepare_external_updates(app: &App) -> Result<Vec<ExternalUpdate>, String> {
-    let mut updates = Vec::new();
-    for (root, file) in &app.writable_external {
-        let Some((position, snapshot)) = external_snapshot(&app.document.outline, root) else {
-            continue;
-        };
-        if snapshot == file.original {
-            continue;
-        }
-        let rendered = match file.format {
-            ExternalFormat::Relative => {
-                let rendered = render_relative(
-                    &app.document.outline,
-                    &position,
-                    &file.start_delimiter,
-                    &file.end_delimiter,
-                )
-                .map_err(|error| format!("{}: {error}", file.path.display()))?;
-                RelativeFile::parse(&rendered).map_err(|error| {
-                    format!(
-                        "{}: generated invalid @f file: {error}",
-                        file.path.display()
-                    )
-                })?;
-                rendered
-            }
-            ExternalFormat::Thin => {
-                let rendered = render_thin(
-                    &app.document.outline,
-                    &position,
-                    &file.start_delimiter,
-                    &file.end_delimiter,
-                )
-                .map_err(|error| format!("{}: {error}", file.path.display()))?;
-                DerivedFile::parse(&rendered).map_err(|error| {
-                    format!(
-                        "{}: generated invalid thin file: {error}",
-                        file.path.display()
-                    )
-                })?;
-                rendered
-            }
-        };
-        updates.push(ExternalUpdate {
-            root: root.clone(),
-            path: file.path.clone(),
-            rendered,
-            snapshot,
-        });
-    }
-    Ok(updates)
-}
-
-fn write_external_updates(updates: &[ExternalUpdate]) -> Result<(), String> {
-    let mut staged = Vec::new();
-    for (index, update) in updates.iter().enumerate() {
-        let name = update
-            .path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("external");
-        let temporary = update
-            .path
-            .with_file_name(format!(".{name}.cub-save-{}-{index}", std::process::id()));
-        let permissions = fs::metadata(&update.path)
-            .ok()
-            .map(|metadata| metadata.permissions());
-        let result = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)
-            .and_then(|mut file| {
-                file.write_all(update.rendered.as_bytes())?;
-                file.sync_all()
-            })
-            .and_then(|()| {
-                permissions.map_or(Ok(()), |permissions| {
-                    fs::set_permissions(&temporary, permissions)
-                })
-            });
-        if let Err(error) = result {
-            for path in &staged {
-                let _ = fs::remove_file(path);
-            }
-            let _ = fs::remove_file(&temporary);
-            return Err(format!("{}: {error}", update.path.display()));
-        }
-        staged.push(temporary);
-    }
-    for (update, temporary) in updates.iter().zip(&staged) {
-        if let Err(error) = fs::rename(temporary, &update.path) {
-            for path in &staged {
-                let _ = fs::remove_file(path);
-            }
-            return Err(format!("{}: {error}", update.path.display()));
-        }
-    }
-    Ok(())
-}
-
-fn external_snapshot(outline: &Outline, root: &NodeId) -> Option<(PositionId, Outline)> {
-    fn find(positions: &[Position], parent: &str, root: &NodeId) -> Option<(PositionId, Position)> {
-        for (index, position) in positions.iter().enumerate() {
-            let id = if parent.is_empty() {
-                index.to_string()
-            } else {
-                format!("{parent}/{index}")
-            };
-            if &position.node == root {
-                return Some((PositionId(id), position.clone()));
-            }
-            if let Some(found) = find(&position.children, &id, root) {
-                return Some(found);
-            }
-        }
-        None
-    }
-    let (position, tree) = find(&outline.roots, "", root)?;
-    let ids = referenced_nodes(std::slice::from_ref(&tree));
-    let nodes = ids
-        .into_iter()
-        .filter_map(|id| outline.nodes.get(&id).cloned().map(|node| (id, node)))
-        .collect();
-    Some((
-        position,
-        Outline {
-            roots: vec![tree],
-            nodes,
-        },
-    ))
 }
 
 fn reload(app: &mut App) {
@@ -2818,54 +2648,6 @@ fn mark_updated_ancestors(
         updated.insert(position.node.clone());
     }
     is_updated
-}
-
-fn restore_external_state(
-    outline: &mut Outline,
-    children: &HashMap<NodeId, Vec<Position>>,
-    bodies: &HashMap<NodeId, String>,
-    nodes: &HashMap<NodeId, Node>,
-) {
-    restore_derived_children(&mut outline.roots, children);
-    // The restored children can reference ids that were pruned from
-    // outline.nodes once the live tree stopped using them; reinstate them
-    // from the load-time snapshot so serialization can still resolve them.
-    for (id, node) in nodes {
-        outline
-            .nodes
-            .entry(id.clone())
-            .or_insert_with(|| node.clone());
-    }
-    for (id, body) in bodies {
-        if let Some(node) = outline.nodes.get_mut(id) {
-            node.body.clone_from(body);
-        }
-    }
-}
-
-fn restore_derived_children(
-    positions: &mut [Position],
-    originals: &HashMap<NodeId, Vec<Position>>,
-) {
-    for position in positions {
-        if let Some(children) = originals.get(&position.node) {
-            position.children.clone_from(children);
-        } else {
-            restore_derived_children(&mut position.children, originals);
-        }
-    }
-}
-
-fn referenced_nodes(positions: &[Position]) -> HashSet<NodeId> {
-    let mut result = HashSet::new();
-    fn visit(positions: &[Position], result: &mut HashSet<NodeId>) {
-        for position in positions {
-            result.insert(position.node.clone());
-            visit(&position.children, result);
-        }
-    }
-    visit(positions, &mut result);
-    result
 }
 
 /// Whether cutting `position` would remove the only remaining occurrence of
@@ -4354,14 +4136,6 @@ fn external_format(headline: &str) -> ExternalFormat {
     }
 }
 
-fn format_for_directive(directive: &str) -> ExternalFormat {
-    if directive == "@f" {
-        ExternalFormat::Relative
-    } else {
-        ExternalFormat::Thin
-    }
-}
-
 #[cfg(test)]
 fn thin_filename(headline: &str) -> Option<&str> {
     derived_filename(headline).and_then(|(auto, _, filename)| (!auto).then_some(filename))
@@ -4382,26 +4156,6 @@ fn external_filename(headline: &str) -> Option<&str> {
     )
     .then(|| strip_path_cruft(filename))
     .filter(|filename| !filename.is_empty())
-}
-
-fn comment_delimiters(path: &Path) -> (&'static str, &'static str) {
-    match path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "py" | "pyw" | "sh" | "bash" | "zsh" | "fish" | "rb" | "pl" | "pm" | "r" | "toml"
-        | "yaml" | "yml" => ("#", ""),
-        "rs" | "c" | "h" | "cc" | "cpp" | "cxx" | "hpp" | "java" | "js" | "jsx" | "ts" | "tsx"
-        | "go" | "swift" | "kt" | "kts" | "cs" => ("//", ""),
-        "html" | "htm" | "xml" | "xhtml" | "svg" => ("<!--", "-->"),
-        "css" | "scss" | "less" => ("/*", "*/"),
-        "sql" | "lua" => ("--", ""),
-        "ini" | "cfg" => ("#", ""),
-        _ => ("#", ""),
-    }
 }
 
 fn dynamic_source_location(app: &App, row: &Row) -> Option<SourceLocation> {
@@ -4755,63 +4509,6 @@ mod tests {
             "unknown-language"
         );
         assert_eq!(extension_for_language(None), "txt");
-    }
-
-    #[test]
-    fn restoring_external_state_reinstates_pruned_original_child_nodes() {
-        // A derived container's on-disk children (captured into
-        // original_children/original_nodes before the fresh auto/derived
-        // content is merged in) can reference node ids that auto.rs's
-        // merge_into then prunes out of outline.nodes entirely, since the
-        // live tree no longer uses them. restore_external_state reattaches
-        // those original children before serializing, so it must also bring
-        // their node entries back — otherwise the resulting tree has
-        // positions pointing at node ids missing from outline.nodes, and
-        // serializing it panics.
-        let mut document = LeoDocument::parse(
-            r#"<leo_file><vnodes><v t="container"><vh>@auto x.py</vh><v t="fresh"><vh>fresh</vh></v></v></vnodes><tnodes><t tx="container"></t><t tx="fresh">fresh body</t></tnodes></leo_file>"#,
-        )
-        .unwrap();
-
-        let old_child = NodeId::from("stale-on-disk-child");
-        let original_children = HashMap::from([(
-            NodeId::from("container"),
-            vec![Position {
-                node: old_child.clone(),
-                children: vec![],
-            }],
-        )]);
-        let original_nodes = HashMap::from([(
-            old_child.clone(),
-            Node {
-                id: old_child.clone(),
-                headline: "stale headline".into(),
-                body: "stale body".into(),
-                vnode_attributes: HashMap::new(),
-                tnode_attributes: HashMap::new(),
-            },
-        )]);
-        // Simulates merge_into's blanket prune: the live tree only
-        // references "fresh", so the stale id is already gone from
-        // outline.nodes even though original_children still points at it.
-        assert!(!document.outline.nodes.contains_key(&old_child));
-
-        restore_external_state(
-            &mut document.outline,
-            &original_children,
-            &HashMap::new(),
-            &original_nodes,
-        );
-
-        assert_eq!(
-            document.outline.roots[0].children,
-            vec![Position {
-                node: old_child.clone(),
-                children: vec![],
-            }]
-        );
-        assert!(document.outline.nodes.contains_key(&old_child));
-        assert!(document.to_xml().is_ok());
     }
 
     fn editing_app() -> App {
@@ -6456,49 +6153,6 @@ fn main() {}</t><t tx="b">just notes</t></tnodes></leo_file>"#,
             .find(|span| span.content.as_ref() == "a ")
             .expect("unmatched span present");
         assert_eq!(unmatched.style, original_style);
-    }
-
-    #[test]
-    fn restores_external_children_before_serializing() {
-        let mut roots = vec![Position {
-            node: NodeId::from("file"),
-            children: vec![Position {
-                node: NodeId::from("derived"),
-                children: vec![],
-            }],
-        }];
-        let originals = HashMap::from([(NodeId::from("file"), Vec::new())]);
-        restore_derived_children(&mut roots, &originals);
-        assert!(roots[0].children.is_empty());
-    }
-
-    #[test]
-    fn restores_auto_root_body_before_serializing() {
-        let mut outline = Outline {
-            nodes: [(
-                NodeId::from("file"),
-                leo::Node {
-                    id: NodeId::from("file"),
-                    headline: "@auto x.py".into(),
-                    body: "generated @others body".into(),
-                    vnode_attributes: HashMap::new(),
-                    tnode_attributes: HashMap::new(),
-                },
-            )]
-            .into_iter()
-            .collect(),
-            roots: vec![Position {
-                node: NodeId::from("file"),
-                children: vec![],
-            }],
-        };
-        restore_external_state(
-            &mut outline,
-            &HashMap::new(),
-            &HashMap::from([(NodeId::from("file"), String::new())]),
-            &HashMap::new(),
-        );
-        assert!(outline.nodes[&NodeId::from("file")].body.is_empty());
     }
 
     #[test]

@@ -3,6 +3,8 @@
 use std::{
     collections::{HashMap, HashSet},
     fs,
+    fs::OpenOptions,
+    io::Write,
     path::{Path, PathBuf},
 };
 
@@ -10,8 +12,8 @@ use serde::Serialize;
 use thiserror::Error;
 
 use crate::{
-    DerivedFile, LeoDocument, NodeId, Outline, Position, PositionId, RelativeFile,
-    propagate_clean_changes,
+    DerivedFile, LeoDocument, Node, NodeId, Outline, Position, PositionId, RelativeFile,
+    propagate_clean_changes, referenced_nodes,
 };
 
 #[derive(Debug, Error)]
@@ -33,6 +35,17 @@ pub enum SyncError {
     Sentinel(#[from] crate::SentinelError),
     #[error("sync produced an invalid outline: {0:?}")]
     InvalidOutline(Vec<String>),
+    #[error("{path}: {source}")]
+    Render {
+        path: PathBuf,
+        source: Box<SyncError>,
+    },
+    #[error("{path}: generated invalid {label} file: {source}")]
+    GeneratedInvalid {
+        path: PathBuf,
+        label: &'static str,
+        source: crate::SentinelError,
+    },
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -272,7 +285,7 @@ fn strip_path_cruft(path: &str) -> &str {
     path
 }
 
-fn comment_delimiters(path: &Path) -> (&'static str, &'static str) {
+pub fn comment_delimiters(path: &Path) -> (&'static str, &'static str) {
     match path
         .extension()
         .and_then(|extension| extension.to_str())
@@ -292,6 +305,265 @@ fn comment_delimiters(path: &Path) -> (&'static str, &'static str) {
         // is never written to the external @clean file. A line-comment fallback
         // therefore supports plain-text and otherwise unknown extensions safely.
         _ => ("#", ""),
+    }
+}
+
+/// Which sentinel writer/parser a directive's derived file uses. `@f` is the
+/// only directive using the cub-1-thin relative-depth, optional-gnx grammar
+/// (a leo-cub extension inspired by leo-editor issue #4928, not an official
+/// Leo version tag); every other thin/file directive still uses the 5-thin
+/// grammar in `derived.rs`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ExternalFormat {
+    /// 5-thin sentinels (`@file`/`@thin`/`@file-thin`): absolute `*N*`
+    /// depth, every node keeps its gnx.
+    Thin,
+    /// cub-1-thin sentinels (`@f`, leo-cub's own format tag -- not an
+    /// official Leo version): depth relative to the preceding node, gnx
+    /// omitted except for the root, clones, and UA-bearing nodes.
+    Relative,
+}
+
+pub fn format_for_directive(directive: &str) -> ExternalFormat {
+    if directive == "@f" {
+        ExternalFormat::Relative
+    } else {
+        ExternalFormat::Thin
+    }
+}
+
+/// A `@file`/`@thin`/`@file-thin`/`@f` node whose subtree is authoritative
+/// on disk. `original` is the snapshot captured when the file was last
+/// loaded or written, used to detect whether the live outline has diverged
+/// and needs writing back.
+#[derive(Clone)]
+pub struct WritableExternalFile {
+    pub path: PathBuf,
+    pub start_delimiter: String,
+    pub end_delimiter: String,
+    pub original: Outline,
+    pub format: ExternalFormat,
+}
+
+/// The on-disk state of every writable external file at load time, captured
+/// so a save can restore it into the outline before serializing the `.leo`
+/// file -- the live tree only carries freshly generated derived content, not
+/// what was last read from disk.
+#[derive(Default)]
+pub struct OriginalExternalState {
+    pub children: HashMap<NodeId, Vec<Position>>,
+    pub bodies: HashMap<NodeId, String>,
+    /// Node entries for `children`'s subtree, captured at load time. A
+    /// derived container's live children get replaced by freshly generated
+    /// ones (auto.rs's merge prunes `outline.nodes` down to what the live
+    /// tree references), so by save time the *original* child ids are often
+    /// gone from `outline.nodes` even though `children` still points at
+    /// them. Restoring `children` for serialization needs these node
+    /// bodies/headlines to still resolve.
+    pub nodes: HashMap<NodeId, Node>,
+}
+
+pub struct ExternalUpdate {
+    pub root: NodeId,
+    pub path: PathBuf,
+    pub rendered: String,
+    pub snapshot: Outline,
+}
+
+/// A read-only snapshot of the subtree rooted at `root`'s current position,
+/// used both to detect whether a writable external file has diverged from
+/// what was last read/written, and to restore that subtree's disk-only
+/// structure before serializing the `.leo` file.
+pub fn external_snapshot(outline: &Outline, root: &NodeId) -> Option<(PositionId, Outline)> {
+    fn find(positions: &[Position], parent: &str, root: &NodeId) -> Option<(PositionId, Position)> {
+        for (index, position) in positions.iter().enumerate() {
+            let id = if parent.is_empty() {
+                index.to_string()
+            } else {
+                format!("{parent}/{index}")
+            };
+            if &position.node == root {
+                return Some((PositionId(id), position.clone()));
+            }
+            if let Some(found) = find(&position.children, &id, root) {
+                return Some(found);
+            }
+        }
+        None
+    }
+    let (position, tree) = find(&outline.roots, "", root)?;
+    let ids = referenced_nodes(std::slice::from_ref(&tree));
+    let nodes = ids
+        .into_iter()
+        .filter_map(|id| outline.nodes.get(&id).cloned().map(|node| (id, node)))
+        .collect();
+    Some((
+        position,
+        Outline {
+            roots: vec![tree],
+            nodes,
+        },
+    ))
+}
+
+/// Renders each writable external file whose live subtree has diverged from
+/// `file.original`, without writing anything to disk. Callers should write
+/// the returned updates (see [`write_external_updates`]) and then record
+/// `update.snapshot` back as the new `original` for each entry.
+pub fn prepare_external_updates(
+    outline: &Outline,
+    writable: &HashMap<NodeId, WritableExternalFile>,
+) -> Result<Vec<ExternalUpdate>, SyncError> {
+    let mut updates = Vec::new();
+    for (root, file) in writable {
+        let Some((position, snapshot)) = external_snapshot(outline, root) else {
+            continue;
+        };
+        if snapshot == file.original {
+            continue;
+        }
+        let rendered = match file.format {
+            ExternalFormat::Relative => {
+                let rendered = render_relative(
+                    outline,
+                    &position,
+                    &file.start_delimiter,
+                    &file.end_delimiter,
+                )
+                .map_err(|error| SyncError::Render {
+                    path: file.path.clone(),
+                    source: Box::new(error),
+                })?;
+                RelativeFile::parse(&rendered).map_err(|error| SyncError::GeneratedInvalid {
+                    path: file.path.clone(),
+                    label: "@f",
+                    source: error,
+                })?;
+                rendered
+            }
+            ExternalFormat::Thin => {
+                let rendered = render_thin(
+                    outline,
+                    &position,
+                    &file.start_delimiter,
+                    &file.end_delimiter,
+                )
+                .map_err(|error| SyncError::Render {
+                    path: file.path.clone(),
+                    source: Box::new(error),
+                })?;
+                DerivedFile::parse(&rendered).map_err(|error| SyncError::GeneratedInvalid {
+                    path: file.path.clone(),
+                    label: "thin",
+                    source: error,
+                })?;
+                rendered
+            }
+        };
+        updates.push(ExternalUpdate {
+            root: root.clone(),
+            path: file.path.clone(),
+            rendered,
+            snapshot,
+        });
+    }
+    Ok(updates)
+}
+
+/// Writes every update to its target path, all-or-nothing: each file is
+/// staged next to its target and only renamed into place once every staged
+/// write has succeeded, so a mid-batch failure leaves none of the target
+/// files touched.
+pub fn write_external_updates(updates: &[ExternalUpdate]) -> Result<(), SyncError> {
+    let mut staged = Vec::new();
+    for (index, update) in updates.iter().enumerate() {
+        let name = update
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("external");
+        let temporary = update
+            .path
+            .with_file_name(format!(".{name}.cub-save-{}-{index}", std::process::id()));
+        let permissions = fs::metadata(&update.path)
+            .ok()
+            .map(|metadata| metadata.permissions());
+        let result = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .and_then(|mut file| {
+                file.write_all(update.rendered.as_bytes())?;
+                file.sync_all()
+            })
+            .and_then(|()| {
+                permissions.map_or(Ok(()), |permissions| {
+                    fs::set_permissions(&temporary, permissions)
+                })
+            });
+        if let Err(error) = result {
+            for path in &staged {
+                let _ = fs::remove_file(path);
+            }
+            let _ = fs::remove_file(&temporary);
+            return Err(SyncError::Io {
+                path: update.path.clone(),
+                source: error,
+            });
+        }
+        staged.push(temporary);
+    }
+    for (update, temporary) in updates.iter().zip(&staged) {
+        if let Err(error) = fs::rename(temporary, &update.path) {
+            for path in &staged {
+                let _ = fs::remove_file(path);
+            }
+            return Err(SyncError::Io {
+                path: update.path.clone(),
+                source: error,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Restores the disk-only children and bodies captured in `children`/`bodies`
+/// (and their supporting `nodes` entries) into `outline`, undoing the
+/// in-memory merge so the outline can be serialized to the `.leo` file
+/// without persisting the freshly generated derived content.
+pub fn restore_external_state(
+    outline: &mut Outline,
+    children: &HashMap<NodeId, Vec<Position>>,
+    bodies: &HashMap<NodeId, String>,
+    nodes: &HashMap<NodeId, Node>,
+) {
+    restore_derived_children(&mut outline.roots, children);
+    // The restored children can reference ids that were pruned from
+    // outline.nodes once the live tree stopped using them; reinstate them
+    // from the load-time snapshot so serialization can still resolve them.
+    for (id, node) in nodes {
+        outline
+            .nodes
+            .entry(id.clone())
+            .or_insert_with(|| node.clone());
+    }
+    for (id, body) in bodies {
+        if let Some(node) = outline.nodes.get_mut(id) {
+            node.body.clone_from(body);
+        }
+    }
+}
+
+fn restore_derived_children(
+    positions: &mut [Position],
+    originals: &HashMap<NodeId, Vec<Position>>,
+) {
+    for position in positions {
+        if let Some(children) = originals.get(&position.node) {
+            position.children.clone_from(children);
+        } else {
+            restore_derived_children(&mut position.children, originals);
+        }
     }
 }
 
@@ -865,5 +1137,105 @@ mod tests {
         assert_eq!(doc.outline.roots[0].children[0].node, NodeId::from("ord"));
         assert_eq!(doc.outline.nodes[&NodeId::from("ord")].body, "new body\n");
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn restores_external_children_before_serializing() {
+        let mut roots = vec![Position {
+            node: NodeId::from("file"),
+            children: vec![Position {
+                node: NodeId::from("derived"),
+                children: vec![],
+            }],
+        }];
+        let originals = HashMap::from([(NodeId::from("file"), Vec::new())]);
+        restore_derived_children(&mut roots, &originals);
+        assert!(roots[0].children.is_empty());
+    }
+
+    #[test]
+    fn restores_auto_root_body_before_serializing() {
+        let mut outline = Outline {
+            nodes: [(
+                NodeId::from("file"),
+                Node {
+                    id: NodeId::from("file"),
+                    headline: "@auto x.py".into(),
+                    body: "generated @others body".into(),
+                    vnode_attributes: HashMap::new(),
+                    tnode_attributes: HashMap::new(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            roots: vec![Position {
+                node: NodeId::from("file"),
+                children: vec![],
+            }],
+        };
+        restore_external_state(
+            &mut outline,
+            &HashMap::new(),
+            &HashMap::from([(NodeId::from("file"), String::new())]),
+            &HashMap::new(),
+        );
+        assert!(outline.nodes[&NodeId::from("file")].body.is_empty());
+    }
+
+    #[test]
+    fn restoring_external_state_reinstates_pruned_original_child_nodes() {
+        // A derived container's on-disk children (captured into
+        // original_children/original_nodes before the fresh auto/derived
+        // content is merged in) can reference node ids that auto.rs's
+        // merge_into then prunes out of outline.nodes entirely, since the
+        // live tree no longer uses them. restore_external_state reattaches
+        // those original children before serializing, so it must also bring
+        // their node entries back -- otherwise the resulting tree has
+        // positions pointing at node ids missing from outline.nodes, and
+        // serializing it panics.
+        let mut document = LeoDocument::parse(
+            r#"<leo_file><vnodes><v t="container"><vh>@auto x.py</vh><v t="fresh"><vh>fresh</vh></v></v></vnodes><tnodes><t tx="container"></t><t tx="fresh">fresh body</t></tnodes></leo_file>"#,
+        )
+        .unwrap();
+
+        let old_child = NodeId::from("stale-on-disk-child");
+        let original_children = HashMap::from([(
+            NodeId::from("container"),
+            vec![Position {
+                node: old_child.clone(),
+                children: vec![],
+            }],
+        )]);
+        let original_nodes = HashMap::from([(
+            old_child.clone(),
+            Node {
+                id: old_child.clone(),
+                headline: "stale headline".into(),
+                body: "stale body".into(),
+                vnode_attributes: HashMap::new(),
+                tnode_attributes: HashMap::new(),
+            },
+        )]);
+        // Simulates merge_into's blanket prune: the live tree only
+        // references "fresh", so the stale id is already gone from
+        // outline.nodes even though original_children still points at it.
+        assert!(!document.outline.nodes.contains_key(&old_child));
+
+        restore_external_state(
+            &mut document.outline,
+            &original_children,
+            &HashMap::new(),
+            &original_nodes,
+        );
+
+        assert_eq!(
+            document.outline.roots[0].children,
+            vec![Position {
+                node: old_child.clone(),
+                children: vec![],
+            }]
+        );
+        assert!(document.outline.nodes.contains_key(&old_child));
+        assert!(document.to_xml().is_ok());
     }
 }
