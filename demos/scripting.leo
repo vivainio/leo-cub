@@ -11,6 +11,9 @@
     <v t="demo.1787246563.226321852.2"><vh>@action nushell</vh></v>
     <v t="demo.1787246563.226321852.3"><vh>@action python</vh></v>
   </v>
+  <v t="cub.1787246563.998877665"><vh>Insert child at selection demo</vh>
+    <v t="demo.1787246563.998877665.1"><vh>@action new child</vh></v>
+  </v>
 </vnodes>
 <tnodes>
   <t tx="demo.1787246563.226321852.1">@language bash
@@ -98,6 +101,18 @@ batch = {
 }
 
 print(json.dumps(batch))
+</t>
+  <t tx="demo.1787246563.998877665.1">@language bash
+@apply
+# CUB_GNX/CUB_PARENT_GNX/CUB_HEADLINE/CUB_POSITION/CUB_PATH/CUB_DOC describe
+# whichever node was selected when this action was invoked -- here, insert
+# a child under it.
+jq -n --arg gnx &quot;$CUB_GNX&quot; --arg headline &quot;$CUB_HEADLINE&quot; '{
+  operations: [
+    { op: &quot;insert-tree&quot;, parent: $gnx,
+      tree: { &quot;New child&quot;: { &quot;_body&quot;: &quot;child of \($headline)&quot; } } }
+  ]
+}'
 </t>
 </tnodes>
 </leo_file>

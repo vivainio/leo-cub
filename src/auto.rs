@@ -6,7 +6,7 @@ use streaming_iterator::StreamingIterator;
 use thiserror::Error;
 use tree_sitter::{Language, Node as TsNode, Parser, Query, QueryCursor};
 
-use crate::{Node, NodeId, Outline, Position};
+use crate::{Node, NodeId, Outline, Position, referenced_nodes};
 
 #[derive(Debug, Error)]
 pub enum AutoError {
@@ -1202,18 +1202,6 @@ fn slice_lines<'a>(source: &'a str, starts: &[usize], start: usize, end: usize) 
 
 fn line_offset(source: &str, starts: &[usize], line: usize) -> usize {
     starts.get(line).copied().unwrap_or(source.len())
-}
-
-fn referenced_nodes(positions: &[Position]) -> std::collections::HashSet<NodeId> {
-    fn visit(positions: &[Position], result: &mut std::collections::HashSet<NodeId>) {
-        for position in positions {
-            result.insert(position.node.clone());
-            visit(&position.children, result);
-        }
-    }
-    let mut result = std::collections::HashSet::new();
-    visit(positions, &mut result);
-    result
 }
 
 #[cfg(test)]
