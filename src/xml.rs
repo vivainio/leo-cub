@@ -75,6 +75,10 @@ impl LeoDocument {
         let mut outline = Outline::default();
         let mut stack: Vec<Position> = vec![];
         let mut first_seen = HashSet::new();
+        // A clone's later occurrences are written as an empty `<v t="id"></v>`
+        // (no nested children), relying on the reader to reuse the subtree
+        // recorded for that id's first, fully-written occurrence.
+        let mut children_by_id: HashMap<NodeId, Vec<Position>> = HashMap::new();
         let mut in_vnodes = false;
         let mut in_tnodes = false;
         let mut current_vh: Option<NodeId> = None;
@@ -94,7 +98,7 @@ impl LeoDocument {
                             .ok_or_else(|| LeoXmlError::Invalid("<v> without t".into()))?,
                     );
                     let vnode_attributes = attrs.into_iter().filter(|(k, _)| k != "t").collect();
-                    if first_seen.insert(id.clone()) {
+                    let children = if first_seen.insert(id.clone()) {
                         outline.nodes.insert(
                             id.clone(),
                             Node {
@@ -105,11 +109,11 @@ impl LeoDocument {
                                 tnode_attributes: HashMap::new(),
                             },
                         );
-                    }
-                    stack.push(Position {
-                        node: id,
-                        children: vec![],
-                    });
+                        vec![]
+                    } else {
+                        children_by_id.get(&id).cloned().unwrap_or_default()
+                    };
+                    stack.push(Position { node: id, children });
                 }
                 Event::Empty(e) if in_vnodes && e.name().as_ref() == b"v" => {
                     let id = attributes(&e)?;
@@ -131,6 +135,9 @@ impl LeoDocument {
                     let p = stack
                         .pop()
                         .ok_or_else(|| LeoXmlError::Invalid("unbalanced <v>".into()))?;
+                    children_by_id
+                        .entry(p.node.clone())
+                        .or_insert_with(|| p.children.clone());
                     attach(p, &mut stack, &mut outline.roots);
                 }
                 Event::Start(e) if in_vnodes && e.name().as_ref() == b"vh" => {
@@ -394,6 +401,43 @@ mod tests {
         assert_eq!(reparsed.outline.roots.len(), 1);
         let root = &reparsed.outline.roots[0].node;
         assert_eq!(reparsed.outline.nodes[root].headline, "Project & notes");
+    }
+
+    #[test]
+    fn clone_occurrences_all_retain_their_children() {
+        let source = r#"<?xml version="1.0" encoding="utf-8"?>
+<leo_file>
+<vnodes>
+<v t="root"><vh>Root</vh>
+<v t="a"><vh>A</vh>
+<v t="child"><vh>Child</vh></v>
+</v>
+<v t="a"></v>
+</v>
+</vnodes>
+<tnodes>
+<t tx="root"></t>
+<t tx="a"></t>
+<t tx="child"></t>
+</tnodes>
+</leo_file>
+"#;
+        let document = LeoDocument::parse(source).unwrap();
+        let root = &document.outline.roots[0];
+        assert_eq!(
+            root.children.len(),
+            2,
+            "both occurrences of the clone should attach under root"
+        );
+        for occurrence in &root.children {
+            assert_eq!(occurrence.node, NodeId::from("a"));
+            assert_eq!(
+                occurrence.children.len(),
+                1,
+                "every occurrence of the cloned node should carry its child"
+            );
+            assert_eq!(occurrence.children[0].node, NodeId::from("child"));
+        }
     }
 
     #[test]
