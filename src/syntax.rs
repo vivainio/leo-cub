@@ -86,6 +86,7 @@ impl SyntaxHighlighter {
                         .collect()
                 })
                 .unwrap_or_else(|_| vec![Span::raw(source_line.trim_end_matches('\n').to_owned())]);
+            let spans = leo_directive_spans(source_line).unwrap_or(spans);
             match fence_lines
                 .as_ref()
                 .and_then(|fence_lines| fence_lines.get(line_index))
@@ -337,6 +338,49 @@ fn markdown_scope_style(scopes: &str) -> Option<Style> {
     Some(style)
 }
 
+/// Body-level Leo directives (`@language`, `@tabwidth`, `@others`,
+/// `@apply`, `@nonl`, `@first`, `@last`) aren't part of any target
+/// language's grammar, so no grammar highlights them meaningfully on its
+/// own -- not even a hand-picked one like the bundled Nushell syntax, and
+/// syntect's built-in defaults (Python, Rust, Bash, JavaScript, ...) can't
+/// be patched from here at all. Overriding a directive line's rendering
+/// with the same cyan used for headline directives (see `tui::headline_spans`)
+/// keeps it visually distinct regardless of which language is active,
+/// instead of needing every grammar -- vendored or not -- to special-case
+/// Leo's syntax.
+fn leo_directive_spans(line: &str) -> Option<Vec<Span<'static>>> {
+    const DIRECTIVES: &[&str] = &[
+        "@language",
+        "@tabwidth",
+        "@others",
+        "@apply",
+        "@nonl",
+        "@first",
+        "@last",
+    ];
+    let trimmed = line.trim_end_matches(['\n', '\r']);
+    let content = trimmed.trim_start();
+    let leading = trimmed.len() - content.len();
+    let directive_len = content.find(char::is_whitespace).unwrap_or(content.len());
+    let directive = &content[..directive_len];
+    if !DIRECTIVES.contains(&directive) {
+        return None;
+    }
+    let mut spans = Vec::with_capacity(3);
+    if leading > 0 {
+        spans.push(Span::raw(trimmed[..leading].to_owned()));
+    }
+    spans.push(Span::styled(
+        directive.to_owned(),
+        Style::default().fg(Color::Cyan),
+    ));
+    let remainder = &content[directive_len..];
+    if !remainder.is_empty() {
+        spans.push(Span::raw(remainder.to_owned()));
+    }
+    Some(spans)
+}
+
 pub(crate) fn language_directive(body: &str) -> Option<&str> {
     body.lines().find_map(|line| {
         line.trim_start()
@@ -356,6 +400,31 @@ mod tests {
             Some("rust")
         );
         assert_eq!(language_directive("let language = rust;"), None);
+    }
+
+    #[test]
+    fn directive_lines_are_highlighted_the_same_regardless_of_language() {
+        // "nu" has no syntect grammar of its own for anything but Nushell
+        // code, and "cobol" has no bundled grammar at all, so both bodies
+        // fall back to different (or no) syntax highlighting for their
+        // code -- but the directive lines should render identically in
+        // both, since neither grammar can be expected to know about them.
+        let nu = SyntaxHighlighter::new().highlight_with_language(
+            "@language nu\n@apply\nls\n",
+            None,
+            None,
+        );
+        let cobol = SyntaxHighlighter::new().highlight_with_language(
+            "@language cobol\n@apply\nDISPLAY 'HI'.\n",
+            None,
+            None,
+        );
+        for text in [&nu, &cobol] {
+            assert_eq!(text.lines[0].spans[0].content, "@language");
+            assert_eq!(text.lines[0].spans[0].style.fg, Some(Color::Cyan));
+            assert_eq!(text.lines[1].spans[0].content, "@apply");
+            assert_eq!(text.lines[1].spans[0].style.fg, Some(Color::Cyan));
+        }
     }
 
     #[test]
