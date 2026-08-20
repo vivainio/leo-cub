@@ -18,6 +18,7 @@ pub enum InspectSelector<'a> {
     Gnx(&'a str),
     Position(&'a PositionId),
     File(&'a str),
+    Headline(&'a str),
 }
 
 #[derive(Debug, Error, PartialEq)]
@@ -28,6 +29,8 @@ pub enum InspectError {
     NoPosition(String),
     #[error("no external subtree matches {0:?}")]
     NoFile(String),
+    #[error("{0}")]
+    Headline(String),
     #[error("failed to parse derived file {path}: {message}")]
     Derived { path: PathBuf, message: String },
     #[error("failed to parse @auto file {path}: {message}")]
@@ -601,6 +604,12 @@ pub fn select_subtrees(
             }
             matches
         }
+        InspectSelector::Headline(path) => vec![
+            outline
+                .resolve_headline_position(path)
+                .cloned()
+                .map_err(|error| InspectError::Headline(error.to_string()))?,
+        ],
     };
 
     let mut referenced = HashSet::new();
@@ -836,6 +845,22 @@ mod tests {
         assert_eq!(selected.roots.len(), 1);
         let selected = select_subtrees(&outline(), InspectSelector::File("main.rs")).unwrap();
         assert_eq!(selected.roots.len(), 2);
+    }
+
+    #[test]
+    fn headline_selects_only_the_one_occurrence_it_names() {
+        let selected =
+            select_subtrees(&outline(), InspectSelector::Headline("paths/@file main.rs")).unwrap();
+        assert_eq!(selected.roots.len(), 1);
+        assert_eq!(selected.roots[0].node, NodeId("file".into()));
+        assert!(selected.nodes.contains_key(&NodeId("child".into())));
+    }
+
+    #[test]
+    fn headline_reports_not_found_and_ambiguous_paths() {
+        let error = select_subtrees(&outline(), InspectSelector::Headline("nope")).unwrap_err();
+        assert!(matches!(error, InspectError::Headline(_)));
+        assert!(error.to_string().contains("not found"));
     }
 
     #[test]
