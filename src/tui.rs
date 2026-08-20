@@ -1251,6 +1251,30 @@ fn resolved_directory(app: &App, row: &Row) -> PathBuf {
     path
 }
 
+/// Builds the slash-separated headline path (see `Outline::resolve_headline_path`)
+/// from the outline roots down to `row`, escaping any literal `/` or `\` in
+/// a headline so the result round-trips back through that resolver.
+fn headline_path(app: &App, row: &Row) -> String {
+    let mut parts = Vec::new();
+    let mut prefix = String::new();
+    for component in row.position.0.split('/') {
+        if !prefix.is_empty() {
+            prefix.push('/');
+        }
+        prefix.push_str(component);
+        let Some(position) = app.document.outline.position(&PositionId(prefix.clone())) else {
+            break;
+        };
+        let headline = &app.document.outline.nodes[&position.node].headline;
+        parts.push(escape_headline_path_component(headline));
+    }
+    parts.join("/")
+}
+
+fn escape_headline_path_component(headline: &str) -> String {
+    headline.replace('\\', "\\\\").replace('/', "\\/")
+}
+
 /// Maps an `@language` directive (see `syntax::language_directive`) to the
 /// interpreter used to run an action's body. Unrecognized or missing
 /// languages fall back to the shell, so a plain script needs no directive.
@@ -3030,7 +3054,7 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full
             Line::from("Shift-F          Show full-width outline"),
             Line::from("s                Toggle split direction"),
             Line::from("c/x              Copy/cut selected trees"),
-            Line::from("Shift-C          Copy path:line to clipboard"),
+            Line::from("Shift-C          Copy path:line (dir for @path) to clipboard"),
             Line::from("v / Shift-V      Paste copy / paste clone"),
             Line::from("i                Insert a sibling"),
             Line::from("h                Rename the headline"),
@@ -3055,7 +3079,7 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full
             Line::from("s                Toggle split direction"),
             Line::from("Shift-W          Toggle body word wrap"),
             Line::from("c/x/v/V          Copy/cut/paste/clone"),
-            Line::from("Shift-C          Copy path:line to clipboard"),
+            Line::from("Shift-C          Copy path:line (dir for @path) to clipboard"),
             Line::from("Ctrl-P           Find a headline"),
             Line::from("a                Command palette"),
             Line::from("Shift-A          Run an @action node"),
@@ -3086,7 +3110,7 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full
             Line::from("i                Insert a sibling"),
             Line::from("h                Rename the headline"),
             Line::from("c                Copy selected tree"),
-            Line::from("Shift-C          Copy path:line to clipboard"),
+            Line::from("Shift-C          Copy path:line (dir for @path) to clipboard"),
             Line::from("x                Cut selected tree"),
             Line::from("v / Shift-V      Paste copy / paste clone"),
             Line::from("Ctrl-↑↓←→        Move selected tree(s)"),
@@ -3535,16 +3559,20 @@ fn copy_location_to_clipboard(app: &mut App) {
         return;
     };
     let headline = app.document.outline.nodes[&row.node].headline.clone();
-    let text = match dynamic_source_location(app, &row)
-        .or_else(|| app.source_locations.get(&row.position).cloned())
-        .or_else(|| app.source_nodes.get(&row.node).cloned())
-    {
-        Some(location) => format!(
-            "{}:{}: [{headline}]",
-            display_path(&location.path),
-            location.line
-        ),
-        None => format!("{}: [{headline}]", display_path(&app.path)),
+    let text = if path_directive(&headline).is_some() {
+        display_path(&resolved_directory(app, &row))
+    } else {
+        match dynamic_source_location(app, &row)
+            .or_else(|| app.source_locations.get(&row.position).cloned())
+            .or_else(|| app.source_nodes.get(&row.node).cloned())
+        {
+            Some(location) => format!(
+                "{}:{}: [{headline}]",
+                display_path(&location.path),
+                location.line
+            ),
+            None => format!("{}: {}", display_path(&app.path), headline_path(app, &row)),
+        }
     };
     match execute!(
         io::stdout(),
@@ -5647,13 +5675,50 @@ fn main() {}</t><t tx="b">just notes</t></tnodes></leo_file>"#,
     }
 
     #[test]
-    fn copying_location_falls_back_to_the_leo_file_when_no_source_is_known() {
+    fn copying_location_falls_back_to_the_leo_file_and_headline_path_when_no_source_is_known() {
         let mut app = editing_app();
         app.path = PathBuf::from("/workspace/test.leo");
 
         copy_location_to_clipboard(&mut app);
 
-        assert_eq!(app.status, "copied to clipboard: /workspace/test.leo: [A]");
+        assert_eq!(app.status, "copied to clipboard: /workspace/test.leo: A");
+    }
+
+    #[test]
+    fn copying_location_headline_path_includes_ancestors_and_escapes_slashes() {
+        let mut app = editing_app();
+        app.path = PathBuf::from("/workspace/test.leo");
+        app.document
+            .outline
+            .nodes
+            .get_mut(&NodeId::from("b"))
+            .unwrap()
+            .headline = "fix a/b bug".into();
+        app.selected = 1;
+
+        copy_location_to_clipboard(&mut app);
+
+        assert_eq!(
+            app.status,
+            r"copied to clipboard: /workspace/test.leo: A/fix a\/b bug"
+        );
+    }
+
+    #[test]
+    fn copying_location_on_a_path_node_copies_its_resolved_directory() {
+        let mut app = editing_app();
+        app.path = PathBuf::from("/workspace/test.leo");
+        app.document
+            .outline
+            .nodes
+            .get_mut(&NodeId::from("b"))
+            .unwrap()
+            .headline = "@path src/core".into();
+        app.selected = 1;
+
+        copy_location_to_clipboard(&mut app);
+
+        assert_eq!(app.status, "copied to clipboard: /workspace/src/core");
     }
 
     #[test]

@@ -121,6 +121,11 @@ enum Command {
         /// Show the subtree at this occurrence path (for example, 0/2/1).
         #[arg(long, conflicts_with_all = ["external", "gnx"])]
         position: Option<String>,
+        /// Show the subtree at this slash-separated headline path (for
+        /// example, "Project/Tasks/First task"), resolved the same way
+        /// "cub add" resolves its paths.
+        #[arg(long, conflicts_with_all = ["external", "gnx", "position"])]
+        headline: Option<String>,
         /// Search headlines and bodies; repeat for OR matching.
         #[arg(long, value_name = "REGEX")]
         search: Vec<String>,
@@ -140,6 +145,11 @@ enum Command {
         /// Show the subtree matching this external filename.
         #[arg(long, conflicts_with_all = ["gnx", "position"])]
         external: Option<String>,
+        /// Show the subtree at this slash-separated headline path (for
+        /// example, "Project/Tasks/First task"), resolved the same way
+        /// "cub add" resolves its paths.
+        #[arg(long, conflicts_with_all = ["external", "gnx", "position"])]
+        headline: Option<String>,
         /// Mark this occurrence and its ancestors as current.
         #[arg(long)]
         current: Option<String>,
@@ -350,6 +360,7 @@ fn main() -> Result<()> {
             external,
             gnx,
             position,
+            headline,
             search,
             format,
         } => {
@@ -375,6 +386,8 @@ fn main() -> Result<()> {
                 select_subtrees(&outline, InspectSelector::Gnx(gnx))?
             } else if let Some(position) = position {
                 select_subtrees(&outline, InspectSelector::Position(&PositionId(position)))?
+            } else if let Some(headline) = headline.as_deref() {
+                select_subtrees(&outline, InspectSelector::Headline(headline))?
             } else {
                 outline
             };
@@ -407,6 +420,7 @@ fn main() -> Result<()> {
             position,
             gnx,
             external,
+            headline,
             current,
             collapsed,
             expand,
@@ -423,6 +437,8 @@ fn main() -> Result<()> {
                 select_subtrees(&outline, InspectSelector::Gnx(gnx))?
             } else if let Some(position) = position {
                 select_subtrees(&outline, InspectSelector::Position(&PositionId(position)))?
+            } else if let Some(headline) = headline.as_deref() {
+                select_subtrees(&outline, InspectSelector::Headline(headline))?
             } else {
                 outline
             };
