@@ -1589,6 +1589,13 @@ fn strip_apply_directive(body: &str) -> String {
 /// `Engine::eval`'s parse/runtime failure) becomes "stderr" with status `1`,
 /// and a clean run is status `0`. No outline access yet -- that's a
 /// follow-up; this only proves scripts can run in-process at all.
+///
+/// Deliberately doesn't receive the `CUB_GNX`/`CUB_HEADLINE`/etc. env vars
+/// `run_action`'s subprocess path sets: those exist because a spawned
+/// process has no other way to learn its target. A Rhai script runs
+/// in-process, so once it gets outline access, its target's identity
+/// belongs on that live object (e.g. a `target` position handle), not
+/// duplicated as string env vars.
 fn run_rhai_script(body: &str) -> (Option<i32>, String, String) {
     let output = Rc::new(RefCell::new(String::new()));
     let print_output = output.clone();
