@@ -12,6 +12,7 @@
 | `cub apply FILE OPS.json` | Apply a transactional JSON operation batch. |
 | `cub diff BEFORE AFTER` | Compare two outline files. |
 | `cub inspect-derived FILE` | Inspect a thin derived file. |
+| `cub run SCRIPT.rhai` | Run a [Rhai](../workflows/scripting.md) script against an outline. |
 | `cub FILE` | Browse an outline interactively (shorthand for `cub tui FILE`). |
 | `cub tui FILE` | Browse an outline interactively using the explicit subcommand. |
 | `cub install-skills` | Install the bundled local agent skill. |

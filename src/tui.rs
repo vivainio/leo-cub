@@ -531,22 +531,6 @@ pub fn run(path: PathBuf, load_derived: bool) -> Result<()> {
     with_real_terminal(|terminal| event_loop(terminal, &mut app))
 }
 
-/// Replays `steps` against a real terminal (spawning external editors for
-/// any key that opens one, same as interactive use) and then, unless the
-/// script quit the app, hands control back to the keyboard -- for
-/// reproducing a bug by scripting the steps that lead up to it and then
-/// taking over by hand right where it happens.
-pub fn run_with_script(path: PathBuf, load_derived: bool, script_path: PathBuf) -> Result<()> {
-    let script = fs::read_to_string(&script_path)
-        .with_context(|| format!("read script {}", script_path.display()))?;
-    let steps = parse_script_jsonl(&script)?;
-    let mut app = build_app(path, load_derived)?;
-    with_real_terminal(|terminal| {
-        run_steps_live(&mut app, &mut *terminal, &steps)?;
-        event_loop(terminal, &mut app)
-    })
-}
-
 enum KeyOutcome {
     Continue,
     Quit,
@@ -4285,24 +4269,10 @@ fn is_clone_root(outline: &Outline, position: &PositionId, id: &NodeId) -> bool 
     count > parent_count
 }
 
-/// One step of a scripted TUI interaction: used directly as `Vec<Step>`
-/// literals in regression tests, and loaded from a JSONL file for
-/// `cub tui file.leo --script repro.jsonl` bug-repro replay.
-///
-/// A script is line-delimited JSON, one step object per line; blank lines
-/// and lines starting with `#` are ignored. For example:
-///
-/// ```text
-/// {"type": "key", "key": "j"}
-/// {"type": "key", "key": "a"}
-/// {"type": "type", "text": "grep"}
-/// {"type": "key", "key": "Enter"}
-/// {"type": "assert_status", "text": "grep"}
-/// ```
-// Read by apply_step_headless/apply_step_live, which are only reachable
-// from #[cfg(test)] regression tests and the (feature-gated) --script CLI
-// path respectively; a plain non-test build of one without the other sees
-// some fields/functions here as unused.
+/// One step of a scripted TUI interaction, used as `Vec<Step>` literals in
+/// regression tests to drive `App` headlessly.
+// Read by apply_step_headless, only reachable from #[cfg(test)] regression
+// tests; a non-test build sees these fields/functions as unused.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -4322,21 +4292,17 @@ enum Step {
     /// virtual clock.
     Wait { ms: u64 },
     /// Resize the headless backend, e.g. to reproduce a narrow-terminal
-    /// bug. No effect when replaying live against a real terminal, whose
-    /// size is up to the OS.
+    /// bug.
     Resize { cols: u16, rows: u16 },
     /// Render the current frame and write it to `path` as plain text.
-    /// Headless-only: skipped with a warning on a live replay.
     Screenshot { path: PathBuf },
-    /// Fail unless the rendered screen contains `text`. Headless-only:
-    /// skipped with a warning on a live replay.
+    /// Fail unless the rendered screen contains `text`.
     AssertContains { text: String },
-    /// Fail if the rendered screen contains `text`. Headless-only: skipped
-    /// with a warning on a live replay.
+    /// Fail if the rendered screen contains `text`.
     AssertNotContains { text: String },
-    /// Fail unless the status line contains `text`. Works in both modes.
+    /// Fail unless the status line contains `text`.
     AssertStatus { text: String },
-    /// No-op; documents intent in a script file.
+    /// No-op; documents intent in a script.
     Comment {
         #[allow(dead_code)]
         text: String,
@@ -4390,20 +4356,6 @@ fn parse_key(notation: &str) -> Result<KeyEvent> {
         other => bail!("unrecognized key notation {notation:?} (key part {other:?})"),
     };
     Ok(KeyEvent::new(code, modifiers))
-}
-
-/// Parses a script file: one JSON [`Step`] per line, blank lines and `#`
-/// comment lines ignored.
-fn parse_script_jsonl(input: &str) -> Result<Vec<Step>> {
-    input
-        .lines()
-        .map(str::trim)
-        .enumerate()
-        .filter(|(_, line)| !line.is_empty() && !line.starts_with('#'))
-        .map(|(i, line)| {
-            serde_json::from_str(line).with_context(|| format!("script line {}: {line}", i + 1))
-        })
-        .collect()
 }
 
 /// Renders `buffer` as plain text, one line per row, trailing blanks on
@@ -4478,58 +4430,6 @@ fn apply_step_headless(
             if screen.contains(text.as_str()) {
                 bail!("expected screen not to contain {text:?}; got:\n{screen}");
             }
-        }
-        Step::AssertStatus { text } => {
-            if !app.status.contains(text.as_str()) {
-                bail!("expected status to contain {text:?}; got {:?}", app.status);
-            }
-        }
-    }
-    terminal.draw(|frame| draw(frame, app))?;
-    Ok(())
-}
-
-/// Replays `steps` against a real terminal for CLI bug-repro use: 'o' and
-/// Enter open a real external editor exactly as they would interactively.
-/// Screenshot/assert-on-screen steps have no buffer to read here, so they
-/// print a warning and are skipped rather than failing the replay.
-fn run_steps_live(
-    app: &mut App,
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    steps: &[Step],
-) -> Result<()> {
-    terminal.draw(|frame| draw(frame, app))?;
-    for (i, step) in steps.iter().enumerate() {
-        apply_step_live(app, terminal, step)
-            .with_context(|| format!("script step {} failed: {step:?}", i + 1))?;
-    }
-    Ok(())
-}
-
-fn apply_step_live(
-    app: &mut App,
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    step: &Step,
-) -> Result<()> {
-    match step {
-        Step::Key { key } => {
-            let event = parse_key(key)?;
-            handle_key(app, event, Some(&mut *terminal));
-        }
-        Step::Type { text } => {
-            for ch in text.chars() {
-                handle_key(
-                    app,
-                    KeyEvent::new(KeyCode::Char(ch), KeyModifiers::empty()),
-                    Some(&mut *terminal),
-                );
-            }
-        }
-        Step::Wait { ms } => std::thread::sleep(Duration::from_millis(*ms)),
-        Step::Resize { .. } => {}
-        Step::Comment { .. } => {}
-        Step::Screenshot { .. } | Step::AssertContains { .. } | Step::AssertNotContains { .. } => {
-            eprintln!("script: {step:?} skipped (no headless buffer to read on a live terminal)");
         }
         Step::AssertStatus { text } => {
             if !app.status.contains(text.as_str()) {
@@ -4915,11 +4815,7 @@ mod tests {
         let output = app.action_output.as_ref().expect("action produced output");
         assert_eq!(output.interpreter, "rhai");
         assert_eq!(output.status, Some(0));
-        assert!(
-            output.text.contains("hello from rhai"),
-            "{:?}",
-            output.text
-        );
+        assert!(output.text.contains("hello from rhai"), "{:?}", output.text);
     }
 
     #[test]
@@ -6698,31 +6594,6 @@ fn main() {}</t><t tx="b">just notes</t></tnodes></leo_file>"#,
                 .any(|node| node.headline == "New Node Title")
         );
         assert!(app.dirty);
-    }
-
-    #[test]
-    fn script_steps_load_from_jsonl_and_drive_the_same_flow() {
-        let script = r#"
-            # comment lines and blank lines are ignored
-
-            {"type": "key", "key": "i"}
-            {"type": "type", "text": "From JSONL"}
-            {"type": "key", "key": "Enter"}
-            {"type": "assert_contains", "text": "From JSONL"}
-            {"type": "key", "key": "Esc"}
-        "#;
-        let steps = parse_script_jsonl(script).unwrap();
-        let mut app = editing_app();
-
-        run_script(&mut app, &steps).unwrap();
-
-        assert!(
-            app.document
-                .outline
-                .nodes
-                .values()
-                .any(|node| node.headline == "From JSONL")
-        );
     }
 
     #[test]
