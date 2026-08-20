@@ -20,8 +20,8 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use leo::{
-    AutoFile, DerivedFile, LeoDocument, Node, NodeId, Outline, Position, PositionId, RelativeFile,
-    render_relative, render_thin, search_outline,
+    AutoFile, DerivedFile, LeoDocument, Node, NodeId, OperationBatch, Outline, Position,
+    PositionId, RelativeFile, render_relative, render_thin, search_outline,
 };
 use ratatui::{
     Terminal,
@@ -1302,20 +1302,25 @@ fn escape_headline_path_component(headline: &str) -> String {
 }
 
 /// Maps an `@language` directive (see `syntax::language_directive`) to the
-/// interpreter used to run an action's body. Unrecognized or missing
-/// languages fall back to the shell, so a plain script needs no directive.
+/// interpreter used to run an action's body, plus any fixed arguments
+/// needed to make that interpreter read a full script from stdin (most
+/// interpreters do this with no arguments at all; `nu` needs to be told to,
+/// since a bare `nu` with piped stdin tries to start an interactive REPL).
+/// Unrecognized or missing languages fall back to the shell, so a plain
+/// script needs no directive.
 fn interpreter_for(
     #[cfg_attr(not(feature = "syntax"), allow(unused_variables))] language: Option<&str>,
-) -> &'static str {
+) -> (&'static str, &'static [&'static str]) {
     #[cfg(feature = "syntax")]
     match language.unwrap_or("sh") {
-        "python" | "python3" => return "python3",
-        "javascript" | "js" | "node" => return "node",
-        "ruby" => return "ruby",
-        "bash" => return "bash",
+        "python" | "python3" => return ("python3", &[]),
+        "javascript" | "js" | "node" => return ("node", &[]),
+        "ruby" => return ("ruby", &[]),
+        "bash" => return ("bash", &[]),
+        "nu" | "nushell" => return ("nu", &["--stdin", "-c", "source /dev/stdin"]),
         _ => {}
     }
-    "sh"
+    ("sh", &[])
 }
 
 /// Removes `@language xxx` directive lines from a body before it is run as
@@ -1330,6 +1335,23 @@ fn strip_language_directive(body: &str) -> String {
                 .is_some_and(|rest| rest.split_whitespace().next().is_some());
             !is_directive
         })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// An `@action` body containing a bare `@apply` directive line asks for its
+/// own stdout, once the script finishes, to be parsed as a `cub apply`-style
+/// JSON operation batch and applied straight to the outline in memory,
+/// instead of being shown as plain output text.
+fn wants_apply(body: &str) -> bool {
+    body.lines().any(|line| line.trim() == "@apply")
+}
+
+/// Removes bare `@apply` directive lines before the body is run as a
+/// script, the same way `strip_language_directive` does for `@language`.
+fn strip_apply_directive(body: &str) -> String {
+    body.lines()
+        .filter(|line| line.trim() != "@apply")
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -1350,10 +1372,12 @@ fn run_action(app: &mut App, position: &PositionId) {
     let language = crate::syntax::language_directive(&node.body).map(str::to_owned);
     #[cfg(not(feature = "syntax"))]
     let language: Option<String> = None;
-    let interpreter = interpreter_for(language.as_deref());
-    // The `@language` directive picks the interpreter but isn't itself
-    // valid in that language, so it must not be sent to the interpreter.
-    let body = strip_language_directive(&node.body);
+    let (interpreter, interpreter_args) = interpreter_for(language.as_deref());
+    let apply_requested = wants_apply(&node.body);
+    // The `@language`/`@apply` directives pick the interpreter and the
+    // output handling but aren't themselves valid code in any language, so
+    // they must not be sent to the interpreter.
+    let body = strip_apply_directive(&strip_language_directive(&node.body));
 
     app.status = format!("running '{name}' with {interpreter}...");
     // `parent()` of a bare filename like "foo.leo" is `Some("")`, and
@@ -1364,6 +1388,7 @@ fn run_action(app: &mut App, position: &PositionId) {
         .filter(|parent| !parent.as_os_str().is_empty())
         .map(Path::to_path_buf);
     let mut command = Command::new(interpreter);
+    command.args(interpreter_args);
     if let Some(cwd) = &cwd {
         command.current_dir(cwd);
     }
@@ -1382,25 +1407,56 @@ fn run_action(app: &mut App, position: &PositionId) {
         output
     });
 
-    let (status, text) = match outcome {
-        Ok(output) => {
-            let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if !stderr.is_empty() {
-                if !text.is_empty() && !text.ends_with('\n') {
-                    text.push('\n');
-                }
-                text.push_str(&stderr);
-            }
-            (output.status.code(), text)
-        }
-        Err(error) => (None, format!("failed to run {interpreter}: {error}")),
+    let (status, stdout, stderr) = match outcome {
+        Ok(output) => (
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        ),
+        Err(error) => (
+            None,
+            String::new(),
+            format!("failed to run {interpreter}: {error}"),
+        ),
     };
 
-    app.status = match status {
-        Some(0) => format!("'{name}' finished"),
-        Some(code) => format!("'{name}' exited with status {code}"),
-        None => format!("'{name}' did not complete"),
+    // `@apply` treats a successful run's stdout as a `cub apply`-style JSON
+    // operation batch to apply to the outline in memory, rather than as
+    // output text to display.
+    let apply_summary =
+        (apply_requested && status == Some(0)).then(|| {
+            match serde_json::from_str::<OperationBatch>(&stdout) {
+                Ok(batch) => match app.document.outline.apply(&batch) {
+                    Ok(report) => {
+                        app.dirty = true;
+                        app.quit_armed = false;
+                        #[cfg(feature = "syntax")]
+                        app.highlight_cache.clear();
+                        #[cfg(feature = "syntax")]
+                        app.preview_cache.clear();
+                        app.source_locations.clear();
+                        app.selected = app.selected.min(app.rows().len().saturating_sub(1));
+                        format!("applied {} operation(s) to the outline", report.applied)
+                    }
+                    Err(error) => format!("output parsed but could not be applied: {error}"),
+                },
+                Err(error) => format!("output was not a valid operation batch: {error}"),
+            }
+        });
+
+    let mut text = stdout;
+    if !stderr.is_empty() {
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(&stderr);
+    }
+
+    app.status = match (status, &apply_summary) {
+        (Some(0), Some(summary)) => format!("'{name}' finished; {summary}"),
+        (Some(0), None) => format!("'{name}' finished"),
+        (Some(code), _) => format!("'{name}' exited with status {code}"),
+        (None, _) => format!("'{name}' did not complete"),
     };
     app.action_output = Some(ActionOutput {
         node: row.node,
@@ -4451,6 +4507,23 @@ mod tests {
         assert_eq!(action_name("@action   Say Hi  "), "Say Hi");
     }
 
+    #[cfg(feature = "syntax")]
+    #[test]
+    fn maps_language_directives_to_interpreters() {
+        assert_eq!(interpreter_for(None), ("sh", [].as_slice()));
+        assert_eq!(interpreter_for(Some("bash")), ("bash", [].as_slice()));
+        assert_eq!(interpreter_for(Some("python")), ("python3", [].as_slice()));
+        assert_eq!(
+            interpreter_for(Some("nu")),
+            ("nu", ["--stdin", "-c", "source /dev/stdin"].as_slice())
+        );
+        assert_eq!(
+            interpreter_for(Some("nushell")),
+            ("nu", ["--stdin", "-c", "source /dev/stdin"].as_slice())
+        );
+        assert_eq!(interpreter_for(Some("cobol")), ("sh", [].as_slice()));
+    }
+
     #[test]
     fn palette_lists_only_action_nodes_and_filters_by_name() {
         let mut app = editing_app();
@@ -4624,6 +4697,71 @@ mod tests {
         assert!(
             app.action_output.is_none(),
             "output should clear once selection moves to a different node"
+        );
+    }
+
+    #[test]
+    fn an_apply_directive_applies_the_actions_stdout_to_the_outline() {
+        let mut app = editing_app();
+        {
+            let node = app
+                .document
+                .outline
+                .nodes
+                .get_mut(&NodeId::from("b"))
+                .unwrap();
+            node.headline = "@action Add child".into();
+            node.body = concat!(
+                "@apply\n",
+                "echo '{\"operations\":[{\"op\":\"insert-tree\",",
+                "\"parent-headline\":\"A\",",
+                "\"tree\":{\"New thing\":{\"_body\":\"hi\"}}}]}'",
+            )
+            .into();
+        }
+        app.selected = 1; // row "0/0" -> node "b"
+
+        run_action(&mut app, &PositionId("0/0".into()));
+
+        assert!(app.dirty, "applying an operation batch should mark dirty");
+        assert!(app.status.contains("applied 1 operation"), "{}", app.status);
+        assert!(
+            app.document
+                .outline
+                .nodes
+                .values()
+                .any(|node| node.headline == "New thing"),
+            "expected a new 'New thing' node in the outline"
+        );
+
+        let output = app.action_output.as_ref().expect("action produced output");
+        assert_eq!(output.status, Some(0));
+    }
+
+    #[test]
+    fn an_apply_directive_reports_invalid_json_without_touching_the_outline() {
+        let mut app = editing_app();
+        let node_count_before = app.document.outline.nodes.len();
+        {
+            let node = app
+                .document
+                .outline
+                .nodes
+                .get_mut(&NodeId::from("b"))
+                .unwrap();
+            node.headline = "@action Broken".into();
+            node.body = "@apply\necho 'not json'".into();
+        }
+        app.selected = 1;
+
+        run_action(&mut app, &PositionId("0/0".into()));
+
+        assert!(!app.dirty);
+        assert_eq!(app.document.outline.nodes.len(), node_count_before);
+        assert!(
+            app.status.contains("not a valid operation batch"),
+            "{}",
+            app.status
         );
     }
 
