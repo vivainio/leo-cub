@@ -843,8 +843,10 @@ fn handle_outline_mouse(app: &mut App, outline: Rect, kind: MouseEventKind, mous
 }
 
 /// Copies the headlines spanned by `selection_anchor`..=`selected` (one per
-/// line) to the system clipboard via OSC 52. A no-op for a drag that
-/// collapsed back onto its own start row -- nothing was actually selected.
+/// line, indented 2 spaces per depth level relative to the shallowest
+/// selected row -- same look as the outline, just left-aligned) to the
+/// system clipboard via OSC 52. A no-op for a drag that collapsed back onto
+/// its own start row -- nothing was actually selected.
 fn copy_outline_selection_to_clipboard(app: &mut App) {
     let anchor = app.selection_anchor.unwrap_or(app.selected);
     let start = anchor.min(app.selected);
@@ -857,11 +859,7 @@ fn copy_outline_selection_to_clipboard(app: &mut App) {
     if start > end {
         return;
     }
-    let text = rows[start..=end]
-        .iter()
-        .map(|row| app.document.outline.nodes[&row.node].headline.as_str())
-        .collect::<Vec<_>>()
-        .join("\n");
+    let text = outline_selection_text(app, &rows[start..=end]);
     match execute!(
         io::stdout(),
         CopyToClipboard::to_clipboard_from(text.clone())
@@ -875,6 +873,21 @@ fn copy_outline_selection_to_clipboard(app: &mut App) {
         }
         Err(error) => app.status = format!("clipboard copy failed: {error}"),
     }
+}
+
+/// One headline per line, each indented 2 spaces per depth level relative
+/// to the shallowest row in `rows` -- the same nesting the outline shows,
+/// just left-aligned to column 0.
+fn outline_selection_text(app: &App, rows: &[Row]) -> String {
+    let min_depth = rows.iter().map(|row| row.depth).min().unwrap_or(0);
+    rows.iter()
+        .map(|row| {
+            let indent = "  ".repeat(row.depth.saturating_sub(min_depth));
+            let headline = &app.document.outline.nodes[&row.node].headline;
+            format!("{indent}{headline}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Drag-to-select body text and copy the selection to the system clipboard
@@ -5990,6 +6003,33 @@ mod tests {
             app.status, "untouched",
             "a plain click (no drag) shouldn't touch the clipboard"
         );
+    }
+
+    #[test]
+    fn copied_headlines_keep_indentation_relative_to_the_shallowest_row() {
+        let document = LeoDocument::parse(
+            r#"<leo_file><vnodes><v t="a"><vh>A</vh><v t="b"><vh>B</vh><v t="d"><vh>D</vh></v></v><v t="c"><vh>C</vh></v></v></vnodes><tnodes><t tx="a"></t><t tx="b"></t><t tx="c"></t><t tx="d"></t></tnodes></leo_file>"#,
+        )
+        .unwrap();
+        let mut app = App::new(
+            document,
+            PathBuf::from("test.leo"),
+            String::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashSet::new(),
+            HashMap::new(),
+            OriginalExternalState::default(),
+            false,
+        );
+        app.expanded.insert(PositionId("0/0".into())); // expand B to reveal D
+        let rows = app.rows();
+        assert_eq!(rows.len(), 4, "A, B, D, C");
+
+        // Select B..=C (depths 1, 2, 1): D should stay indented one level
+        // deeper than its siblings B and C, not absolute-zero-based.
+        let text = outline_selection_text(&app, &rows[1..=3]);
+        assert_eq!(text, "B\n  D\nC");
     }
 
     #[test]
