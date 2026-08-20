@@ -20,8 +20,8 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use leo::{
-    AutoFile, DerivedFile, LeoDocument, Node, NodeId, Outline, Position, PositionId, render_thin,
-    search_outline,
+    AutoFile, DerivedFile, LeoDocument, Node, NodeId, Outline, Position, PositionId, RelativeFile,
+    render_relative, render_thin, search_outline,
 };
 use ratatui::{
     Terminal,
@@ -57,12 +57,24 @@ struct OriginalExternalState {
     nodes: HashMap<NodeId, Node>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ExternalFormat {
+    /// 5-thin sentinels (`@file`/`@thin`/`@file-thin`): absolute `*N*`
+    /// depth, every node keeps its gnx.
+    Thin,
+    /// cub-1-thin sentinels (`@f`, leo-cub's own format tag -- not an
+    /// official Leo version): depth relative to the preceding node, gnx
+    /// omitted except for the root, clones, and UA-bearing nodes.
+    Relative,
+}
+
 #[derive(Clone)]
 struct WritableExternalFile {
     path: PathBuf,
     start_delimiter: String,
     end_delimiter: String,
     original: Outline,
+    format: ExternalFormat,
 }
 
 struct App {
@@ -1521,6 +1533,7 @@ fn handle_headline_input(app: &mut App, key: KeyEvent) {
                         start_delimiter: start_delimiter.to_owned(),
                         end_delimiter: end_delimiter.to_owned(),
                         original: Outline::default(),
+                        format: external_format(&headline),
                     });
             }
             app.dirty_nodes.insert(node_id);
@@ -2150,19 +2163,40 @@ fn prepare_external_updates(app: &App) -> Result<Vec<ExternalUpdate>, String> {
         if snapshot == file.original {
             continue;
         }
-        let rendered = render_thin(
-            &app.document.outline,
-            &position,
-            &file.start_delimiter,
-            &file.end_delimiter,
-        )
-        .map_err(|error| format!("{}: {error}", file.path.display()))?;
-        DerivedFile::parse(&rendered).map_err(|error| {
-            format!(
-                "{}: generated invalid thin file: {error}",
-                file.path.display()
-            )
-        })?;
+        let rendered = match file.format {
+            ExternalFormat::Relative => {
+                let rendered = render_relative(
+                    &app.document.outline,
+                    &position,
+                    &file.start_delimiter,
+                    &file.end_delimiter,
+                )
+                .map_err(|error| format!("{}: {error}", file.path.display()))?;
+                RelativeFile::parse(&rendered).map_err(|error| {
+                    format!(
+                        "{}: generated invalid @f file: {error}",
+                        file.path.display()
+                    )
+                })?;
+                rendered
+            }
+            ExternalFormat::Thin => {
+                let rendered = render_thin(
+                    &app.document.outline,
+                    &position,
+                    &file.start_delimiter,
+                    &file.end_delimiter,
+                )
+                .map_err(|error| format!("{}: {error}", file.path.display()))?;
+                DerivedFile::parse(&rendered).map_err(|error| {
+                    format!(
+                        "{}: generated invalid thin file: {error}",
+                        file.path.display()
+                    )
+                })?;
+                rendered
+            }
+        };
         updates.push(ExternalUpdate {
             root: root.clone(),
             path: file.path.clone(),
@@ -2935,6 +2969,7 @@ fn headline_spans(headline: &str) -> Vec<Span<'_>> {
                 | "@auto-markdown"
                 | "@clean"
                 | "@edit"
+                | "@f"
                 | "@file"
                 | "@file-thin"
                 | "@nosent"
@@ -3265,6 +3300,7 @@ fn load_derived_files(outline: &mut Outline, outline_path: &Path) -> LoadReport 
                     start_delimiter: comment_delimiters(&job.path).0.to_owned(),
                     end_delimiter: comment_delimiters(&job.path).1.to_owned(),
                     original: Outline::default(),
+                    format: format_for_directive(&job.directive),
                 },
             );
             report.loaded += 1;
@@ -3325,6 +3361,56 @@ fn load_derived_files(outline: &mut Outline, outline_path: &Path) -> LoadReport 
                             .filter(|id| **id != auto.root)
                             .cloned(),
                     );
+                } else if job.directive == "@f" {
+                    let derived =
+                        RelativeFile::parse(&source).map_err(|error| error.to_string())?;
+                    derived
+                        .merge_into(outline, &job.position)
+                        .map_err(|error| error.to_string())?;
+                    let original = external_snapshot(outline, &derived.root)
+                        .map(|(_, snapshot)| snapshot)
+                        .ok_or_else(|| "merged external root disappeared".to_owned())?;
+                    report.writable_external.insert(
+                        derived.root.clone(),
+                        WritableExternalFile {
+                            path: job.path.clone(),
+                            start_delimiter: derived.start_delimiter.clone(),
+                            end_delimiter: derived.end_delimiter.clone(),
+                            original,
+                            format: ExternalFormat::Relative,
+                        },
+                    );
+                    for (derived_position, line) in &derived.locations {
+                        let suffix = derived_position
+                            .0
+                            .strip_prefix("0")
+                            .unwrap_or(&derived_position.0);
+                        let position = PositionId(format!("{}{}", job.position.0, suffix));
+                        report.locations.insert(
+                            position,
+                            SourceLocation {
+                                path: job.path.clone(),
+                                line: *line,
+                            },
+                        );
+                        if let Some(position) = derived.outline.position(derived_position) {
+                            report
+                                .node_locations
+                                .entry(position.node.clone())
+                                .or_insert(SourceLocation {
+                                    path: job.path.clone(),
+                                    line: *line,
+                                });
+                        }
+                    }
+                    report.derived_nodes.extend(
+                        derived
+                            .outline
+                            .nodes
+                            .keys()
+                            .filter(|id| **id != derived.root)
+                            .cloned(),
+                    );
                 } else {
                     let derived = DerivedFile::parse(&source).map_err(|error| error.to_string())?;
                     derived
@@ -3340,6 +3426,7 @@ fn load_derived_files(outline: &mut Outline, outline_path: &Path) -> LoadReport 
                             start_delimiter: derived.start_delimiter.clone(),
                             end_delimiter: derived.end_delimiter.clone(),
                             original,
+                            format: ExternalFormat::Thin,
                         },
                     );
                     for (derived_position, line) in &derived.locations {
@@ -3665,7 +3752,7 @@ fn derived_filename(headline: &str) -> Option<(bool, &str, &str)> {
     let (directive, filename) = headline.trim().split_once(char::is_whitespace)?;
     matches!(
         directive,
-        "@file" | "@thin" | "@file-thin" | "@auto" | "@auto-md" | "@auto-markdown"
+        "@file" | "@thin" | "@file-thin" | "@f" | "@auto" | "@auto-md" | "@auto-markdown"
     )
     .then(|| {
         (
@@ -3677,6 +3764,26 @@ fn derived_filename(headline: &str) -> Option<(bool, &str, &str)> {
     .filter(|(_, _, filename)| !filename.is_empty())
 }
 
+/// Which sentinel writer/parser a directive's derived file uses. `@f` is the
+/// only directive using the cub-1-thin relative-depth, optional-gnx grammar
+/// (a leo-cub extension inspired by leo-editor issue #4928, not an official
+/// Leo version tag); every other thin/file directive still uses the 5-thin
+/// grammar in `derived.rs`.
+fn external_format(headline: &str) -> ExternalFormat {
+    match headline.trim().split_once(char::is_whitespace) {
+        Some((directive, _)) => format_for_directive(directive),
+        None => ExternalFormat::Thin,
+    }
+}
+
+fn format_for_directive(directive: &str) -> ExternalFormat {
+    if directive == "@f" {
+        ExternalFormat::Relative
+    } else {
+        ExternalFormat::Thin
+    }
+}
+
 #[cfg(test)]
 fn thin_filename(headline: &str) -> Option<&str> {
     derived_filename(headline).and_then(|(auto, _, filename)| (!auto).then_some(filename))
@@ -3686,7 +3793,14 @@ fn external_filename(headline: &str) -> Option<&str> {
     let (directive, filename) = headline.trim().split_once(char::is_whitespace)?;
     matches!(
         directive,
-        "@file" | "@thin" | "@file-thin" | "@clean" | "@auto" | "@auto-md" | "@auto-markdown"
+        "@file"
+            | "@thin"
+            | "@file-thin"
+            | "@f"
+            | "@clean"
+            | "@auto"
+            | "@auto-md"
+            | "@auto-markdown"
     )
     .then(|| strip_path_cruft(filename))
     .filter(|filename| !filename.is_empty())
@@ -4474,6 +4588,7 @@ mod tests {
                 start_delimiter: "#".into(),
                 end_delimiter: String::new(),
                 original: Outline::default(),
+                format: ExternalFormat::Thin,
             },
         );
 
@@ -4596,6 +4711,7 @@ mod tests {
                 start_delimiter: "#".into(),
                 end_delimiter: String::new(),
                 original,
+                format: ExternalFormat::Thin,
             },
         );
         app.original_external
@@ -4617,6 +4733,81 @@ mod tests {
 
         assert!(!app.dirty, "{}", app.status);
         let written = DerivedFile::parse(&fs::read_to_string(&external_path).unwrap()).unwrap();
+        assert_eq!(written.outline.roots[0].children.len(), 2);
+        assert_eq!(
+            written.outline.nodes[&written.outline.roots[0].children[1].node].headline,
+            "C"
+        );
+        let persisted = LeoDocument::open(&outline_path).unwrap();
+        assert!(persisted.outline.roots[0].children.is_empty());
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn edits_and_saves_an_f_file_tree() {
+        let directory = env::temp_dir().join(format!(
+            "leo-cub-tui-f-edit-{}-{}",
+            std::process::id(),
+            fresh_node_id().0
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let external_path = directory.join("test.py");
+        let outline_path = directory.join("test.leo");
+        fs::write(
+            &external_path,
+            "#@+leo-ver=cub-1-thin\n#@0 [a] @f test.py\n#@+others\n#@> B\n#@-others\n#@-leo\n",
+        )
+        .unwrap();
+
+        let mut app = editing_app();
+        app.path = outline_path.clone();
+        app.document
+            .outline
+            .nodes
+            .get_mut(&NodeId::from("a"))
+            .unwrap()
+            .headline = "@f test.py".into();
+        app.document.outline.roots[0].children.truncate(1);
+        app.document.outline.nodes.remove(&NodeId::from("c"));
+        app.derived_nodes.insert(NodeId::from("b"));
+        let original = external_snapshot(&app.document.outline, &NodeId::from("a"))
+            .unwrap()
+            .1;
+        app.writable_external.insert(
+            NodeId::from("a"),
+            WritableExternalFile {
+                path: external_path.clone(),
+                start_delimiter: "#".into(),
+                end_delimiter: String::new(),
+                original,
+                format: ExternalFormat::Relative,
+            },
+        );
+        app.original_external
+            .children
+            .insert(NodeId::from("a"), Vec::new());
+        app.original_external
+            .bodies
+            .insert(NodeId::from("a"), String::new());
+        select_position(&mut app, &PositionId("0/0".into()));
+
+        insert_headline(&mut app);
+        handle_headline_input(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('C'), KeyModifiers::SHIFT),
+        );
+        handle_headline_input(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        handle_headline_input(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        save(&mut app);
+
+        assert!(!app.dirty, "{}", app.status);
+        let written_text = fs::read_to_string(&external_path).unwrap();
+        assert!(written_text.contains("@+leo-ver=cub-1-thin"));
+        assert!(written_text.contains("@0 [a] @f test.py"));
+        // Ordinary (non-clone, no-UA) nodes still carry no bracketed gnx.
+        assert!(!written_text.contains("[b]"));
+        assert!(!written_text.contains("[c]"));
+        let written = RelativeFile::parse(&written_text).unwrap();
         assert_eq!(written.outline.roots[0].children.len(), 2);
         assert_eq!(
             written.outline.nodes[&written.outline.roots[0].children[1].node].headline,

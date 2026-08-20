@@ -7,6 +7,7 @@ mod import;
 mod inspect;
 mod model;
 mod operation;
+mod relative;
 mod sync;
 mod tree;
 mod xml;
@@ -22,6 +23,7 @@ pub use inspect::{
 };
 pub use model::{Node, NodeId, Outline, Position, PositionId, ValidationError};
 pub use operation::{ApplyError, ApplyReport, Operation, OperationBatch, Target, TreeNode};
-pub use sync::{SyncError, SyncItem, SyncReport, render_thin, sync_document};
+pub use relative::RelativeFile;
+pub use sync::{SyncError, SyncItem, SyncReport, render_relative, render_thin, sync_document};
 pub use tree::{AddPathsReport, HeadlinePathError};
 pub use xml::{LeoDocument, LeoXmlError};
