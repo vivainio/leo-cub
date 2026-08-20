@@ -26,6 +26,14 @@ impl SyntaxHighlighter {
             )
             .expect("bundled reStructuredText syntax must be valid"),
         );
+        syntaxes.add(
+            SyntaxDefinition::load_from_str(
+                include_str!("../syntaxes/Nushell.sublime-syntax"),
+                true,
+                Some("Nushell"),
+            )
+            .expect("bundled Nushell syntax must be valid"),
+        );
         Self {
             syntaxes: syntaxes.build(),
             themes: ThemeSet::load_defaults(),
@@ -410,6 +418,7 @@ mod tests {
             ("x.ts", "typescript"),
             ("x.tsx", "typescript"),
             ("x.xslt", "xslt"),
+            ("x.nu", "nushell"),
         ] {
             let syntax = highlighter.syntax_for("", Some(Path::new(path)), Some(language));
             assert_ne!(syntax.name, "Plain Text", "{path} / {language}");
