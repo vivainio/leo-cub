@@ -800,8 +800,16 @@ fn handle_mouse(app: &mut App, area: Rect, mouse: MouseEvent) {
 
 /// Click-to-select and click-the-expand-marker, plus drag-to-extend the
 /// same multi-row tree selection that Shift-↑/↓ builds (`selection_anchor`
-/// fixed at the press, `selected` following the pointer).
+/// fixed at the press, `selected` following the pointer). Releasing after
+/// an actual drag copies the selected headlines to the system clipboard,
+/// same as releasing a body drag copies the selected body text.
 fn handle_outline_mouse(app: &mut App, outline: Rect, kind: MouseEventKind, mouse: MouseEvent) {
+    if let MouseEventKind::Up(MouseButton::Left) = kind {
+        if app.selection_anchor.is_some() {
+            copy_outline_selection_to_clipboard(app);
+        }
+        return;
+    }
     let row = app.outline_scroll + usize::from(mouse.row - outline.y - 1);
     let rows = app.rows();
     let Some(clicked) = rows.get(row) else {
@@ -831,6 +839,41 @@ fn handle_outline_mouse(app: &mut App, outline: Rect, kind: MouseEventKind, mous
             app.selected = row;
         }
         _ => {}
+    }
+}
+
+/// Copies the headlines spanned by `selection_anchor`..=`selected` (one per
+/// line) to the system clipboard via OSC 52. A no-op for a drag that
+/// collapsed back onto its own start row -- nothing was actually selected.
+fn copy_outline_selection_to_clipboard(app: &mut App) {
+    let anchor = app.selection_anchor.unwrap_or(app.selected);
+    let start = anchor.min(app.selected);
+    let end = anchor.max(app.selected);
+    if start == end {
+        return;
+    }
+    let rows = app.rows();
+    let end = end.min(rows.len().saturating_sub(1));
+    if start > end {
+        return;
+    }
+    let text = rows[start..=end]
+        .iter()
+        .map(|row| app.document.outline.nodes[&row.node].headline.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    match execute!(
+        io::stdout(),
+        CopyToClipboard::to_clipboard_from(text.clone())
+    ) {
+        Ok(()) => {
+            let count = end - start + 1;
+            app.status = format!(
+                "copied {count} headline{} to clipboard",
+                if count == 1 { "" } else { "s" }
+            );
+        }
+        Err(error) => app.status = format!("clipboard copy failed: {error}"),
     }
 }
 
@@ -5923,6 +5966,30 @@ mod tests {
         handle_mouse(&mut app, area, release);
         assert_eq!(app.selection_anchor, Some(0), "release doesn't collapse it");
         assert_eq!(app.selected, 2);
+        assert_eq!(app.status, "copied 3 headlines to clipboard");
+    }
+
+    #[test]
+    fn a_plain_click_in_the_outline_does_not_copy_anything() {
+        let mut app = editing_app();
+        app.status = "untouched".into();
+        let area = Rect::new(0, 0, 80, 24);
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 10,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        };
+        handle_mouse(&mut app, area, click);
+        let release = MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            ..click
+        };
+        handle_mouse(&mut app, area, release);
+        assert_eq!(
+            app.status, "untouched",
+            "a plain click (no drag) shouldn't touch the clipboard"
+        );
     }
 
     #[test]
