@@ -40,7 +40,8 @@ and exposes transactional operations intended for scripts and AI tools.
 - Resolve ancestor `@path` directives in the TUI.
 - Browse outlines with a small Ratatui interface.
 - Highlight node bodies with Syntect, using `@language`, `@rst` ancestors, or
-  source extensions, including bundled reStructuredText syntax support.
+  source extensions, including bundled reStructuredText and Nushell syntax
+  support.
 - Open a derived node's full source file at its sentinel line using `$VISUAL` or
   `$EDITOR`.
 
