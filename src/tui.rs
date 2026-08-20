@@ -92,6 +92,7 @@ struct App {
     action_output: Option<ActionOutput>,
     dirty: bool,
     dirty_nodes: HashSet<NodeId>,
+    updated_nodes: HashSet<NodeId>,
     quit_armed: bool,
     reload_armed: bool,
     clipboard: Option<ClipboardTree>,
@@ -164,6 +165,7 @@ impl App {
             action_output: None,
             dirty: false,
             dirty_nodes: HashSet::new(),
+            updated_nodes: HashSet::new(),
             quit_armed: false,
             reload_armed: false,
             clipboard: None,
@@ -2261,6 +2263,13 @@ fn reload(app: &mut App) {
     }
 
     let selected_node = app.selected_row().map(|row| row.node);
+    let previous_bodies: HashMap<NodeId, String> = app
+        .document
+        .outline
+        .nodes
+        .iter()
+        .map(|(id, node)| (id.clone(), node.body.clone()))
+        .collect();
     let mut document = match LeoDocument::open(&app.path) {
         Ok(document) => document,
         Err(error) => {
@@ -2310,6 +2319,22 @@ fn reload(app: &mut App) {
         )
     };
 
+    let changed_bodies: HashSet<NodeId> = document
+        .outline
+        .nodes
+        .iter()
+        .filter(|(id, node)| {
+            previous_bodies
+                .get(id)
+                .is_some_and(|old_body| old_body != &node.body)
+        })
+        .map(|(id, _)| id.clone())
+        .collect();
+    let mut updated_nodes = HashSet::new();
+    for root in &document.outline.roots {
+        mark_updated_ancestors(root, &changed_bodies, &mut updated_nodes);
+    }
+    app.updated_nodes = updated_nodes;
     app.document = document;
     app.source_locations = source_locations;
     app.source_nodes = source_nodes;
@@ -2334,6 +2359,26 @@ fn reload(app: &mut App) {
         }
     }
     app.status = format!("reloaded {} ({derived_status})", app.path.display());
+}
+
+/// Marks `position`'s node as updated if its body changed directly, or if
+/// any descendant did -- so a collapsed `@file`/`@auto` root (or any
+/// collapsed ancestor) still shows that something changed underneath it.
+fn mark_updated_ancestors(
+    position: &Position,
+    changed: &HashSet<NodeId>,
+    updated: &mut HashSet<NodeId>,
+) -> bool {
+    let mut is_updated = changed.contains(&position.node);
+    for child in &position.children {
+        if mark_updated_ancestors(child, changed, updated) {
+            is_updated = true;
+        }
+    }
+    if is_updated {
+        updated.insert(position.node.clone());
+    }
+    is_updated
 }
 
 fn restore_external_state(
@@ -2540,7 +2585,10 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
             let input = app.input.as_ref().filter(|input| input.node == row.node);
             let mut spans = vec![Span::raw("  ".repeat(row.depth)), Span::raw(marker)];
             spans.push(dirty_marker(app.dirty_nodes.contains(&row.node)));
-            spans.push(body_marker(!node.body.trim().is_empty()));
+            spans.push(body_marker(
+                !node.body.trim().is_empty(),
+                app.updated_nodes.contains(&row.node),
+            ));
             if let Some(input) = input {
                 if input.selected {
                     spans.push(Span::styled(
@@ -2884,8 +2932,10 @@ fn dirty_marker(dirty: bool) -> Span<'static> {
     }
 }
 
-fn body_marker(has_body: bool) -> Span<'static> {
-    if has_body {
+fn body_marker(has_body: bool, updated: bool) -> Span<'static> {
+    if updated {
+        Span::styled("↑ ", Style::default().fg(Color::LightGreen))
+    } else if has_body {
         Span::styled("· ", Style::default().fg(Color::DarkGray))
     } else {
         Span::raw("  ")
@@ -4431,12 +4481,23 @@ mod tests {
     }
 
     #[test]
+    fn shows_an_arrow_for_nodes_updated_by_reload_even_with_a_body() {
+        let updated = body_marker(true, true);
+        assert_eq!(updated.content, "↑ ");
+        assert_eq!(updated.style.fg, Some(Color::LightGreen));
+
+        let updated_without_body = body_marker(false, true);
+        assert_eq!(updated_without_body.content, "↑ ");
+        assert_eq!(updated_without_body.style.fg, Some(Color::LightGreen));
+    }
+
+    #[test]
     fn shows_a_subtle_dot_only_for_nodes_with_body_content() {
-        let populated = body_marker(true);
+        let populated = body_marker(true, false);
         assert_eq!(populated.content, "· ");
         assert_eq!(populated.style.fg, Some(Color::DarkGray));
 
-        let empty = body_marker(false);
+        let empty = body_marker(false, false);
         assert_eq!(empty.content, "  ");
         assert_eq!(empty.style.fg, None);
     }
@@ -4693,6 +4754,55 @@ mod tests {
         assert!(!app.dirty);
         assert!(!app.reload_armed);
         assert!(app.dirty_nodes.is_empty());
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn reload_marks_nodes_whose_body_changed_on_disk() {
+        let path = env::temp_dir().join(format!(
+            "leo-cub-reload-updated-{}-{}.leo",
+            std::process::id(),
+            fresh_node_id().0
+        ));
+        let disk_document = LeoDocument::parse(
+            r#"<leo_file><vnodes><v t="a"><vh>A</vh></v><v t="b"><vh>B</vh></v></vnodes><tnodes><t tx="a">from disk</t><t tx="b"></t></tnodes></leo_file>"#,
+        )
+        .unwrap();
+        disk_document.save(&path).unwrap();
+
+        let mut app = editing_app();
+        app.path.clone_from(&path);
+        app.updated_nodes.insert(NodeId("stale".into()));
+        reload(&mut app);
+
+        assert!(app.updated_nodes.contains(&NodeId("a".into())));
+        assert!(!app.updated_nodes.contains(&NodeId("b".into())));
+        assert!(!app.updated_nodes.contains(&NodeId("stale".into())));
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn reload_marks_every_ancestor_of_a_changed_descendant() {
+        let path = env::temp_dir().join(format!(
+            "leo-cub-reload-ancestors-{}-{}.leo",
+            std::process::id(),
+            fresh_node_id().0
+        ));
+        // Mirrors editing_app's tree (a > b, c) but with b's body changed on
+        // disk, so a and b should both pick up the marker while c does not.
+        let disk_document = LeoDocument::parse(
+            r#"<leo_file><vnodes><v t="a"><vh>A</vh><v t="b"><vh>B</vh></v><v t="c"><vh>C</vh></v></v></vnodes><tnodes><t tx="a"></t><t tx="b">from disk</t><t tx="c"></t></tnodes></leo_file>"#,
+        )
+        .unwrap();
+        disk_document.save(&path).unwrap();
+
+        let mut app = editing_app();
+        app.path.clone_from(&path);
+        reload(&mut app);
+
+        assert!(app.updated_nodes.contains(&NodeId("a".into())));
+        assert!(app.updated_nodes.contains(&NodeId("b".into())));
+        assert!(!app.updated_nodes.contains(&NodeId("c".into())));
         fs::remove_file(path).unwrap();
     }
 
