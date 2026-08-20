@@ -11,7 +11,7 @@ use regex::Regex;
 use serde::Serialize;
 use thiserror::Error;
 
-use crate::{AutoFile, DerivedFile, NodeId, Outline, Position, PositionId};
+use crate::{AutoFile, DerivedFile, NodeId, Outline, Position, PositionId, RelativeFile};
 
 #[derive(Clone, Copy, Debug)]
 pub enum InspectSelector<'a> {
@@ -56,6 +56,7 @@ pub fn load_matching_external_files(
     let jobs = external_jobs(outline, outline_path);
     enum Loaded {
         Derived(DerivedFile),
+        Relative(RelativeFile),
         Auto(AutoFile),
     }
     let mut cache: HashMap<(PathBuf, NodeId), Option<Loaded>> = HashMap::new();
@@ -101,6 +102,13 @@ pub fn load_matching_external_files(
                                     }
                                 })?,
                             ))
+                        } else if job.directive == "@f" {
+                            Some(Loaded::Relative(RelativeFile::parse(&source).map_err(
+                                |error| InspectError::Derived {
+                                    path: job.path.clone(),
+                                    message: error.to_string(),
+                                },
+                            )?))
                         } else {
                             Some(Loaded::Derived(DerivedFile::parse(&source).map_err(
                                 |error| InspectError::Derived {
@@ -121,6 +129,14 @@ pub fn load_matching_external_files(
             match expansion {
                 Loaded::Derived(derived) => {
                     derived
+                        .merge_into(outline, &job.position)
+                        .map_err(|error| InspectError::Derived {
+                            path: job.path.clone(),
+                            message: error.to_string(),
+                        })?
+                }
+                Loaded::Relative(relative) => {
+                    relative
                         .merge_into(outline, &job.position)
                         .map_err(|error| InspectError::Derived {
                             path: job.path.clone(),
@@ -716,7 +732,14 @@ fn external_file(headline: &str) -> Option<(&str, &str)> {
     let (directive, filename) = headline.trim().split_once(char::is_whitespace)?;
     matches!(
         directive,
-        "@file" | "@thin" | "@file-thin" | "@clean" | "@auto" | "@auto-md" | "@auto-markdown"
+        "@file"
+            | "@thin"
+            | "@file-thin"
+            | "@f"
+            | "@clean"
+            | "@auto"
+            | "@auto-md"
+            | "@auto-markdown"
     )
     .then(|| (directive, strip_path_cruft(filename)))
     .filter(|(_, filename)| !filename.is_empty())
@@ -963,6 +986,87 @@ mod tests {
         load_matching_external_files(&mut by_gnx, &outline_path, ExternalFilter::Gnx("target"))
             .unwrap();
         assert!(select_subtrees(&by_gnx, InspectSelector::Gnx("target")).is_ok());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn lazily_loads_an_f_file_and_reconciles_its_anonymous_child() {
+        fn external_outline() -> Outline {
+            let root = NodeId("root".into());
+            let child = NodeId("stable-child".into());
+            Outline {
+                nodes: [
+                    (
+                        root.clone(),
+                        Node {
+                            id: root.clone(),
+                            headline: "@f child.py".into(),
+                            body: String::new(),
+                            vnode_attributes: HashMap::new(),
+                            tnode_attributes: HashMap::new(),
+                        },
+                    ),
+                    (
+                        child.clone(),
+                        Node {
+                            id: child.clone(),
+                            headline: "old headline".into(),
+                            body: "old body".into(),
+                            vnode_attributes: HashMap::new(),
+                            tnode_attributes: HashMap::new(),
+                        },
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+                roots: vec![Position {
+                    node: root,
+                    children: vec![Position {
+                        node: child,
+                        children: vec![],
+                    }],
+                }],
+            }
+        }
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("cub-inspect-f-{unique}"));
+        fs::create_dir(&directory).unwrap();
+        fs::write(
+            directory.join("child.py"),
+            "#@+leo-ver=cub-1-thin\n#@0 [root] @f child.py\n#@+others\n#@> class Target\nneedle\n#@-others\n#@-leo\n",
+        )
+        .unwrap();
+        let outline_path = directory.join("outline.leo");
+
+        let mut outline = external_outline();
+        // Unlike the 5-thin `@+node:` fallback in `raw_line_might_match`, an
+        // @f sentinel line isn't specially unwrapped for anchored patterns,
+        // so match on a substring rather than `^class Target$`.
+        let pattern = Regex::new("class Target").unwrap();
+        assert_eq!(
+            load_matching_external_files(
+                &mut outline,
+                &outline_path,
+                ExternalFilter::Search(&[pattern]),
+            )
+            .unwrap(),
+            1
+        );
+        // The anonymous "class Target" sentinel has no [gnx], so it should
+        // reconcile to the existing child at that structural position
+        // rather than getting a synthetic id.
+        assert_eq!(
+            outline.nodes[&NodeId("stable-child".into())].headline,
+            "class Target"
+        );
+        assert_eq!(
+            outline.nodes[&NodeId("stable-child".into())].body,
+            "needle\n"
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 

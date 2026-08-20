@@ -1,7 +1,7 @@
 //! Synchronize external Leo file nodes into an outline.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -10,7 +10,8 @@ use serde::Serialize;
 use thiserror::Error;
 
 use crate::{
-    DerivedFile, LeoDocument, NodeId, Outline, Position, PositionId, propagate_clean_changes,
+    DerivedFile, LeoDocument, NodeId, Outline, Position, PositionId, RelativeFile,
+    propagate_clean_changes,
 };
 
 #[derive(Debug, Error)]
@@ -84,6 +85,13 @@ pub fn sync_document(
             let private = render_private(&next.outline, &job.position, start, end)?;
             let updated = propagate_clean_changes(&source, &private, start, end);
             let parsed = DerivedFile::parse(&updated)?;
+            parsed.merge_into(&mut next.outline, &job.position)?;
+        } else if job.directive == "@f" {
+            // Unlike @clean, @f files always carry sentinels, so there is no
+            // public/private text to reconcile via Mulder/Ream -- just parse
+            // and merge, reconciling gnx-less nodes against the outline's
+            // current tree (see RelativeFile::merge_into).
+            let parsed = RelativeFile::parse(&source)?;
             parsed.merge_into(&mut next.outline, &job.position)?;
         } else {
             // Leo reconstructs @file trees in memory, but their content remains
@@ -235,9 +243,12 @@ fn external_jobs(outline: &Outline, outline_path: &Path) -> Vec<Job> {
 
 fn external_filename(headline: &str) -> Option<(&str, &str)> {
     let (directive, filename) = headline.trim().split_once(char::is_whitespace)?;
-    matches!(directive, "@file" | "@thin" | "@file-thin" | "@clean")
-        .then(|| (directive, strip_path_cruft(filename)))
-        .filter(|(_, filename)| !filename.is_empty())
+    matches!(
+        directive,
+        "@file" | "@thin" | "@file-thin" | "@clean" | "@f"
+    )
+    .then(|| (directive, strip_path_cruft(filename)))
+    .filter(|(_, filename)| !filename.is_empty())
 }
 
 fn path_directive(text: &str) -> Option<String> {
@@ -309,6 +320,234 @@ pub fn render_thin(
         result.push('\n');
     }
     Ok(result)
+}
+
+/// Render an `@f` derived file: like `render_thin`, but the per-node
+/// sentinel encodes outline depth relative to the preceding sentinel and
+/// omits `[gnx]` for nodes that don't need persistent identity (everything
+/// except the root, clones, and nodes carrying user attributes). See
+/// leo-editor issue #4928 and `RelativeFile`.
+pub fn render_relative(
+    outline: &Outline,
+    target: &PositionId,
+    start: &str,
+    end: &str,
+) -> Result<String, SyncError> {
+    let root = outline
+        .position(target)
+        .ok_or_else(|| crate::SentinelError::PositionNotFound(target.0.clone()))?;
+    let mut first = Vec::new();
+    let mut last = Vec::new();
+    collect_first_last(outline, root, &mut first, &mut last);
+    let mut result = String::new();
+    for line in first {
+        result.push_str(line);
+        result.push('\n');
+    }
+    result.push_str(&format!("{start}@+leo-ver=cub-1-thin{end}\n"));
+    let protected = protected_node_ids(outline, root);
+    let mut prev_level = None;
+    render_position_relative(
+        outline,
+        root,
+        1,
+        &mut prev_level,
+        &protected,
+        "",
+        start,
+        end,
+        &mut result,
+    );
+    result.push_str(&format!("{start}@-leo{end}\n"));
+    for line in last {
+        result.push_str(line);
+        result.push('\n');
+    }
+    Ok(result)
+}
+
+/// Nodes an `@f` sentinel must serialize a `[gnx]` for: the file root, any
+/// node whose id occupies more than one position anywhere in the whole
+/// document (a clone -- scanned document-wide, since a node inside this
+/// subtree could also be cloned elsewhere), and any node carrying user
+/// attributes. Everything else can be reconstructed from structural position
+/// alone. This is a conservative subset of the identity-preserving set
+/// described in leo-editor issue #4928 -- it does not attempt to recognize
+/// GNX values referenced from inside UA strings.
+fn protected_node_ids(outline: &Outline, root: &Position) -> HashSet<NodeId> {
+    let mut counts: HashMap<NodeId, usize> = HashMap::new();
+    fn visit(positions: &[Position], counts: &mut HashMap<NodeId, usize>) {
+        for position in positions {
+            *counts.entry(position.node.clone()).or_default() += 1;
+            visit(&position.children, counts);
+        }
+    }
+    visit(&outline.roots, &mut counts);
+    let mut protected: HashSet<NodeId> = counts
+        .into_iter()
+        .filter_map(|(id, count)| (count > 1).then_some(id))
+        .collect();
+    for (id, node) in &outline.nodes {
+        if !node.vnode_attributes.is_empty() || !node.tnode_attributes.is_empty() {
+            protected.insert(id.clone());
+        }
+    }
+    protected.insert(root.node.clone());
+    protected
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_position_relative(
+    outline: &Outline,
+    position: &Position,
+    level: usize,
+    prev_level: &mut Option<usize>,
+    protected: &HashSet<NodeId>,
+    indent: &str,
+    start: &str,
+    end: &str,
+    result: &mut String,
+) {
+    let node = &outline.nodes[&position.node];
+    let token = match *prev_level {
+        None => "0".to_owned(),
+        Some(previous) if level == previous => String::new(),
+        Some(previous) if level > previous => {
+            let delta = level - previous;
+            if delta == 1 {
+                ">".to_owned()
+            } else {
+                format!(">{delta}")
+            }
+        }
+        Some(previous) => {
+            let delta = previous - level;
+            if delta == 1 {
+                "<".to_owned()
+            } else {
+                format!("<{delta}")
+            }
+        }
+    };
+    *prev_level = Some(level);
+    let gnx = if protected.contains(&position.node) {
+        format!("[{}] ", node.id.0)
+    } else {
+        String::new()
+    };
+    result.push_str(&format!(
+        "{indent}{start}@{token} {gnx}{}{end}\n",
+        node.headline
+    ));
+    let mut expanded = false;
+    for line in node.body.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        if trimmed.trim_end() == "@others" {
+            expanded = true;
+            let leading = &line[..line.len() - trimmed.len()];
+            let child_indent = format!("{indent}{leading}");
+            result.push_str(&format!("{indent}{leading}{start}@+others{end}\n"));
+            for child in position
+                .children
+                .iter()
+                .filter(|child| !is_section_node(outline, child))
+            {
+                render_position_relative(
+                    outline,
+                    child,
+                    level + 1,
+                    prev_level,
+                    protected,
+                    &child_indent,
+                    start,
+                    end,
+                    result,
+                );
+            }
+            result.push_str(&format!("{indent}{leading}{start}@-others{end}\n"));
+        } else if trimmed.trim_end() == "@all" {
+            expanded = true;
+            let leading = &line[..line.len() - trimmed.len()];
+            let child_indent = format!("{indent}{leading}");
+            result.push_str(&format!("{child_indent}{start}@+all{end}\n"));
+            for child in &position.children {
+                render_position_relative(
+                    outline,
+                    child,
+                    level + 1,
+                    prev_level,
+                    protected,
+                    &child_indent,
+                    start,
+                    end,
+                    result,
+                );
+            }
+            result.push_str(&format!("{child_indent}{start}@-all{end}\n"));
+        } else if let Some(section) = section_reference(trimmed.trim_end()) {
+            expanded = true;
+            let leading = &line[..line.len() - trimmed.len()];
+            let child_indent = format!("{indent}{leading}");
+            result.push_str(&format!("{child_indent}{start}@+{section}{end}\n"));
+            if let Some(child) = position
+                .children
+                .iter()
+                .find(|child| outline.nodes[&child.node].headline.trim() == section)
+            {
+                render_position_relative(
+                    outline,
+                    child,
+                    level + 1,
+                    prev_level,
+                    protected,
+                    &child_indent,
+                    start,
+                    end,
+                    result,
+                );
+            }
+            result.push_str(&format!("{child_indent}{start}@-{section}{end}\n"));
+        } else if trimmed.starts_with("@first ") {
+            result.push_str(&format!("{indent}{start}@@first{end}\n"));
+        } else if trimmed.starts_with("@last ") {
+            result.push_str(&format!("{indent}{start}@@last{end}\n"));
+        } else if let Some(directive) = trimmed.strip_prefix('@') {
+            result.push_str(&format!(
+                "{indent}{start}@@{}{end}\n",
+                directive.trim_end_matches(['\r', '\n'])
+            ));
+        } else {
+            let rendered = format!("{indent}{line}");
+            if is_sentinel_like(&rendered, start, end) {
+                result.push_str(&format!("{indent}{start}@verbatim{end}\n"));
+            }
+            result.push_str(&rendered);
+            if !line.ends_with('\n') {
+                result.push('\n');
+            }
+        }
+    }
+    if !expanded && !position.children.is_empty() {
+        result.push_str(&format!("{indent}{start}@+others{end}\n"));
+        for child in position
+            .children
+            .iter()
+            .filter(|child| !is_section_node(outline, child))
+        {
+            render_position_relative(
+                outline,
+                child,
+                level + 1,
+                prev_level,
+                protected,
+                indent,
+                start,
+                end,
+                result,
+            );
+        }
+        result.push_str(&format!("{indent}{start}@-others{end}\n"));
+    }
 }
 
 fn render_private(
@@ -572,6 +811,59 @@ mod tests {
         let report = sync_document(&mut doc, &outline_path, None, None, false).unwrap();
         assert_eq!(report.changed, 1);
         assert_eq!(doc.outline.nodes[&NodeId::from("r")].body, "new\n");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn render_relative_omits_gnx_except_for_protected_nodes() {
+        let source = concat!(
+            r#"<leo_file><vnodes><v t="r"><vh>@f test.py</vh>"#,
+            r#"<v t="ord"><vh>ordinary</vh></v>"#,
+            r#"<v t="clone1"><vh>cloned</vh></v>"#,
+            r#"<v t="ua" custom="v"><vh>has ua</vh></v>"#,
+            r#"</v><v t="clone1"></v></vnodes>"#,
+            r#"<tnodes><t tx="r"></t><t tx="ord">a</t><t tx="clone1">b</t>"#,
+            r#"<t tx="ua" custom="t">c</t></tnodes></leo_file>"#,
+        );
+        let doc = LeoDocument::parse(source).unwrap();
+        let rendered = render_relative(&doc.outline, &PositionId("0".into()), "#", "").unwrap();
+
+        assert!(rendered.contains("#@0 [r] @f test.py\n"));
+        assert!(rendered.contains("#@> ordinary\n"));
+        assert!(!rendered.contains("[ord]"));
+        assert!(rendered.contains("[clone1] cloned\n"));
+        assert!(rendered.contains("[ua] has ua\n"));
+
+        let parsed = RelativeFile::parse(&rendered).unwrap();
+        assert_eq!(parsed.root, NodeId::from("r"));
+        assert_eq!(parsed.outline.roots[0].children.len(), 3);
+        assert_eq!(
+            parsed.outline.roots[0].children[1].node,
+            NodeId::from("clone1")
+        );
+    }
+
+    #[test]
+    fn f_sync_reconciles_anonymous_nodes_and_keeps_clone_identity() {
+        let source = concat!(
+            r#"<leo_file><vnodes><v t="r"><vh>@f test.py</vh>"#,
+            r#"<v t="ord"><vh>ordinary</vh></v>"#,
+            r#"</v></vnodes>"#,
+            r#"<tnodes><t tx="r"></t><t tx="ord">old body</t></tnodes></leo_file>"#,
+        );
+        let mut doc = LeoDocument::parse(source).unwrap();
+        let dir = std::env::temp_dir().join(format!("leo-cub-f-sync-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let outline_path = dir.join("outline.leo");
+        fs::write(
+            dir.join("test.py"),
+            "#@+leo-ver=cub-1-thin\n#@0 [r] @f test.py\n#@+others\n#@> ordinary\nnew body\n#@-others\n#@-leo\n",
+        )
+        .unwrap();
+        let report = sync_document(&mut doc, &outline_path, None, None, false).unwrap();
+        assert_eq!(report.changed, 1);
+        assert_eq!(doc.outline.roots[0].children[0].node, NodeId::from("ord"));
+        assert_eq!(doc.outline.nodes[&NodeId::from("ord")].body, "new body\n");
         let _ = fs::remove_dir_all(dir);
     }
 }
