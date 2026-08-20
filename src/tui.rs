@@ -4540,7 +4540,10 @@ mod tests {
         assert!(app.status.starts_with("imported 1 new file(s)"));
 
         command_import_run(&mut app);
-        assert!(app.status.starts_with("no new files or subdirectories to import"));
+        assert!(
+            app.status
+                .starts_with("no new files or subdirectories to import")
+        );
 
         fs::remove_dir_all(&directory).unwrap();
     }
@@ -4574,7 +4577,10 @@ mod tests {
         assert_eq!(path_position.children.len(), 1);
         let added = &app.document.outline.nodes[&path_position.children[0].node];
         assert_eq!(added.headline, "@path nested");
-        assert!(app.status.starts_with("imported 0 new file(s) and 1 new subdirectory(ies)"));
+        assert!(
+            app.status
+                .starts_with("imported 0 new file(s) and 1 new subdirectory(ies)")
+        );
 
         fs::remove_dir_all(&directory).unwrap();
     }
