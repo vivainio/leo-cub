@@ -1,4 +1,5 @@
 use std::{
+    cell::RefCell,
     collections::{HashMap, HashSet},
     env, fs,
     fs::OpenOptions,
@@ -6,6 +7,7 @@ use std::{
     io::Write,
     path::{Component, Path, PathBuf},
     process::{Command, Stdio},
+    rc::Rc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -1356,6 +1358,37 @@ fn strip_apply_directive(body: &str) -> String {
         .join("\n")
 }
 
+/// Runs `body` as a Rhai script and returns a `(status, stdout, stderr)`
+/// triple shaped like a subprocess's, so callers don't need a separate code
+/// path: `print`/`debug` calls accumulate as "stdout", a script error (or
+/// `Engine::eval`'s parse/runtime failure) becomes "stderr" with status `1`,
+/// and a clean run is status `0`. No outline access yet -- that's a
+/// follow-up; this only proves scripts can run in-process at all.
+fn run_rhai_script(body: &str) -> (Option<i32>, String, String) {
+    let output = Rc::new(RefCell::new(String::new()));
+    let print_output = output.clone();
+    let debug_output = output.clone();
+
+    let mut engine = rhai::Engine::new();
+    engine.on_print(move |s| {
+        let mut output = print_output.borrow_mut();
+        output.push_str(s);
+        output.push('\n');
+    });
+    engine.on_debug(move |s, source, pos| {
+        let mut output = debug_output.borrow_mut();
+        match source {
+            Some(source) => output.push_str(&format!("{source} @ {pos:?} | {s}\n")),
+            None => output.push_str(&format!("{pos:?} | {s}\n")),
+        }
+    });
+
+    match engine.eval::<rhai::Dynamic>(body) {
+        Ok(_) => (Some(0), output.borrow().clone(), String::new()),
+        Err(error) => (Some(1), output.borrow().clone(), error.to_string()),
+    }
+}
+
 /// Runs the body of the `@action` node at `position` as a script and puts
 /// the result in `app.action_output`, which the body pane shows in place of
 /// the node's body until the selection moves to a different node.
@@ -1372,52 +1405,64 @@ fn run_action(app: &mut App, position: &PositionId) {
     let language = crate::syntax::language_directive(&node.body).map(str::to_owned);
     #[cfg(not(feature = "syntax"))]
     let language: Option<String> = None;
-    let (interpreter, interpreter_args) = interpreter_for(language.as_deref());
     let apply_requested = wants_apply(&node.body);
     // The `@language`/`@apply` directives pick the interpreter and the
     // output handling but aren't themselves valid code in any language, so
     // they must not be sent to the interpreter.
     let body = strip_apply_directive(&strip_language_directive(&node.body));
 
-    app.status = format!("running '{name}' with {interpreter}...");
-    // `parent()` of a bare filename like "foo.leo" is `Some("")`, and
-    // `current_dir("")` fails at `chdir`, so only set a cwd when non-empty.
-    let cwd = app
-        .path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .map(Path::to_path_buf);
-    let mut command = Command::new(interpreter);
-    command.args(interpreter_args);
-    if let Some(cwd) = &cwd {
-        command.current_dir(cwd);
-    }
-    command
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    // `@language rhai` runs in-process instead of spawning a subprocess: no
+    // interpreter to find on PATH, no stdin/stdout plumbing. Its `print`/
+    // `debug` output stands in for stdout/stderr so the rest of this
+    // function (status line, `@apply` handling, `ActionOutput`) doesn't need
+    // to know the difference.
+    let (interpreter, status, stdout, stderr) = if language.as_deref() == Some("rhai") {
+        app.status = format!("running '{name}' with rhai...");
+        let (status, stdout, stderr) = run_rhai_script(&body);
+        ("rhai", status, stdout, stderr)
+    } else {
+        let (interpreter, interpreter_args) = interpreter_for(language.as_deref());
+        app.status = format!("running '{name}' with {interpreter}...");
+        // `parent()` of a bare filename like "foo.leo" is `Some("")`, and
+        // `current_dir("")` fails at `chdir`, so only set a cwd when non-empty.
+        let cwd = app
+            .path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .map(Path::to_path_buf);
+        let mut command = Command::new(interpreter);
+        command.args(interpreter_args);
+        if let Some(cwd) = &cwd {
+            command.current_dir(cwd);
+        }
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
 
-    let outcome = command.spawn().and_then(move |mut child| {
-        let mut stdin = child.stdin.take().expect("stdin was piped");
-        let writer = std::thread::spawn(move || {
-            let _ = stdin.write_all(body.as_bytes());
+        let outcome = command.spawn().and_then(move |mut child| {
+            let mut stdin = child.stdin.take().expect("stdin was piped");
+            let writer = std::thread::spawn(move || {
+                let _ = stdin.write_all(body.as_bytes());
+            });
+            let output = child.wait_with_output();
+            let _ = writer.join();
+            output
         });
-        let output = child.wait_with_output();
-        let _ = writer.join();
-        output
-    });
 
-    let (status, stdout, stderr) = match outcome {
-        Ok(output) => (
-            output.status.code(),
-            String::from_utf8_lossy(&output.stdout).into_owned(),
-            String::from_utf8_lossy(&output.stderr).into_owned(),
-        ),
-        Err(error) => (
-            None,
-            String::new(),
-            format!("failed to run {interpreter}: {error}"),
-        ),
+        let (status, stdout, stderr) = match outcome {
+            Ok(output) => (
+                output.status.code(),
+                String::from_utf8_lossy(&output.stdout).into_owned(),
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+            ),
+            Err(error) => (
+                None,
+                String::new(),
+                format!("failed to run {interpreter}: {error}"),
+            ),
+        };
+        (interpreter, status, stdout, stderr)
     };
 
     // `@apply` treats a successful run's stdout as a `cub apply`-style JSON
@@ -4753,6 +4798,58 @@ mod tests {
             app.action_output.is_none(),
             "output should clear once selection moves to a different node"
         );
+    }
+
+    #[test]
+    fn a_rhai_action_runs_in_process_without_spawning_a_subprocess() {
+        let mut app = editing_app();
+        {
+            let node = app
+                .document
+                .outline
+                .nodes
+                .get_mut(&NodeId::from("b"))
+                .unwrap();
+            node.headline = "@action Greet in Rhai".into();
+            node.body = "@language rhai\nprint(\"hello from rhai\");".into();
+        }
+        app.selected = 1; // row "0/0" -> node "b"
+
+        run_action(&mut app, &PositionId("0/0".into()));
+
+        let output = app.action_output.as_ref().expect("action produced output");
+        assert_eq!(output.interpreter, "rhai");
+        assert_eq!(output.status, Some(0));
+        assert!(
+            output.text.contains("hello from rhai"),
+            "{:?}",
+            output.text
+        );
+    }
+
+    #[test]
+    fn a_rhai_action_reports_a_script_error_without_touching_the_outline() {
+        let mut app = editing_app();
+        let node_count_before = app.document.outline.nodes.len();
+        {
+            let node = app
+                .document
+                .outline
+                .nodes
+                .get_mut(&NodeId::from("b"))
+                .unwrap();
+            node.headline = "@action Broken Rhai".into();
+            node.body = "@language rhai\nlet x = 1 / 0;".into();
+        }
+        app.selected = 1;
+
+        run_action(&mut app, &PositionId("0/0".into()));
+
+        assert!(!app.dirty);
+        assert_eq!(app.document.outline.nodes.len(), node_count_before);
+        let output = app.action_output.as_ref().expect("action produced output");
+        assert_eq!(output.interpreter, "rhai");
+        assert_ne!(output.status, Some(0));
     }
 
     #[test]
