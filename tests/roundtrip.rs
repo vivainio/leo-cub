@@ -59,12 +59,21 @@ fn insert_uses_parent_gnx_and_updates_the_shared_clone_subtree() {
     assert!(rendered.contains(r#"<v t="b"><vh>Child</vh>"#));
     assert_eq!(rendered.matches(r#"<v t="c""#).count(), 1);
 
+    // "b" is written in full only at its first occurrence (under "a"); the
+    // second occurrence at the top level is elided to `<v t="b"></v>` in the
+    // XML, but since it's a clone of the same node it must reparse with the
+    // same child, not empty (see `clone_occurrences_all_retain_their_children`
+    // in src/xml.rs).
     let reparsed = LeoDocument::parse(&rendered).unwrap();
     assert_eq!(
         reparsed.outline.roots[0].children[0].children[0].node,
         NodeId::from("c")
     );
-    assert!(reparsed.outline.roots[1].children.is_empty());
+    assert_eq!(reparsed.outline.roots[1].children.len(), 1);
+    assert_eq!(
+        reparsed.outline.roots[1].children[0].node,
+        NodeId::from("c")
+    );
 }
 
 #[test]
