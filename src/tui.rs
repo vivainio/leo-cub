@@ -973,8 +973,15 @@ fn handle_palette_input(app: &mut App, key: KeyEvent) {
                 .and_then(|palette| palette.matches.get(palette.active).cloned());
             app.palette = None;
             if let Some(position) = position {
+                // Capture the selection as it stood *before* the action node
+                // takes it over below, so the env vars describe the node the
+                // user meant to act on, not the action node itself.
+                let target = app
+                    .selected_row()
+                    .map(|row| row.position)
+                    .unwrap_or_else(|| position.clone());
                 reveal_and_select(app, &position);
-                run_action(app, &position);
+                run_action(app, &position, &target);
             } else {
                 app.status = "no matching action".into();
             }
@@ -1356,10 +1363,29 @@ fn strip_apply_directive(body: &str) -> String {
         .join("\n")
 }
 
+/// The GNX of the node one position above `position`, i.e. `position`'s
+/// parent, or `None` when `position` is a root. Used to populate
+/// `CUB_PARENT_GNX`: a script can't derive this itself since it only sees
+/// what we hand it via env vars, not the outline.
+fn parent_gnx(outline: &Outline, position: &PositionId) -> Option<NodeId> {
+    let (parent, _) = position.0.rsplit_once('/')?;
+    outline
+        .position(&PositionId(parent.to_owned()))
+        .map(|position| position.node.clone())
+}
+
 /// Runs the body of the `@action` node at `position` as a script and puts
 /// the result in `app.action_output`, which the body pane shows in place of
 /// the node's body until the selection moves to a different node.
-fn run_action(app: &mut App, position: &PositionId) {
+///
+/// The script's environment carries the node the user had selected when
+/// they invoked the action (`target`) -- not the `@action` node itself,
+/// which may live anywhere in the tree -- since a spawned process otherwise
+/// has no way to know what it's meant to act on: `CUB_GNX` (the target's
+/// gnx, e.g. for `insert-tree`'s `parent`), `CUB_PARENT_GNX` (unset for a
+/// root), `CUB_HEADLINE`, `CUB_POSITION`, `CUB_PATH` (slash-separated
+/// headline path), and `CUB_DOC` (the open `.leo` file's absolute path).
+fn run_action(app: &mut App, position: &PositionId, target: &PositionId) {
     let Some(row) = all_rows(&app.document.outline)
         .into_iter()
         .find(|row| &row.position == position)
@@ -1368,6 +1394,20 @@ fn run_action(app: &mut App, position: &PositionId) {
     };
     let node = &app.document.outline.nodes[&row.node];
     let name = action_name(&node.headline).to_owned();
+    // Falls back to the action's own row when `target` no longer resolves
+    // (e.g. it was removed by an earlier action in the same session).
+    let target_row = all_rows(&app.document.outline)
+        .into_iter()
+        .find(|row| &row.position == target)
+        .unwrap_or_else(|| row.clone());
+    let gnx = target_row.node.0.clone();
+    let headline = app.document.outline.nodes[&target_row.node].headline.clone();
+    let headline_path = headline_path(app, &target_row);
+    let parent_gnx = parent_gnx(&app.document.outline, &target_row.position).map(|id| id.0);
+    let target_position = target_row.position.0.clone();
+    let doc_path = absolutize(&app.path, &env::current_dir().unwrap_or_default())
+        .to_string_lossy()
+        .into_owned();
     #[cfg(feature = "syntax")]
     let language = crate::syntax::language_directive(&node.body).map(str::to_owned);
     #[cfg(not(feature = "syntax"))]
@@ -1391,6 +1431,15 @@ fn run_action(app: &mut App, position: &PositionId) {
     command.args(interpreter_args);
     if let Some(cwd) = &cwd {
         command.current_dir(cwd);
+    }
+    command
+        .env("CUB_GNX", &gnx)
+        .env("CUB_HEADLINE", &headline)
+        .env("CUB_POSITION", &target_position)
+        .env("CUB_PATH", &headline_path)
+        .env("CUB_DOC", &doc_path);
+    if let Some(parent_gnx) = &parent_gnx {
+        command.env("CUB_PARENT_GNX", parent_gnx);
     }
     command
         .stdin(Stdio::piped())
@@ -4728,7 +4777,11 @@ mod tests {
         }
         app.selected = 1; // row "0/0" -> node "b"
 
-        run_action(&mut app, &PositionId("0/0".into()));
+        run_action(
+            &mut app,
+            &PositionId("0/0".into()),
+            &PositionId("0/0".into()),
+        );
 
         let output = app.action_output.as_ref().expect("action produced output");
         assert_eq!(output.node, NodeId::from("b"));
@@ -4756,6 +4809,58 @@ mod tests {
     }
 
     #[test]
+    fn an_action_receives_the_previously_selected_node_as_cub_env_vars() {
+        // Node "b" ("@action Greet") is the action being run, but node "c"
+        // ("C") is what the user had selected before invoking it -- the env
+        // vars must describe "c", the target, not "b", the action itself.
+        let mut app = editing_app();
+        {
+            let node = app
+                .document
+                .outline
+                .nodes
+                .get_mut(&NodeId::from("b"))
+                .unwrap();
+            node.headline = "@action Greet".into();
+            node.body =
+                "echo $CUB_GNX/$CUB_PARENT_GNX/$CUB_HEADLINE/$CUB_POSITION/$CUB_PATH".into();
+        }
+
+        run_action(
+            &mut app,
+            &PositionId("0/0".into()),
+            &PositionId("0/1".into()),
+        );
+
+        let output = app.action_output.as_ref().expect("action produced output");
+        assert_eq!(output.text.trim(), "c/a/C/0/1/A/C");
+    }
+
+    #[test]
+    fn a_root_target_has_no_cub_parent_gnx() {
+        let mut app = editing_app();
+        {
+            let node = app
+                .document
+                .outline
+                .nodes
+                .get_mut(&NodeId::from("b"))
+                .unwrap();
+            node.headline = "@action Root".into();
+            node.body = "echo \"[$CUB_PARENT_GNX]\"".into();
+        }
+
+        run_action(
+            &mut app,
+            &PositionId("0/0".into()),
+            &PositionId("0".into()),
+        );
+
+        let output = app.action_output.as_ref().expect("action produced output");
+        assert_eq!(output.text.trim(), "[]");
+    }
+
+    #[test]
     fn an_apply_directive_applies_the_actions_stdout_to_the_outline() {
         let mut app = editing_app();
         {
@@ -4776,7 +4881,11 @@ mod tests {
         }
         app.selected = 1; // row "0/0" -> node "b"
 
-        run_action(&mut app, &PositionId("0/0".into()));
+        run_action(
+            &mut app,
+            &PositionId("0/0".into()),
+            &PositionId("0/0".into()),
+        );
 
         assert!(app.dirty, "applying an operation batch should mark dirty");
         assert!(app.status.contains("applied 1 operation"), "{}", app.status);
@@ -4809,7 +4918,11 @@ mod tests {
         }
         app.selected = 1;
 
-        run_action(&mut app, &PositionId("0/0".into()));
+        run_action(
+            &mut app,
+            &PositionId("0/0".into()),
+            &PositionId("0/0".into()),
+        );
 
         assert!(!app.dirty);
         assert_eq!(app.document.outline.nodes.len(), node_count_before);
@@ -4846,6 +4959,37 @@ mod tests {
         assert!(app.palette.is_none());
         assert_eq!(app.selected_row().unwrap().node, NodeId::from("b"));
         assert_eq!(app.action_output.as_ref().unwrap().status, Some(0));
+    }
+
+    #[test]
+    fn enter_in_the_palette_runs_the_action_against_the_node_selected_beforehand() {
+        // "c" is selected when the palette opens; "b" is the action node
+        // picked from it. The env vars must describe "c" -- reproduces a bug
+        // where they described "b" (the action itself) instead.
+        let mut app = editing_app();
+        {
+            let node = app
+                .document
+                .outline
+                .nodes
+                .get_mut(&NodeId::from("b"))
+                .unwrap();
+            node.headline = "@action Greet".into();
+            node.body = "echo $CUB_GNX".into();
+        }
+        app.selected = 2; // row "0/1" -> node "c"
+
+        start_palette(&mut app);
+        for character in "greet".chars() {
+            handle_palette_input(
+                &mut app,
+                KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+            );
+        }
+        handle_palette_input(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let output = app.action_output.as_ref().expect("action produced output");
+        assert_eq!(output.text.trim(), "c");
     }
 
     #[test]
