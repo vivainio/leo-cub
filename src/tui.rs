@@ -3660,7 +3660,15 @@ fn open_selected(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mu
     if !app.editable(&row) {
         return;
     }
-    match edit_body_in_temp_file(terminal, &app.document.outline.nodes[&row.node].body) {
+    #[cfg(feature = "syntax")]
+    let language = app.language_at(&row.position);
+    #[cfg(not(feature = "syntax"))]
+    let language: Option<String> = None;
+    match edit_body_in_temp_file(
+        terminal,
+        &app.document.outline.nodes[&row.node].body,
+        language.as_deref(),
+    ) {
         Ok(Some(body)) => {
             app.document
                 .outline
@@ -3763,8 +3771,9 @@ fn tildify(path: &Path, home: Option<&Path>) -> String {
 fn edit_body_in_temp_file(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     original: &str,
+    language: Option<&str>,
 ) -> Result<Option<String>> {
-    let path = unique_body_temp_path();
+    let path = unique_body_temp_path(language);
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -3785,16 +3794,44 @@ fn edit_body_in_temp_file(
     result
 }
 
-fn unique_body_temp_path() -> PathBuf {
+fn unique_body_temp_path(language: Option<&str>) -> PathBuf {
     let duration = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
     env::temp_dir().join(format!(
-        "leo-cub-body-{}-{}-{}.txt",
+        "leo-cub-body-{}-{}-{}.{}",
         std::process::id(),
         duration.as_secs(),
-        duration.subsec_nanos()
+        duration.subsec_nanos(),
+        extension_for_language(language)
     ))
+}
+
+/// Maps an `@language` directive to the file extension used when a body is
+/// opened in an external editor via a temp file, so editors that infer
+/// syntax highlighting from the filename (nearly all of them) get it right
+/// instead of falling back to plain text. Unrecognized or missing languages
+/// fall back to `txt`; most languages whose directive name doesn't already
+/// match a common extension are listed explicitly, and anything else is
+/// assumed to match (e.g. `lua`, `json`, `toml`, `sql`).
+fn extension_for_language(language: Option<&str>) -> &str {
+    match language.unwrap_or("") {
+        "python" | "python3" => "py",
+        "javascript" | "node" => "js",
+        "typescript" => "ts",
+        "tsx" => "tsx",
+        "rust" => "rs",
+        "ruby" => "rb",
+        "nu" | "nushell" => "nu",
+        "bash" => "sh",
+        "csharp" | "cs" => "cs",
+        "golang" => "go",
+        "objective-c" | "objc" | "objectivec" => "m",
+        "markdown" => "md",
+        "yml" => "yaml",
+        "" => "txt",
+        other => other,
+    }
 }
 
 fn suspend_and_open(
@@ -4318,6 +4355,24 @@ fn apply_step_live(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extension_for_language_maps_directive_names_to_editor_extensions() {
+        // A body-only node (no on-disk source file) opened for editing gets
+        // a temp file named from its `@language` directive, so an external
+        // editor picks the right filetype instead of falling back to plain
+        // text -- e.g. a `@language python` action node must open as `.py`,
+        // not `.txt`.
+        assert_eq!(extension_for_language(Some("python")), "py");
+        assert_eq!(extension_for_language(Some("rust")), "rs");
+        assert_eq!(extension_for_language(Some("nu")), "nu");
+        assert_eq!(extension_for_language(Some("lua")), "lua");
+        assert_eq!(
+            extension_for_language(Some("unknown-language")),
+            "unknown-language"
+        );
+        assert_eq!(extension_for_language(None), "txt");
+    }
 
     #[test]
     fn restoring_external_state_reinstates_pruned_original_child_nodes() {
