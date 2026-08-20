@@ -43,6 +43,16 @@ struct Row {
     has_children: bool,
 }
 
+/// A mouse-drag text selection within the body pane, in logical (line,
+/// char-column) coordinates over the node's full (unscrolled) text --
+/// matching the coordinate space `body_scroll`/`body_horizontal_scroll`
+/// offset into.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct BodySelection {
+    anchor: (usize, usize),
+    cursor: (usize, usize),
+}
+
 #[derive(Default)]
 struct OriginalExternalState {
     children: HashMap<NodeId, Vec<Position>>,
@@ -89,6 +99,7 @@ struct App {
     body_scroll_max: usize,
     body_horizontal_scroll: usize,
     body_horizontal_scroll_max: usize,
+    body_selection: Option<BodySelection>,
     body_wrap: bool,
     body_full_width: bool,
     outline_full_width: bool,
@@ -162,6 +173,7 @@ impl App {
             body_scroll_max: 0,
             body_horizontal_scroll: 0,
             body_horizontal_scroll_max: 0,
+            body_selection: None,
             body_wrap: false,
             body_full_width: false,
             outline_full_width: false,
@@ -255,9 +267,17 @@ impl App {
         let selected = self.selected.saturating_add_signed(delta).min(len - 1);
         if selected != self.selected {
             self.selected = selected;
-            self.body_scroll = 0;
-            self.body_horizontal_scroll = 0;
+            self.reset_body_view();
         }
+    }
+
+    /// Resets everything that only makes sense for the previously-selected
+    /// node's body: scroll position and any in-progress or finished mouse
+    /// text selection.
+    fn reset_body_view(&mut self) {
+        self.body_scroll = 0;
+        self.body_horizontal_scroll = 0;
+        self.body_selection = None;
     }
 
     fn scroll_body(&mut self, pages: isize) {
@@ -320,13 +340,11 @@ impl App {
             && let Some(language) = self.language_at(position)
         {
             self.wrap_by_language.insert(language, value);
-            self.body_scroll = 0;
-            self.body_horizontal_scroll = 0;
+            self.reset_body_view();
             return;
         }
         self.body_wrap = value;
-        self.body_scroll = 0;
-        self.body_horizontal_scroll = 0;
+        self.reset_body_view();
     }
 
     #[cfg(feature = "syntax")]
@@ -737,14 +755,12 @@ fn handle_key(
         KeyCode::Home => {
             app.selection_anchor = None;
             app.selected = 0;
-            app.body_scroll = 0;
-            app.body_horizontal_scroll = 0;
+            app.reset_body_view();
         }
         KeyCode::End => {
             app.selection_anchor = None;
             app.selected = app.rows().len().saturating_sub(1);
-            app.body_scroll = 0;
-            app.body_horizontal_scroll = 0;
+            app.reset_body_view();
         }
         KeyCode::PageUp => app.scroll_body(-1),
         KeyCode::PageDown => app.scroll_body(1),
@@ -754,39 +770,214 @@ fn handle_key(
 }
 
 fn handle_mouse(app: &mut App, area: Rect, mouse: MouseEvent) {
-    if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+    let kind = mouse.kind;
+    if !matches!(
+        kind,
+        MouseEventKind::Down(MouseButton::Left)
+            | MouseEventKind::Drag(MouseButton::Left)
+            | MouseEventKind::Up(MouseButton::Left)
+    ) {
         return;
     }
     let content_height = area.height.saturating_sub(1);
     let content = Rect::new(area.x, area.y, area.width, content_height);
     let columns = content_columns(content, app);
     let outline = columns[0];
-    if app.body_full_width
-        || mouse.column < outline.x
-        || mouse.column >= outline.right()
-        || mouse.row < outline.y.saturating_add(1)
-        || mouse.row >= outline.bottom().saturating_sub(1)
-    {
+    let in_outline = !app.body_full_width
+        && mouse.column >= outline.x
+        && mouse.column < outline.right()
+        && mouse.row >= outline.y.saturating_add(1)
+        && mouse.row < outline.bottom().saturating_sub(1);
+    if in_outline {
+        handle_outline_mouse(app, outline, kind, mouse);
         return;
     }
+    if app.outline_full_width {
+        return;
+    }
+    handle_body_mouse(app, columns[1], kind, mouse);
+}
+
+/// Click-to-select and click-the-expand-marker, plus drag-to-extend the
+/// same multi-row tree selection that Shift-↑/↓ builds (`selection_anchor`
+/// fixed at the press, `selected` following the pointer).
+fn handle_outline_mouse(app: &mut App, outline: Rect, kind: MouseEventKind, mouse: MouseEvent) {
     let row = app.outline_scroll + usize::from(mouse.row - outline.y - 1);
     let rows = app.rows();
     let Some(clicked) = rows.get(row) else {
         return;
     };
-    let marker_start = outline.x + 1 + u16::try_from(clicked.depth * 2).unwrap_or(u16::MAX);
-    let on_marker =
-        clicked.has_children && mouse.column >= marker_start && mouse.column < marker_start + 2;
-    let position = clicked.position.clone();
-    app.selection_anchor = None;
-    if row != app.selected {
-        app.body_scroll = 0;
-        app.body_horizontal_scroll = 0;
+    match kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            let marker_start = outline.x + 1 + u16::try_from(clicked.depth * 2).unwrap_or(u16::MAX);
+            let on_marker = clicked.has_children
+                && mouse.column >= marker_start
+                && mouse.column < marker_start + 2;
+            let position = clicked.position.clone();
+            app.selection_anchor = None;
+            if row != app.selected {
+                app.reset_body_view();
+            }
+            app.selected = row;
+            if on_marker {
+                app.toggle(!app.expanded.contains(&position));
+            }
+        }
+        MouseEventKind::Drag(MouseButton::Left) => {
+            app.selection_anchor.get_or_insert(app.selected);
+            if row != app.selected {
+                app.reset_body_view();
+            }
+            app.selected = row;
+        }
+        _ => {}
     }
-    app.selected = row;
-    if on_marker {
-        app.toggle(!app.expanded.contains(&position));
+}
+
+/// Drag-to-select body text and copy the selection to the system clipboard
+/// (via OSC 52, same mechanism as `copy_location_to_clipboard`) on release.
+///
+/// Only available when the body isn't word-wrapped: `body_scroll` counts
+/// *visual* rows once wrap is on (`Paragraph::line_count` under wrap), so a
+/// screen row no longer maps onto a single logical line/column, and
+/// ratatui's wrap doesn't expose the reverse mapping needed to fix that.
+fn handle_body_mouse(app: &mut App, body_area: Rect, kind: MouseEventKind, mouse: MouseEvent) {
+    let node_area = Block::default().borders(Borders::ALL).inner(body_area);
+    if node_area.width == 0 || node_area.height == 0 {
+        return;
     }
+    let starting = matches!(kind, MouseEventKind::Down(MouseButton::Left));
+    if starting
+        && (mouse.column < node_area.x
+            || mouse.column >= node_area.right()
+            || mouse.row < node_area.y
+            || mouse.row >= node_area.bottom())
+    {
+        return;
+    }
+    if !starting && app.body_selection.is_none() {
+        return;
+    }
+    let rows = app.rows();
+    let Some(row) = rows.get(app.selected).cloned() else {
+        return;
+    };
+    if starting && app.wrap_for(Some(&row.position)) {
+        app.status = "mouse text selection needs word-wrap off (press W)".into();
+        return;
+    }
+    let lines = body_plain_lines(app, &row);
+    if lines.is_empty() {
+        return;
+    }
+
+    let clamped_row = mouse.row.clamp(node_area.y, node_area.bottom().saturating_sub(1));
+    let clamped_column = mouse
+        .column
+        .clamp(node_area.x, node_area.right().saturating_sub(1));
+    let line_index = (app.body_scroll + usize::from(clamped_row - node_area.y)).min(lines.len() - 1);
+    let column_index = (app.body_horizontal_scroll + usize::from(clamped_column - node_area.x))
+        .min(lines[line_index].chars().count());
+    let position = (line_index, column_index);
+
+    match kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            app.body_selection = Some(BodySelection {
+                anchor: position,
+                cursor: position,
+            });
+        }
+        MouseEventKind::Drag(MouseButton::Left) => {
+            if let Some(selection) = app.body_selection.as_mut() {
+                selection.cursor = position;
+            }
+        }
+        MouseEventKind::Up(MouseButton::Left) => copy_body_selection_to_clipboard(app, &lines),
+        _ => {}
+    }
+}
+
+/// The node body's plain text (no syntax-highlight styling), split into
+/// lines matching `body_text`'s line layout -- what mouse coordinates and
+/// the rendered selection highlight both index into.
+fn body_plain_lines(app: &mut App, row: &Row) -> Vec<String> {
+    let text = if let Some(output) = app
+        .action_output
+        .as_ref()
+        .filter(|out| out.node == row.node)
+    {
+        Text::from(output.text.clone())
+    } else {
+        body_text(app, row)
+    };
+    text.lines
+        .iter()
+        .map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect())
+        .collect()
+}
+
+fn copy_body_selection_to_clipboard(app: &mut App, lines: &[String]) {
+    let Some(selection) = app.body_selection else {
+        return;
+    };
+    let Some(text) = selected_body_text(lines, selection) else {
+        return;
+    };
+    match execute!(
+        io::stdout(),
+        CopyToClipboard::to_clipboard_from(text.clone())
+    ) {
+        Ok(()) => {
+            let chars = text.chars().count();
+            app.status = format!(
+                "copied {chars} selected character{} to clipboard",
+                if chars == 1 { "" } else { "s" }
+            );
+        }
+        Err(error) => app.status = format!("clipboard copy failed: {error}"),
+    }
+}
+
+/// The text a `BodySelection` covers, or `None` for an empty (click, no
+/// drag) selection.
+fn selected_body_text(lines: &[String], selection: BodySelection) -> Option<String> {
+    let (start, end) = if selection.anchor <= selection.cursor {
+        (selection.anchor, selection.cursor)
+    } else {
+        (selection.cursor, selection.anchor)
+    };
+    if start == end {
+        return None;
+    }
+    let (start_line, start_col) = start;
+    let (end_line, end_col) = end;
+    if start_line >= lines.len() {
+        return None;
+    }
+    let end_line = end_line.min(lines.len() - 1);
+    let mut text = String::new();
+    for (line_index, line) in lines
+        .iter()
+        .enumerate()
+        .take(end_line + 1)
+        .skip(start_line)
+    {
+        if line_index > start_line {
+            text.push('\n');
+        }
+        let line_len = line.chars().count();
+        let (from, to) = if line_index == start_line && line_index == end_line {
+            (start_col.min(line_len), end_col.min(line_len))
+        } else if line_index == start_line {
+            (start_col.min(line_len), line_len)
+        } else if line_index == end_line {
+            (0, end_col.min(line_len))
+        } else {
+            (0, line_len)
+        };
+        text.extend(line.chars().skip(from).take(to.saturating_sub(from)));
+    }
+    Some(text)
 }
 
 fn start_find(app: &mut App) {
@@ -2897,6 +3088,9 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
             {
                 body = highlight_query_in_text(body, &pattern);
             }
+            if let Some(selection) = app.body_selection {
+                body = highlight_selection_in_text(body, selection);
+            }
             let body_width = body.width();
             let mut paragraph = Paragraph::new(body);
             if wrap {
@@ -3379,6 +3573,82 @@ fn highlight_matches_in_line(line: Line<'static>, pattern: &Regex) -> Line<'stat
         }
         if cursor < text.len() {
             spans.push(Span::styled(text[cursor..].to_owned(), span.style));
+        }
+    }
+    Line::from(spans)
+}
+
+/// Overlays the mouse-drag selection highlight, same span-splitting
+/// technique as `highlight_query_in_text` but keyed by a per-line
+/// char-column range instead of a regex match.
+fn highlight_selection_in_text(text: Text<'static>, selection: BodySelection) -> Text<'static> {
+    let (start, end) = if selection.anchor <= selection.cursor {
+        (selection.anchor, selection.cursor)
+    } else {
+        (selection.cursor, selection.anchor)
+    };
+    if start == end {
+        return text;
+    }
+    let (start_line, start_col) = start;
+    let (end_line, end_col) = end;
+    Text::from(
+        text.lines
+            .into_iter()
+            .enumerate()
+            .map(|(index, line)| {
+                if index < start_line || index > end_line {
+                    return line;
+                }
+                let (from, to) = if index == start_line && index == end_line {
+                    (start_col, end_col)
+                } else if index == start_line {
+                    (start_col, usize::MAX)
+                } else if index == end_line {
+                    (0, end_col)
+                } else {
+                    (0, usize::MAX)
+                };
+                highlight_char_range_in_line(line, from, to)
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn highlight_char_range_in_line(line: Line<'static>, from: usize, to: usize) -> Line<'static> {
+    if from >= to {
+        return line;
+    }
+    let mut spans = Vec::new();
+    let mut offset = 0usize;
+    for span in line.spans {
+        let chars: Vec<char> = span.content.chars().collect();
+        let span_start = offset;
+        let span_end = span_start + chars.len();
+        offset = span_end;
+        let overlap_start = from.max(span_start);
+        let overlap_end = to.min(span_end);
+        if overlap_start >= overlap_end {
+            spans.push(Span::styled(chars.into_iter().collect::<String>(), span.style));
+            continue;
+        }
+        let local_start = overlap_start - span_start;
+        let local_end = overlap_end - span_start;
+        if local_start > 0 {
+            spans.push(Span::styled(
+                chars[..local_start].iter().collect::<String>(),
+                span.style,
+            ));
+        }
+        spans.push(Span::styled(
+            chars[local_start..local_end].iter().collect::<String>(),
+            span.style.bg(Color::Blue).add_modifier(Modifier::BOLD),
+        ));
+        if local_end < chars.len() {
+            spans.push(Span::styled(
+                chars[local_end..].iter().collect::<String>(),
+                span.style,
+            ));
         }
     }
     Line::from(spans)
@@ -5613,6 +5883,172 @@ mod tests {
         assert_eq!(app.selected, 1);
         assert!(app.expanded.contains(&PositionId("0".into())));
         assert_eq!(app.rows().len(), 3);
+    }
+
+    #[test]
+    fn dragging_in_the_outline_extends_a_multi_row_selection() {
+        let mut app = editing_app();
+        assert_eq!(app.rows().len(), 3, "root starts expanded with 2 children");
+        let area = Rect::new(0, 0, 80, 24);
+        let press_first_row = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 10,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        };
+        handle_mouse(&mut app, area, press_first_row);
+        assert_eq!(app.selected, 0);
+        assert_eq!(app.selection_anchor, None);
+
+        let drag_to_third_row = MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: 10,
+            row: 3,
+            modifiers: KeyModifiers::NONE,
+        };
+        handle_mouse(&mut app, area, drag_to_third_row);
+        assert_eq!(
+            app.selection_anchor,
+            Some(0),
+            "anchor stays pinned at the press row"
+        );
+        assert_eq!(app.selected, 2, "selection follows the drag");
+
+        let release = MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: 10,
+            row: 3,
+            modifiers: KeyModifiers::NONE,
+        };
+        handle_mouse(&mut app, area, release);
+        assert_eq!(app.selection_anchor, Some(0), "release doesn't collapse it");
+        assert_eq!(app.selected, 2);
+    }
+
+    #[test]
+    fn dragging_in_the_body_selects_text_and_copies_it_on_release() {
+        let mut app = editing_app();
+        app.document
+            .outline
+            .nodes
+            .get_mut(&NodeId::from("a"))
+            .unwrap()
+            .body = "hello world\nsecond line".into();
+        app.selected = 0;
+        // Standalone body_area, independent of layout percentages: a
+        // bordered block whose content (post-inset) starts at (41, 1).
+        let body_area = Rect::new(40, 0, 40, 20);
+
+        handle_body_mouse(
+            &mut app,
+            body_area,
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 47, // node_area.x(41) + col 6, just after "hello "
+                row: 1,     // node_area.y(1) + line 0
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+        assert_eq!(
+            app.body_selection,
+            Some(BodySelection {
+                anchor: (0, 6),
+                cursor: (0, 6),
+            })
+        );
+
+        handle_body_mouse(
+            &mut app,
+            body_area,
+            MouseEventKind::Drag(MouseButton::Left),
+            MouseEvent {
+                kind: MouseEventKind::Drag(MouseButton::Left),
+                column: 47, // col 6 again, just after "second"
+                row: 2,     // line 1
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+        assert_eq!(
+            app.body_selection,
+            Some(BodySelection {
+                anchor: (0, 6),
+                cursor: (1, 6),
+            })
+        );
+
+        handle_body_mouse(
+            &mut app,
+            body_area,
+            MouseEventKind::Up(MouseButton::Left),
+            MouseEvent {
+                kind: MouseEventKind::Up(MouseButton::Left),
+                column: 47,
+                row: 2,
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+        assert_eq!(app.status, "copied 12 selected characters to clipboard");
+        // The highlight stays visible after copying, like the search match
+        // highlight does, until something else changes the selected row.
+        assert!(app.body_selection.is_some());
+    }
+
+    #[test]
+    fn a_plain_click_in_the_body_does_not_copy_anything() {
+        let mut app = editing_app();
+        app.document
+            .outline
+            .nodes
+            .get_mut(&NodeId::from("a"))
+            .unwrap()
+            .body = "hello world".into();
+        app.selected = 0;
+        app.status = "untouched".into();
+        let body_area = Rect::new(40, 0, 40, 20);
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 45,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        };
+        handle_body_mouse(&mut app, body_area, click.kind, click);
+        let release = MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            ..click
+        };
+        handle_body_mouse(&mut app, body_area, release.kind, release);
+        assert_eq!(app.status, "untouched", "a zero-width selection copies nothing");
+    }
+
+    #[test]
+    fn mouse_selection_is_disabled_while_the_body_is_word_wrapped() {
+        // body_scroll counts *visual* rows once wrap is on, so a screen
+        // row no longer maps onto a single logical line/column -- rather
+        // than select the wrong text, pressing should refuse and say why.
+        let mut app = editing_app();
+        app.document
+            .outline
+            .nodes
+            .get_mut(&NodeId::from("a"))
+            .unwrap()
+            .body = "hello world\nsecond line".into();
+        app.selected = 0;
+        app.body_wrap = true;
+        let body_area = Rect::new(40, 0, 40, 20);
+
+        let down = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 47,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        };
+        handle_body_mouse(&mut app, body_area, down.kind, down);
+        assert_eq!(app.body_selection, None);
+        assert_eq!(
+            app.status,
+            "mouse text selection needs word-wrap off (press W)"
+        );
     }
 
     #[test]
