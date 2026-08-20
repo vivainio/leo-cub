@@ -927,11 +927,14 @@ fn handle_body_mouse(app: &mut App, body_area: Rect, kind: MouseEventKind, mouse
         return;
     }
 
-    let clamped_row = mouse.row.clamp(node_area.y, node_area.bottom().saturating_sub(1));
+    let clamped_row = mouse
+        .row
+        .clamp(node_area.y, node_area.bottom().saturating_sub(1));
     let clamped_column = mouse
         .column
         .clamp(node_area.x, node_area.right().saturating_sub(1));
-    let line_index = (app.body_scroll + usize::from(clamped_row - node_area.y)).min(lines.len() - 1);
+    let line_index =
+        (app.body_scroll + usize::from(clamped_row - node_area.y)).min(lines.len() - 1);
     let column_index = (app.body_horizontal_scroll + usize::from(clamped_column - node_area.x))
         .min(lines[line_index].chars().count());
     let position = (line_index, column_index);
@@ -968,7 +971,12 @@ fn body_plain_lines(app: &mut App, row: &Row) -> Vec<String> {
     };
     text.lines
         .iter()
-        .map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect())
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect()
+        })
         .collect()
 }
 
@@ -1012,12 +1020,7 @@ fn selected_body_text(lines: &[String], selection: BodySelection) -> Option<Stri
     }
     let end_line = end_line.min(lines.len() - 1);
     let mut text = String::new();
-    for (line_index, line) in lines
-        .iter()
-        .enumerate()
-        .take(end_line + 1)
-        .skip(start_line)
-    {
+    for (line_index, line) in lines.iter().enumerate().take(end_line + 1).skip(start_line) {
         if line_index > start_line {
             text.push('\n');
         }
@@ -1648,7 +1651,9 @@ fn run_action(app: &mut App, position: &PositionId, target: &PositionId) {
         .find(|row| &row.position == target)
         .unwrap_or_else(|| row.clone());
     let gnx = target_row.node.0.clone();
-    let headline = app.document.outline.nodes[&target_row.node].headline.clone();
+    let headline = app.document.outline.nodes[&target_row.node]
+        .headline
+        .clone();
     let headline_path = headline_path(app, &target_row);
     let parent_gnx = parent_gnx(&app.document.outline, &target_row.position).map(|id| id.0);
     let target_position = target_row.position.0.clone();
@@ -3685,7 +3690,10 @@ fn highlight_char_range_in_line(line: Line<'static>, from: usize, to: usize) -> 
         let overlap_start = from.max(span_start);
         let overlap_end = to.min(span_end);
         if overlap_start >= overlap_end {
-            spans.push(Span::styled(chars.into_iter().collect::<String>(), span.style));
+            spans.push(Span::styled(
+                chars.into_iter().collect::<String>(),
+                span.style,
+            ));
             continue;
         }
         let local_start = overlap_start - span_start;
@@ -5176,11 +5184,7 @@ mod tests {
             node.body = "echo \"[$CUB_PARENT_GNX]\"".into();
         }
 
-        run_action(
-            &mut app,
-            &PositionId("0/0".into()),
-            &PositionId("0".into()),
-        );
+        run_action(&mut app, &PositionId("0/0".into()), &PositionId("0".into()));
 
         let output = app.action_output.as_ref().expect("action produced output");
         assert_eq!(output.text.trim(), "[]");
@@ -6125,7 +6129,10 @@ mod tests {
             ..click
         };
         handle_body_mouse(&mut app, body_area, release.kind, release);
-        assert_eq!(app.status, "untouched", "a zero-width selection copies nothing");
+        assert_eq!(
+            app.status, "untouched",
+            "a zero-width selection copies nothing"
+        );
     }
 
     #[test]
