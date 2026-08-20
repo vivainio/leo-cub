@@ -1144,10 +1144,12 @@ fn command_import_available(app: &App) -> bool {
 
 /// Scans the selected `@path` node's directory for files that don't already
 /// have a matching `@auto`/`@file`/... child, and adds one `@auto <name>`
-/// node per new file. Only the directory's direct files are considered;
-/// subdirectories are left for a later import once they have their own
-/// `@path` node. Content isn't fetched here — save and reload (Ctrl-S,
-/// Ctrl-R) load it the same way any other `@auto` node does.
+/// node per new file. Subdirectories without a matching `@path` child get an
+/// `@path <name>` node of their own, so a directory holding only
+/// subdirectories still produces something to import into next, rather than
+/// requiring each `@path` node to be created by hand first. Content isn't
+/// fetched here — save and reload (Ctrl-S, Ctrl-R) load it the same way any
+/// other `@auto` node does.
 fn command_import_run(app: &mut App) {
     let Some(row) = app.selected_row() else {
         app.status = "select a @path node to import into".into();
@@ -1163,13 +1165,18 @@ fn command_import_run(app: &mut App) {
     let Some(position) = app.document.outline.position(&row.position) else {
         return;
     };
-    let existing: HashSet<String> = position
+    let existing_files: HashSet<String> = position
         .children
         .iter()
         .filter_map(|child| {
             derived_filename(&app.document.outline.nodes[&child.node].headline)
                 .map(|(_, _, filename)| filename.to_owned())
         })
+        .collect();
+    let existing_dirs: HashSet<String> = position
+        .children
+        .iter()
+        .filter_map(|child| path_directive(&app.document.outline.nodes[&child.node].headline))
         .collect();
 
     let directory = resolved_directory(app, &row);
@@ -1180,21 +1187,37 @@ fn command_import_run(app: &mut App) {
             return;
         }
     };
-    let mut new_files: Vec<String> = entries
-        .flatten()
-        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .filter(|name| !existing.contains(name))
-        .collect();
+    let mut new_files = Vec::new();
+    let mut new_dirs = Vec::new();
+    for entry in entries.flatten() {
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if kind.is_file() && !existing_files.contains(&name) {
+            new_files.push(name);
+        } else if kind.is_dir() && !existing_dirs.contains(&name) {
+            new_dirs.push(name);
+        }
+    }
     new_files.sort();
+    new_dirs.sort();
 
-    if new_files.is_empty() {
-        app.status = format!("no new files to import from {}", directory.display());
+    if new_files.is_empty() && new_dirs.is_empty() {
+        app.status = format!(
+            "no new files or subdirectories to import from {}",
+            directory.display()
+        );
         return;
     }
 
-    let count = new_files.len();
-    for filename in new_files {
+    let file_count = new_files.len();
+    let dir_count = new_dirs.len();
+    let headlines = new_files
+        .into_iter()
+        .map(|filename| format!("@auto {filename}"))
+        .chain(new_dirs.into_iter().map(|name| format!("@path {name}")));
+    for headline in headlines {
         let mut id = fresh_node_id();
         while app.document.outline.nodes.contains_key(&id) {
             id = fresh_node_id();
@@ -1203,7 +1226,7 @@ fn command_import_run(app: &mut App) {
             id.clone(),
             leo::Node {
                 id: id.clone(),
-                headline: format!("@auto {filename}"),
+                headline,
                 body: String::new(),
                 vnode_attributes: HashMap::new(),
                 tnode_attributes: HashMap::new(),
@@ -1221,7 +1244,8 @@ fn command_import_run(app: &mut App) {
     app.dirty = true;
     app.quit_armed = false;
     app.status = format!(
-        "imported {count} new file(s) as @auto nodes (Ctrl-S to save, Ctrl-R to load content)"
+        "imported {file_count} new file(s) and {dir_count} new subdirectory(ies) \
+         (Ctrl-S to save, Ctrl-R to load content)"
     );
 }
 
@@ -4516,7 +4540,41 @@ mod tests {
         assert!(app.status.starts_with("imported 1 new file(s)"));
 
         command_import_run(&mut app);
-        assert!(app.status.starts_with("no new files to import"));
+        assert!(app.status.starts_with("no new files or subdirectories to import"));
+
+        fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn command_import_adds_path_nodes_for_subdirectories_with_no_direct_files() {
+        let directory = env::temp_dir().join(format!(
+            "leo-cub-tui-import-dirs-{}-{}",
+            std::process::id(),
+            fresh_node_id().0
+        ));
+        fs::create_dir_all(directory.join("src/nested")).unwrap();
+        fs::write(directory.join("src/nested/lib.rs"), "pub fn f() {}").unwrap();
+
+        let mut app = editing_app();
+        app.path = directory.join("outline.leo");
+        app.document
+            .outline
+            .nodes
+            .get_mut(&NodeId::from("a"))
+            .unwrap()
+            .headline = "@path src".into();
+        app.document.outline.roots[0].children.clear();
+        app.document.outline.nodes.remove(&NodeId::from("b"));
+        app.document.outline.nodes.remove(&NodeId::from("c"));
+        app.selected = 0;
+
+        command_import_run(&mut app);
+
+        let path_position = &app.document.outline.roots[0];
+        assert_eq!(path_position.children.len(), 1);
+        let added = &app.document.outline.nodes[&path_position.children[0].node];
+        assert_eq!(added.headline, "@path nested");
+        assert!(app.status.starts_with("imported 0 new file(s) and 1 new subdirectory(ies)"));
 
         fs::remove_dir_all(&directory).unwrap();
     }
