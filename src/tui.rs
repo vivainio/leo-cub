@@ -22,8 +22,10 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use leo::{
-    AutoFile, DerivedFile, LeoDocument, Node, NodeId, OperationBatch, Outline, Position,
-    PositionId, RelativeFile, render_relative, render_thin, search_outline,
+    AutoFile, DerivedFile, ExternalFormat, LeoDocument, Node, NodeId, OperationBatch,
+    OriginalExternalState, Outline, Position, PositionId, RelativeFile, WritableExternalFile,
+    comment_delimiters, external_snapshot, format_for_directive, prepare_external_updates,
+    referenced_nodes, restore_external_state, search_outline, write_external_updates,
 };
 use ratatui::{
     Terminal,
@@ -45,38 +47,14 @@ struct Row {
     has_children: bool,
 }
 
-#[derive(Default)]
-struct OriginalExternalState {
-    children: HashMap<NodeId, Vec<Position>>,
-    bodies: HashMap<NodeId, String>,
-    /// Node entries for `children`'s subtree, captured at load time. A
-    /// derived container's live children get replaced by freshly generated
-    /// ones (auto.rs's merge prunes `outline.nodes` down to what the live
-    /// tree references), so by save time the *original* child ids are often
-    /// gone from `outline.nodes` even though `children` still points at
-    /// them. Restoring `children` for serialization needs these node
-    /// bodies/headlines to still resolve.
-    nodes: HashMap<NodeId, Node>,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ExternalFormat {
-    /// 5-thin sentinels (`@file`/`@thin`/`@file-thin`): absolute `*N*`
-    /// depth, every node keeps its gnx.
-    Thin,
-    /// cub-1-thin sentinels (`@f`, leo-cub's own format tag -- not an
-    /// official Leo version): depth relative to the preceding node, gnx
-    /// omitted except for the root, clones, and UA-bearing nodes.
-    Relative,
-}
-
-#[derive(Clone)]
-struct WritableExternalFile {
-    path: PathBuf,
-    start_delimiter: String,
-    end_delimiter: String,
-    original: Outline,
-    format: ExternalFormat,
+/// A mouse-drag text selection within the body pane, in logical (line,
+/// char-column) coordinates over the node's full (unscrolled) text --
+/// matching the coordinate space `body_scroll`/`body_horizontal_scroll`
+/// offset into.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct BodySelection {
+    anchor: (usize, usize),
+    cursor: (usize, usize),
 }
 
 struct App {
@@ -91,6 +69,7 @@ struct App {
     body_scroll_max: usize,
     body_horizontal_scroll: usize,
     body_horizontal_scroll_max: usize,
+    body_selection: Option<BodySelection>,
     body_wrap: bool,
     body_full_width: bool,
     outline_full_width: bool,
@@ -164,6 +143,7 @@ impl App {
             body_scroll_max: 0,
             body_horizontal_scroll: 0,
             body_horizontal_scroll_max: 0,
+            body_selection: None,
             body_wrap: false,
             body_full_width: false,
             outline_full_width: false,
@@ -257,9 +237,17 @@ impl App {
         let selected = self.selected.saturating_add_signed(delta).min(len - 1);
         if selected != self.selected {
             self.selected = selected;
-            self.body_scroll = 0;
-            self.body_horizontal_scroll = 0;
+            self.reset_body_view();
         }
+    }
+
+    /// Resets everything that only makes sense for the previously-selected
+    /// node's body: scroll position and any in-progress or finished mouse
+    /// text selection.
+    fn reset_body_view(&mut self) {
+        self.body_scroll = 0;
+        self.body_horizontal_scroll = 0;
+        self.body_selection = None;
     }
 
     fn scroll_body(&mut self, pages: isize) {
@@ -322,13 +310,11 @@ impl App {
             && let Some(language) = self.language_at(position)
         {
             self.wrap_by_language.insert(language, value);
-            self.body_scroll = 0;
-            self.body_horizontal_scroll = 0;
+            self.reset_body_view();
             return;
         }
         self.body_wrap = value;
-        self.body_scroll = 0;
-        self.body_horizontal_scroll = 0;
+        self.reset_body_view();
     }
 
     #[cfg(feature = "syntax")]
@@ -739,14 +725,12 @@ fn handle_key(
         KeyCode::Home => {
             app.selection_anchor = None;
             app.selected = 0;
-            app.body_scroll = 0;
-            app.body_horizontal_scroll = 0;
+            app.reset_body_view();
         }
         KeyCode::End => {
             app.selection_anchor = None;
             app.selected = app.rows().len().saturating_sub(1);
-            app.body_scroll = 0;
-            app.body_horizontal_scroll = 0;
+            app.reset_body_view();
         }
         KeyCode::PageUp => app.scroll_body(-1),
         KeyCode::PageDown => app.scroll_body(1),
@@ -756,19 +740,44 @@ fn handle_key(
 }
 
 fn handle_mouse(app: &mut App, area: Rect, mouse: MouseEvent) {
-    if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+    let kind = mouse.kind;
+    if !matches!(
+        kind,
+        MouseEventKind::Down(MouseButton::Left)
+            | MouseEventKind::Drag(MouseButton::Left)
+            | MouseEventKind::Up(MouseButton::Left)
+    ) {
         return;
     }
     let content_height = area.height.saturating_sub(1);
     let content = Rect::new(area.x, area.y, area.width, content_height);
     let columns = content_columns(content, app);
     let outline = columns[0];
-    if app.body_full_width
-        || mouse.column < outline.x
-        || mouse.column >= outline.right()
-        || mouse.row < outline.y.saturating_add(1)
-        || mouse.row >= outline.bottom().saturating_sub(1)
-    {
+    let in_outline = !app.body_full_width
+        && mouse.column >= outline.x
+        && mouse.column < outline.right()
+        && mouse.row >= outline.y.saturating_add(1)
+        && mouse.row < outline.bottom().saturating_sub(1);
+    if in_outline {
+        handle_outline_mouse(app, outline, kind, mouse);
+        return;
+    }
+    if app.outline_full_width {
+        return;
+    }
+    handle_body_mouse(app, columns[1], kind, mouse);
+}
+
+/// Click-to-select and click-the-expand-marker, plus drag-to-extend the
+/// same multi-row tree selection that Shift-↑/↓ builds (`selection_anchor`
+/// fixed at the press, `selected` following the pointer). Releasing after
+/// an actual drag copies the selected headlines to the system clipboard,
+/// same as releasing a body drag copies the selected body text.
+fn handle_outline_mouse(app: &mut App, outline: Rect, kind: MouseEventKind, mouse: MouseEvent) {
+    if let MouseEventKind::Up(MouseButton::Left) = kind {
+        if app.selection_anchor.is_some() {
+            copy_outline_selection_to_clipboard(app);
+        }
         return;
     }
     let row = app.outline_scroll + usize::from(mouse.row - outline.y - 1);
@@ -776,19 +785,228 @@ fn handle_mouse(app: &mut App, area: Rect, mouse: MouseEvent) {
     let Some(clicked) = rows.get(row) else {
         return;
     };
-    let marker_start = outline.x + 1 + u16::try_from(clicked.depth * 2).unwrap_or(u16::MAX);
-    let on_marker =
-        clicked.has_children && mouse.column >= marker_start && mouse.column < marker_start + 2;
-    let position = clicked.position.clone();
-    app.selection_anchor = None;
-    if row != app.selected {
-        app.body_scroll = 0;
-        app.body_horizontal_scroll = 0;
+    match kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            let marker_start = outline.x + 1 + u16::try_from(clicked.depth * 2).unwrap_or(u16::MAX);
+            let on_marker = clicked.has_children
+                && mouse.column >= marker_start
+                && mouse.column < marker_start + 2;
+            let position = clicked.position.clone();
+            app.selection_anchor = None;
+            if row != app.selected {
+                app.reset_body_view();
+            }
+            app.selected = row;
+            if on_marker {
+                app.toggle(!app.expanded.contains(&position));
+            }
+        }
+        MouseEventKind::Drag(MouseButton::Left) => {
+            app.selection_anchor.get_or_insert(app.selected);
+            if row != app.selected {
+                app.reset_body_view();
+            }
+            app.selected = row;
+        }
+        _ => {}
     }
-    app.selected = row;
-    if on_marker {
-        app.toggle(!app.expanded.contains(&position));
+}
+
+/// Copies the headlines spanned by `selection_anchor`..=`selected` (one per
+/// line, indented 2 spaces per depth level relative to the shallowest
+/// selected row -- same look as the outline, just left-aligned) to the
+/// system clipboard via OSC 52. A no-op for a drag that collapsed back onto
+/// its own start row -- nothing was actually selected.
+fn copy_outline_selection_to_clipboard(app: &mut App) {
+    let anchor = app.selection_anchor.unwrap_or(app.selected);
+    let start = anchor.min(app.selected);
+    let end = anchor.max(app.selected);
+    if start == end {
+        return;
     }
+    let rows = app.rows();
+    let end = end.min(rows.len().saturating_sub(1));
+    if start > end {
+        return;
+    }
+    let text = outline_selection_text(app, &rows[start..=end]);
+    match execute!(
+        io::stdout(),
+        CopyToClipboard::to_clipboard_from(text.clone())
+    ) {
+        Ok(()) => {
+            let count = end - start + 1;
+            app.status = format!(
+                "copied {count} headline{} to clipboard",
+                if count == 1 { "" } else { "s" }
+            );
+        }
+        Err(error) => app.status = format!("clipboard copy failed: {error}"),
+    }
+}
+
+/// One headline per line, each indented 2 spaces per depth level relative
+/// to the shallowest row in `rows` -- the same nesting the outline shows,
+/// just left-aligned to column 0.
+fn outline_selection_text(app: &App, rows: &[Row]) -> String {
+    let min_depth = rows.iter().map(|row| row.depth).min().unwrap_or(0);
+    rows.iter()
+        .map(|row| {
+            let indent = "  ".repeat(row.depth.saturating_sub(min_depth));
+            let headline = &app.document.outline.nodes[&row.node].headline;
+            format!("{indent}{headline}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Drag-to-select body text and copy the selection to the system clipboard
+/// (via OSC 52, same mechanism as `copy_location_to_clipboard`) on release.
+///
+/// Only available when the body isn't word-wrapped: `body_scroll` counts
+/// *visual* rows once wrap is on (`Paragraph::line_count` under wrap), so a
+/// screen row no longer maps onto a single logical line/column, and
+/// ratatui's wrap doesn't expose the reverse mapping needed to fix that.
+fn handle_body_mouse(app: &mut App, body_area: Rect, kind: MouseEventKind, mouse: MouseEvent) {
+    let node_area = Block::default().borders(Borders::ALL).inner(body_area);
+    if node_area.width == 0 || node_area.height == 0 {
+        return;
+    }
+    let starting = matches!(kind, MouseEventKind::Down(MouseButton::Left));
+    if starting
+        && (mouse.column < node_area.x
+            || mouse.column >= node_area.right()
+            || mouse.row < node_area.y
+            || mouse.row >= node_area.bottom())
+    {
+        return;
+    }
+    if !starting && app.body_selection.is_none() {
+        return;
+    }
+    let rows = app.rows();
+    let Some(row) = rows.get(app.selected).cloned() else {
+        return;
+    };
+    if starting && app.wrap_for(Some(&row.position)) {
+        app.status = "mouse text selection needs word-wrap off (press W)".into();
+        return;
+    }
+    let lines = body_plain_lines(app, &row);
+    if lines.is_empty() {
+        return;
+    }
+
+    let clamped_row = mouse
+        .row
+        .clamp(node_area.y, node_area.bottom().saturating_sub(1));
+    let clamped_column = mouse
+        .column
+        .clamp(node_area.x, node_area.right().saturating_sub(1));
+    let line_index =
+        (app.body_scroll + usize::from(clamped_row - node_area.y)).min(lines.len() - 1);
+    let column_index = (app.body_horizontal_scroll + usize::from(clamped_column - node_area.x))
+        .min(lines[line_index].chars().count());
+    let position = (line_index, column_index);
+
+    match kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            app.body_selection = Some(BodySelection {
+                anchor: position,
+                cursor: position,
+            });
+        }
+        MouseEventKind::Drag(MouseButton::Left) => {
+            if let Some(selection) = app.body_selection.as_mut() {
+                selection.cursor = position;
+            }
+        }
+        MouseEventKind::Up(MouseButton::Left) => copy_body_selection_to_clipboard(app, &lines),
+        _ => {}
+    }
+}
+
+/// The node body's plain text (no syntax-highlight styling), split into
+/// lines matching `body_text`'s line layout -- what mouse coordinates and
+/// the rendered selection highlight both index into.
+fn body_plain_lines(app: &mut App, row: &Row) -> Vec<String> {
+    let text = if let Some(output) = app
+        .action_output
+        .as_ref()
+        .filter(|out| out.node == row.node)
+    {
+        Text::from(output.text.clone())
+    } else {
+        body_text(app, row)
+    };
+    text.lines
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect()
+        })
+        .collect()
+}
+
+fn copy_body_selection_to_clipboard(app: &mut App, lines: &[String]) {
+    let Some(selection) = app.body_selection else {
+        return;
+    };
+    let Some(text) = selected_body_text(lines, selection) else {
+        return;
+    };
+    match execute!(
+        io::stdout(),
+        CopyToClipboard::to_clipboard_from(text.clone())
+    ) {
+        Ok(()) => {
+            let chars = text.chars().count();
+            app.status = format!(
+                "copied {chars} selected character{} to clipboard",
+                if chars == 1 { "" } else { "s" }
+            );
+        }
+        Err(error) => app.status = format!("clipboard copy failed: {error}"),
+    }
+}
+
+/// The text a `BodySelection` covers, or `None` for an empty (click, no
+/// drag) selection.
+fn selected_body_text(lines: &[String], selection: BodySelection) -> Option<String> {
+    let (start, end) = if selection.anchor <= selection.cursor {
+        (selection.anchor, selection.cursor)
+    } else {
+        (selection.cursor, selection.anchor)
+    };
+    if start == end {
+        return None;
+    }
+    let (start_line, start_col) = start;
+    let (end_line, end_col) = end;
+    if start_line >= lines.len() {
+        return None;
+    }
+    let end_line = end_line.min(lines.len() - 1);
+    let mut text = String::new();
+    for (line_index, line) in lines.iter().enumerate().take(end_line + 1).skip(start_line) {
+        if line_index > start_line {
+            text.push('\n');
+        }
+        let line_len = line.chars().count();
+        let (from, to) = if line_index == start_line && line_index == end_line {
+            (start_col.min(line_len), end_col.min(line_len))
+        } else if line_index == start_line {
+            (start_col.min(line_len), line_len)
+        } else if line_index == end_line {
+            (0, end_col.min(line_len))
+        } else {
+            (0, line_len)
+        };
+        text.extend(line.chars().skip(from).take(to.saturating_sub(from)));
+    }
+    Some(text)
 }
 
 fn start_find(app: &mut App) {
@@ -975,8 +1193,15 @@ fn handle_palette_input(app: &mut App, key: KeyEvent) {
                 .and_then(|palette| palette.matches.get(palette.active).cloned());
             app.palette = None;
             if let Some(position) = position {
+                // Capture the selection as it stood *before* the action node
+                // takes it over below, so the env vars describe the node the
+                // user meant to act on, not the action node itself.
+                let target = app
+                    .selected_row()
+                    .map(|row| row.position)
+                    .unwrap_or_else(|| position.clone());
                 reveal_and_select(app, &position);
-                run_action(app, &position);
+                run_action(app, &position, &target);
             } else {
                 app.status = "no matching action".into();
             }
@@ -1389,10 +1614,29 @@ fn run_rhai_script(body: &str) -> (Option<i32>, String, String) {
     }
 }
 
+/// The GNX of the node one position above `position`, i.e. `position`'s
+/// parent, or `None` when `position` is a root. Used to populate
+/// `CUB_PARENT_GNX`: a script can't derive this itself since it only sees
+/// what we hand it via env vars, not the outline.
+fn parent_gnx(outline: &Outline, position: &PositionId) -> Option<NodeId> {
+    let (parent, _) = position.0.rsplit_once('/')?;
+    outline
+        .position(&PositionId(parent.to_owned()))
+        .map(|position| position.node.clone())
+}
+
 /// Runs the body of the `@action` node at `position` as a script and puts
 /// the result in `app.action_output`, which the body pane shows in place of
 /// the node's body until the selection moves to a different node.
-fn run_action(app: &mut App, position: &PositionId) {
+///
+/// The script's environment carries the node the user had selected when
+/// they invoked the action (`target`) -- not the `@action` node itself,
+/// which may live anywhere in the tree -- since a spawned process otherwise
+/// has no way to know what it's meant to act on: `CUB_GNX` (the target's
+/// gnx, e.g. for `insert-tree`'s `parent`), `CUB_PARENT_GNX` (unset for a
+/// root), `CUB_HEADLINE`, `CUB_POSITION`, `CUB_PATH` (slash-separated
+/// headline path), and `CUB_DOC` (the open `.leo` file's absolute path).
+fn run_action(app: &mut App, position: &PositionId, target: &PositionId) {
     let Some(row) = all_rows(&app.document.outline)
         .into_iter()
         .find(|row| &row.position == position)
@@ -1401,6 +1645,22 @@ fn run_action(app: &mut App, position: &PositionId) {
     };
     let node = &app.document.outline.nodes[&row.node];
     let name = action_name(&node.headline).to_owned();
+    // Falls back to the action's own row when `target` no longer resolves
+    // (e.g. it was removed by an earlier action in the same session).
+    let target_row = all_rows(&app.document.outline)
+        .into_iter()
+        .find(|row| &row.position == target)
+        .unwrap_or_else(|| row.clone());
+    let gnx = target_row.node.0.clone();
+    let headline = app.document.outline.nodes[&target_row.node]
+        .headline
+        .clone();
+    let headline_path = headline_path(app, &target_row);
+    let parent_gnx = parent_gnx(&app.document.outline, &target_row.position).map(|id| id.0);
+    let target_position = target_row.position.0.clone();
+    let doc_path = absolutize(&app.path, &env::current_dir().unwrap_or_default())
+        .to_string_lossy()
+        .into_owned();
     #[cfg(feature = "syntax")]
     let language = crate::syntax::language_directive(&node.body).map(str::to_owned);
     #[cfg(not(feature = "syntax"))]
@@ -1434,6 +1694,15 @@ fn run_action(app: &mut App, position: &PositionId) {
         command.args(interpreter_args);
         if let Some(cwd) = &cwd {
             command.current_dir(cwd);
+        }
+        command
+            .env("CUB_GNX", &gnx)
+            .env("CUB_HEADLINE", &headline)
+            .env("CUB_POSITION", &target_position)
+            .env("CUB_PATH", &headline_path)
+            .env("CUB_DOC", &doc_path);
+        if let Some(parent_gnx) = &parent_gnx {
+            command.env("CUB_PARENT_GNX", parent_gnx);
         }
         command
             .stdin(Stdio::piped())
@@ -2258,13 +2527,14 @@ fn move_selected_block(app: &mut App, direction: MoveDirection, rows: Vec<Row>) 
 }
 
 fn save(app: &mut App) {
-    let external_updates = match prepare_external_updates(app) {
-        Ok(updates) => updates,
-        Err(error) => {
-            app.status = format!("save failed: {error}");
-            return;
-        }
-    };
+    let external_updates =
+        match prepare_external_updates(&app.document.outline, &app.writable_external) {
+            Ok(updates) => updates,
+            Err(error) => {
+                app.status = format!("save failed: {error}");
+                return;
+            }
+        };
     let mut persisted = app.document.clone();
     restore_external_state(
         &mut persisted.outline,
@@ -2296,145 +2566,6 @@ fn save(app: &mut App) {
         }
         Err(error) => app.status = format!("save failed: {error}"),
     }
-}
-
-struct ExternalUpdate {
-    root: NodeId,
-    path: PathBuf,
-    rendered: String,
-    snapshot: Outline,
-}
-
-fn prepare_external_updates(app: &App) -> Result<Vec<ExternalUpdate>, String> {
-    let mut updates = Vec::new();
-    for (root, file) in &app.writable_external {
-        let Some((position, snapshot)) = external_snapshot(&app.document.outline, root) else {
-            continue;
-        };
-        if snapshot == file.original {
-            continue;
-        }
-        let rendered = match file.format {
-            ExternalFormat::Relative => {
-                let rendered = render_relative(
-                    &app.document.outline,
-                    &position,
-                    &file.start_delimiter,
-                    &file.end_delimiter,
-                )
-                .map_err(|error| format!("{}: {error}", file.path.display()))?;
-                RelativeFile::parse(&rendered).map_err(|error| {
-                    format!(
-                        "{}: generated invalid @f file: {error}",
-                        file.path.display()
-                    )
-                })?;
-                rendered
-            }
-            ExternalFormat::Thin => {
-                let rendered = render_thin(
-                    &app.document.outline,
-                    &position,
-                    &file.start_delimiter,
-                    &file.end_delimiter,
-                )
-                .map_err(|error| format!("{}: {error}", file.path.display()))?;
-                DerivedFile::parse(&rendered).map_err(|error| {
-                    format!(
-                        "{}: generated invalid thin file: {error}",
-                        file.path.display()
-                    )
-                })?;
-                rendered
-            }
-        };
-        updates.push(ExternalUpdate {
-            root: root.clone(),
-            path: file.path.clone(),
-            rendered,
-            snapshot,
-        });
-    }
-    Ok(updates)
-}
-
-fn write_external_updates(updates: &[ExternalUpdate]) -> Result<(), String> {
-    let mut staged = Vec::new();
-    for (index, update) in updates.iter().enumerate() {
-        let name = update
-            .path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("external");
-        let temporary = update
-            .path
-            .with_file_name(format!(".{name}.cub-save-{}-{index}", std::process::id()));
-        let permissions = fs::metadata(&update.path)
-            .ok()
-            .map(|metadata| metadata.permissions());
-        let result = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)
-            .and_then(|mut file| {
-                file.write_all(update.rendered.as_bytes())?;
-                file.sync_all()
-            })
-            .and_then(|()| {
-                permissions.map_or(Ok(()), |permissions| {
-                    fs::set_permissions(&temporary, permissions)
-                })
-            });
-        if let Err(error) = result {
-            for path in &staged {
-                let _ = fs::remove_file(path);
-            }
-            let _ = fs::remove_file(&temporary);
-            return Err(format!("{}: {error}", update.path.display()));
-        }
-        staged.push(temporary);
-    }
-    for (update, temporary) in updates.iter().zip(&staged) {
-        if let Err(error) = fs::rename(temporary, &update.path) {
-            for path in &staged {
-                let _ = fs::remove_file(path);
-            }
-            return Err(format!("{}: {error}", update.path.display()));
-        }
-    }
-    Ok(())
-}
-
-fn external_snapshot(outline: &Outline, root: &NodeId) -> Option<(PositionId, Outline)> {
-    fn find(positions: &[Position], parent: &str, root: &NodeId) -> Option<(PositionId, Position)> {
-        for (index, position) in positions.iter().enumerate() {
-            let id = if parent.is_empty() {
-                index.to_string()
-            } else {
-                format!("{parent}/{index}")
-            };
-            if &position.node == root {
-                return Some((PositionId(id), position.clone()));
-            }
-            if let Some(found) = find(&position.children, &id, root) {
-                return Some(found);
-            }
-        }
-        None
-    }
-    let (position, tree) = find(&outline.roots, "", root)?;
-    let ids = referenced_nodes(std::slice::from_ref(&tree));
-    let nodes = ids
-        .into_iter()
-        .filter_map(|id| outline.nodes.get(&id).cloned().map(|node| (id, node)))
-        .collect();
-    Some((
-        position,
-        Outline {
-            roots: vec![tree],
-            nodes,
-        },
-    ))
 }
 
 fn reload(app: &mut App) {
@@ -2562,54 +2693,6 @@ fn mark_updated_ancestors(
         updated.insert(position.node.clone());
     }
     is_updated
-}
-
-fn restore_external_state(
-    outline: &mut Outline,
-    children: &HashMap<NodeId, Vec<Position>>,
-    bodies: &HashMap<NodeId, String>,
-    nodes: &HashMap<NodeId, Node>,
-) {
-    restore_derived_children(&mut outline.roots, children);
-    // The restored children can reference ids that were pruned from
-    // outline.nodes once the live tree stopped using them; reinstate them
-    // from the load-time snapshot so serialization can still resolve them.
-    for (id, node) in nodes {
-        outline
-            .nodes
-            .entry(id.clone())
-            .or_insert_with(|| node.clone());
-    }
-    for (id, body) in bodies {
-        if let Some(node) = outline.nodes.get_mut(id) {
-            node.body.clone_from(body);
-        }
-    }
-}
-
-fn restore_derived_children(
-    positions: &mut [Position],
-    originals: &HashMap<NodeId, Vec<Position>>,
-) {
-    for position in positions {
-        if let Some(children) = originals.get(&position.node) {
-            position.children.clone_from(children);
-        } else {
-            restore_derived_children(&mut position.children, originals);
-        }
-    }
-}
-
-fn referenced_nodes(positions: &[Position]) -> HashSet<NodeId> {
-    let mut result = HashSet::new();
-    fn visit(positions: &[Position], result: &mut HashSet<NodeId>) {
-        for position in positions {
-            result.insert(position.node.clone());
-            visit(&position.children, result);
-        }
-    }
-    visit(positions, &mut result);
-    result
 }
 
 /// Whether cutting `position` would remove the only remaining occurrence of
@@ -2892,6 +2975,9 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
                     .build()
             {
                 body = highlight_query_in_text(body, &pattern);
+            }
+            if let Some(selection) = app.body_selection {
+                body = highlight_selection_in_text(body, selection);
             }
             let body_width = body.width();
             let mut paragraph = Paragraph::new(body);
@@ -3375,6 +3461,85 @@ fn highlight_matches_in_line(line: Line<'static>, pattern: &Regex) -> Line<'stat
         }
         if cursor < text.len() {
             spans.push(Span::styled(text[cursor..].to_owned(), span.style));
+        }
+    }
+    Line::from(spans)
+}
+
+/// Overlays the mouse-drag selection highlight, same span-splitting
+/// technique as `highlight_query_in_text` but keyed by a per-line
+/// char-column range instead of a regex match.
+fn highlight_selection_in_text(text: Text<'static>, selection: BodySelection) -> Text<'static> {
+    let (start, end) = if selection.anchor <= selection.cursor {
+        (selection.anchor, selection.cursor)
+    } else {
+        (selection.cursor, selection.anchor)
+    };
+    if start == end {
+        return text;
+    }
+    let (start_line, start_col) = start;
+    let (end_line, end_col) = end;
+    Text::from(
+        text.lines
+            .into_iter()
+            .enumerate()
+            .map(|(index, line)| {
+                if index < start_line || index > end_line {
+                    return line;
+                }
+                let (from, to) = if index == start_line && index == end_line {
+                    (start_col, end_col)
+                } else if index == start_line {
+                    (start_col, usize::MAX)
+                } else if index == end_line {
+                    (0, end_col)
+                } else {
+                    (0, usize::MAX)
+                };
+                highlight_char_range_in_line(line, from, to)
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn highlight_char_range_in_line(line: Line<'static>, from: usize, to: usize) -> Line<'static> {
+    if from >= to {
+        return line;
+    }
+    let mut spans = Vec::new();
+    let mut offset = 0usize;
+    for span in line.spans {
+        let chars: Vec<char> = span.content.chars().collect();
+        let span_start = offset;
+        let span_end = span_start + chars.len();
+        offset = span_end;
+        let overlap_start = from.max(span_start);
+        let overlap_end = to.min(span_end);
+        if overlap_start >= overlap_end {
+            spans.push(Span::styled(
+                chars.into_iter().collect::<String>(),
+                span.style,
+            ));
+            continue;
+        }
+        let local_start = overlap_start - span_start;
+        let local_end = overlap_end - span_start;
+        if local_start > 0 {
+            spans.push(Span::styled(
+                chars[..local_start].iter().collect::<String>(),
+                span.style,
+            ));
+        }
+        spans.push(Span::styled(
+            chars[local_start..local_end].iter().collect::<String>(),
+            span.style.bg(Color::Blue).add_modifier(Modifier::BOLD),
+        ));
+        if local_end < chars.len() {
+            spans.push(Span::styled(
+                chars[local_end..].iter().collect::<String>(),
+                span.style,
+            ));
         }
     }
     Line::from(spans)
@@ -4016,14 +4181,6 @@ fn external_format(headline: &str) -> ExternalFormat {
     }
 }
 
-fn format_for_directive(directive: &str) -> ExternalFormat {
-    if directive == "@f" {
-        ExternalFormat::Relative
-    } else {
-        ExternalFormat::Thin
-    }
-}
-
 #[cfg(test)]
 fn thin_filename(headline: &str) -> Option<&str> {
     derived_filename(headline).and_then(|(auto, _, filename)| (!auto).then_some(filename))
@@ -4044,26 +4201,6 @@ fn external_filename(headline: &str) -> Option<&str> {
     )
     .then(|| strip_path_cruft(filename))
     .filter(|filename| !filename.is_empty())
-}
-
-fn comment_delimiters(path: &Path) -> (&'static str, &'static str) {
-    match path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "py" | "pyw" | "sh" | "bash" | "zsh" | "fish" | "rb" | "pl" | "pm" | "r" | "toml"
-        | "yaml" | "yml" => ("#", ""),
-        "rs" | "c" | "h" | "cc" | "cpp" | "cxx" | "hpp" | "java" | "js" | "jsx" | "ts" | "tsx"
-        | "go" | "swift" | "kt" | "kts" | "cs" => ("//", ""),
-        "html" | "htm" | "xml" | "xhtml" | "svg" => ("<!--", "-->"),
-        "css" | "scss" | "less" => ("/*", "*/"),
-        "sql" | "lua" => ("--", ""),
-        "ini" | "cfg" => ("#", ""),
-        _ => ("#", ""),
-    }
 }
 
 fn dynamic_source_location(app: &App, row: &Row) -> Option<SourceLocation> {
@@ -4419,63 +4556,6 @@ mod tests {
         assert_eq!(extension_for_language(None), "txt");
     }
 
-    #[test]
-    fn restoring_external_state_reinstates_pruned_original_child_nodes() {
-        // A derived container's on-disk children (captured into
-        // original_children/original_nodes before the fresh auto/derived
-        // content is merged in) can reference node ids that auto.rs's
-        // merge_into then prunes out of outline.nodes entirely, since the
-        // live tree no longer uses them. restore_external_state reattaches
-        // those original children before serializing, so it must also bring
-        // their node entries back — otherwise the resulting tree has
-        // positions pointing at node ids missing from outline.nodes, and
-        // serializing it panics.
-        let mut document = LeoDocument::parse(
-            r#"<leo_file><vnodes><v t="container"><vh>@auto x.py</vh><v t="fresh"><vh>fresh</vh></v></v></vnodes><tnodes><t tx="container"></t><t tx="fresh">fresh body</t></tnodes></leo_file>"#,
-        )
-        .unwrap();
-
-        let old_child = NodeId::from("stale-on-disk-child");
-        let original_children = HashMap::from([(
-            NodeId::from("container"),
-            vec![Position {
-                node: old_child.clone(),
-                children: vec![],
-            }],
-        )]);
-        let original_nodes = HashMap::from([(
-            old_child.clone(),
-            Node {
-                id: old_child.clone(),
-                headline: "stale headline".into(),
-                body: "stale body".into(),
-                vnode_attributes: HashMap::new(),
-                tnode_attributes: HashMap::new(),
-            },
-        )]);
-        // Simulates merge_into's blanket prune: the live tree only
-        // references "fresh", so the stale id is already gone from
-        // outline.nodes even though original_children still points at it.
-        assert!(!document.outline.nodes.contains_key(&old_child));
-
-        restore_external_state(
-            &mut document.outline,
-            &original_children,
-            &HashMap::new(),
-            &original_nodes,
-        );
-
-        assert_eq!(
-            document.outline.roots[0].children,
-            vec![Position {
-                node: old_child.clone(),
-                children: vec![],
-            }]
-        );
-        assert!(document.outline.nodes.contains_key(&old_child));
-        assert!(document.to_xml().is_ok());
-    }
-
     fn editing_app() -> App {
         let document = LeoDocument::parse(
             r#"<leo_file><vnodes><v t="a"><vh>A</vh><v t="b"><vh>B</vh></v><v t="c"><vh>C</vh></v></v></vnodes><tnodes><t tx="a"></t><t tx="b"></t><t tx="c"></t></tnodes></leo_file>"#,
@@ -4773,7 +4853,11 @@ mod tests {
         }
         app.selected = 1; // row "0/0" -> node "b"
 
-        run_action(&mut app, &PositionId("0/0".into()));
+        run_action(
+            &mut app,
+            &PositionId("0/0".into()),
+            &PositionId("0/0".into()),
+        );
 
         let output = app.action_output.as_ref().expect("action produced output");
         assert_eq!(output.node, NodeId::from("b"));
@@ -4815,7 +4899,11 @@ mod tests {
         }
         app.selected = 1; // row "0/0" -> node "b"
 
-        run_action(&mut app, &PositionId("0/0".into()));
+        run_action(
+            &mut app,
+            &PositionId("0/0".into()),
+            &PositionId("0/0".into()),
+        );
 
         let output = app.action_output.as_ref().expect("action produced output");
         assert_eq!(output.interpreter, "rhai");
@@ -4843,13 +4931,65 @@ mod tests {
         }
         app.selected = 1;
 
-        run_action(&mut app, &PositionId("0/0".into()));
+        run_action(
+            &mut app,
+            &PositionId("0/0".into()),
+            &PositionId("0/0".into()),
+        );
 
         assert!(!app.dirty);
         assert_eq!(app.document.outline.nodes.len(), node_count_before);
         let output = app.action_output.as_ref().expect("action produced output");
         assert_eq!(output.interpreter, "rhai");
         assert_ne!(output.status, Some(0));
+    }
+
+    #[test]
+    fn an_action_receives_the_previously_selected_node_as_cub_env_vars() {
+        // Node "b" ("@action Greet") is the action being run, but node "c"
+        // ("C") is what the user had selected before invoking it -- the env
+        // vars must describe "c", the target, not "b", the action itself.
+        let mut app = editing_app();
+        {
+            let node = app
+                .document
+                .outline
+                .nodes
+                .get_mut(&NodeId::from("b"))
+                .unwrap();
+            node.headline = "@action Greet".into();
+            node.body =
+                "echo $CUB_GNX/$CUB_PARENT_GNX/$CUB_HEADLINE/$CUB_POSITION/$CUB_PATH".into();
+        }
+
+        run_action(
+            &mut app,
+            &PositionId("0/0".into()),
+            &PositionId("0/1".into()),
+        );
+
+        let output = app.action_output.as_ref().expect("action produced output");
+        assert_eq!(output.text.trim(), "c/a/C/0/1/A/C");
+    }
+
+    #[test]
+    fn a_root_target_has_no_cub_parent_gnx() {
+        let mut app = editing_app();
+        {
+            let node = app
+                .document
+                .outline
+                .nodes
+                .get_mut(&NodeId::from("b"))
+                .unwrap();
+            node.headline = "@action Root".into();
+            node.body = "echo \"[$CUB_PARENT_GNX]\"".into();
+        }
+
+        run_action(&mut app, &PositionId("0/0".into()), &PositionId("0".into()));
+
+        let output = app.action_output.as_ref().expect("action produced output");
+        assert_eq!(output.text.trim(), "[]");
     }
 
     #[test]
@@ -4873,7 +5013,11 @@ mod tests {
         }
         app.selected = 1; // row "0/0" -> node "b"
 
-        run_action(&mut app, &PositionId("0/0".into()));
+        run_action(
+            &mut app,
+            &PositionId("0/0".into()),
+            &PositionId("0/0".into()),
+        );
 
         assert!(app.dirty, "applying an operation batch should mark dirty");
         assert!(app.status.contains("applied 1 operation"), "{}", app.status);
@@ -4906,7 +5050,11 @@ mod tests {
         }
         app.selected = 1;
 
-        run_action(&mut app, &PositionId("0/0".into()));
+        run_action(
+            &mut app,
+            &PositionId("0/0".into()),
+            &PositionId("0/0".into()),
+        );
 
         assert!(!app.dirty);
         assert_eq!(app.document.outline.nodes.len(), node_count_before);
@@ -4943,6 +5091,37 @@ mod tests {
         assert!(app.palette.is_none());
         assert_eq!(app.selected_row().unwrap().node, NodeId::from("b"));
         assert_eq!(app.action_output.as_ref().unwrap().status, Some(0));
+    }
+
+    #[test]
+    fn enter_in_the_palette_runs_the_action_against_the_node_selected_beforehand() {
+        // "c" is selected when the palette opens; "b" is the action node
+        // picked from it. The env vars must describe "c" -- reproduces a bug
+        // where they described "b" (the action itself) instead.
+        let mut app = editing_app();
+        {
+            let node = app
+                .document
+                .outline
+                .nodes
+                .get_mut(&NodeId::from("b"))
+                .unwrap();
+            node.headline = "@action Greet".into();
+            node.body = "echo $CUB_GNX".into();
+        }
+        app.selected = 2; // row "0/1" -> node "c"
+
+        start_palette(&mut app);
+        for character in "greet".chars() {
+            handle_palette_input(
+                &mut app,
+                KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+            );
+        }
+        handle_palette_input(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let output = app.action_output.as_ref().expect("action produced output");
+        assert_eq!(output.text.trim(), "c");
     }
 
     #[test]
@@ -5569,6 +5748,226 @@ mod tests {
     }
 
     #[test]
+    fn dragging_in_the_outline_extends_a_multi_row_selection() {
+        let mut app = editing_app();
+        assert_eq!(app.rows().len(), 3, "root starts expanded with 2 children");
+        let area = Rect::new(0, 0, 80, 24);
+        let press_first_row = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 10,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        };
+        handle_mouse(&mut app, area, press_first_row);
+        assert_eq!(app.selected, 0);
+        assert_eq!(app.selection_anchor, None);
+
+        let drag_to_third_row = MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: 10,
+            row: 3,
+            modifiers: KeyModifiers::NONE,
+        };
+        handle_mouse(&mut app, area, drag_to_third_row);
+        assert_eq!(
+            app.selection_anchor,
+            Some(0),
+            "anchor stays pinned at the press row"
+        );
+        assert_eq!(app.selected, 2, "selection follows the drag");
+
+        let release = MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: 10,
+            row: 3,
+            modifiers: KeyModifiers::NONE,
+        };
+        handle_mouse(&mut app, area, release);
+        assert_eq!(app.selection_anchor, Some(0), "release doesn't collapse it");
+        assert_eq!(app.selected, 2);
+        assert_eq!(app.status, "copied 3 headlines to clipboard");
+    }
+
+    #[test]
+    fn a_plain_click_in_the_outline_does_not_copy_anything() {
+        let mut app = editing_app();
+        app.status = "untouched".into();
+        let area = Rect::new(0, 0, 80, 24);
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 10,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        };
+        handle_mouse(&mut app, area, click);
+        let release = MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            ..click
+        };
+        handle_mouse(&mut app, area, release);
+        assert_eq!(
+            app.status, "untouched",
+            "a plain click (no drag) shouldn't touch the clipboard"
+        );
+    }
+
+    #[test]
+    fn copied_headlines_keep_indentation_relative_to_the_shallowest_row() {
+        let document = LeoDocument::parse(
+            r#"<leo_file><vnodes><v t="a"><vh>A</vh><v t="b"><vh>B</vh><v t="d"><vh>D</vh></v></v><v t="c"><vh>C</vh></v></v></vnodes><tnodes><t tx="a"></t><t tx="b"></t><t tx="c"></t><t tx="d"></t></tnodes></leo_file>"#,
+        )
+        .unwrap();
+        let mut app = App::new(
+            document,
+            PathBuf::from("test.leo"),
+            String::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashSet::new(),
+            HashMap::new(),
+            OriginalExternalState::default(),
+            false,
+        );
+        app.expanded.insert(PositionId("0/0".into())); // expand B to reveal D
+        let rows = app.rows();
+        assert_eq!(rows.len(), 4, "A, B, D, C");
+
+        // Select B..=C (depths 1, 2, 1): D should stay indented one level
+        // deeper than its siblings B and C, not absolute-zero-based.
+        let text = outline_selection_text(&app, &rows[1..=3]);
+        assert_eq!(text, "B\n  D\nC");
+    }
+
+    #[test]
+    fn dragging_in_the_body_selects_text_and_copies_it_on_release() {
+        let mut app = editing_app();
+        app.document
+            .outline
+            .nodes
+            .get_mut(&NodeId::from("a"))
+            .unwrap()
+            .body = "hello world\nsecond line".into();
+        app.selected = 0;
+        // Standalone body_area, independent of layout percentages: a
+        // bordered block whose content (post-inset) starts at (41, 1).
+        let body_area = Rect::new(40, 0, 40, 20);
+
+        handle_body_mouse(
+            &mut app,
+            body_area,
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 47, // node_area.x(41) + col 6, just after "hello "
+                row: 1,     // node_area.y(1) + line 0
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+        assert_eq!(
+            app.body_selection,
+            Some(BodySelection {
+                anchor: (0, 6),
+                cursor: (0, 6),
+            })
+        );
+
+        handle_body_mouse(
+            &mut app,
+            body_area,
+            MouseEventKind::Drag(MouseButton::Left),
+            MouseEvent {
+                kind: MouseEventKind::Drag(MouseButton::Left),
+                column: 47, // col 6 again, just after "second"
+                row: 2,     // line 1
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+        assert_eq!(
+            app.body_selection,
+            Some(BodySelection {
+                anchor: (0, 6),
+                cursor: (1, 6),
+            })
+        );
+
+        handle_body_mouse(
+            &mut app,
+            body_area,
+            MouseEventKind::Up(MouseButton::Left),
+            MouseEvent {
+                kind: MouseEventKind::Up(MouseButton::Left),
+                column: 47,
+                row: 2,
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+        assert_eq!(app.status, "copied 12 selected characters to clipboard");
+        // The highlight stays visible after copying, like the search match
+        // highlight does, until something else changes the selected row.
+        assert!(app.body_selection.is_some());
+    }
+
+    #[test]
+    fn a_plain_click_in_the_body_does_not_copy_anything() {
+        let mut app = editing_app();
+        app.document
+            .outline
+            .nodes
+            .get_mut(&NodeId::from("a"))
+            .unwrap()
+            .body = "hello world".into();
+        app.selected = 0;
+        app.status = "untouched".into();
+        let body_area = Rect::new(40, 0, 40, 20);
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 45,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        };
+        handle_body_mouse(&mut app, body_area, click.kind, click);
+        let release = MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            ..click
+        };
+        handle_body_mouse(&mut app, body_area, release.kind, release);
+        assert_eq!(
+            app.status, "untouched",
+            "a zero-width selection copies nothing"
+        );
+    }
+
+    #[test]
+    fn mouse_selection_is_disabled_while_the_body_is_word_wrapped() {
+        // body_scroll counts *visual* rows once wrap is on, so a screen
+        // row no longer maps onto a single logical line/column -- rather
+        // than select the wrong text, pressing should refuse and say why.
+        let mut app = editing_app();
+        app.document
+            .outline
+            .nodes
+            .get_mut(&NodeId::from("a"))
+            .unwrap()
+            .body = "hello world\nsecond line".into();
+        app.selected = 0;
+        app.body_wrap = true;
+        let body_area = Rect::new(40, 0, 40, 20);
+
+        let down = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 47,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        };
+        handle_body_mouse(&mut app, body_area, down.kind, down);
+        assert_eq!(app.body_selection, None);
+        assert_eq!(
+            app.status,
+            "mouse text selection needs word-wrap off (press W)"
+        );
+    }
+
+    #[test]
     fn finds_headlines_incrementally_and_reveals_collapsed_matches() {
         let mut app = editing_app();
         app.expanded.clear();
@@ -5859,49 +6258,6 @@ fn main() {}</t><t tx="b">just notes</t></tnodes></leo_file>"#,
             .find(|span| span.content.as_ref() == "a ")
             .expect("unmatched span present");
         assert_eq!(unmatched.style, original_style);
-    }
-
-    #[test]
-    fn restores_external_children_before_serializing() {
-        let mut roots = vec![Position {
-            node: NodeId::from("file"),
-            children: vec![Position {
-                node: NodeId::from("derived"),
-                children: vec![],
-            }],
-        }];
-        let originals = HashMap::from([(NodeId::from("file"), Vec::new())]);
-        restore_derived_children(&mut roots, &originals);
-        assert!(roots[0].children.is_empty());
-    }
-
-    #[test]
-    fn restores_auto_root_body_before_serializing() {
-        let mut outline = Outline {
-            nodes: [(
-                NodeId::from("file"),
-                leo::Node {
-                    id: NodeId::from("file"),
-                    headline: "@auto x.py".into(),
-                    body: "generated @others body".into(),
-                    vnode_attributes: HashMap::new(),
-                    tnode_attributes: HashMap::new(),
-                },
-            )]
-            .into_iter()
-            .collect(),
-            roots: vec![Position {
-                node: NodeId::from("file"),
-                children: vec![],
-            }],
-        };
-        restore_external_state(
-            &mut outline,
-            &HashMap::new(),
-            &HashMap::from([(NodeId::from("file"), String::new())]),
-            &HashMap::new(),
-        );
-        assert!(outline.nodes[&NodeId::from("file")].body.is_empty());
     }
 
     #[test]

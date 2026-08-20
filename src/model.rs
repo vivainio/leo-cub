@@ -43,6 +43,19 @@ pub struct Outline {
     pub roots: Vec<Position>,
 }
 
+/// Every node id reachable from `positions`, including clone duplicates.
+pub fn referenced_nodes(positions: &[Position]) -> HashSet<NodeId> {
+    fn visit(positions: &[Position], result: &mut HashSet<NodeId>) {
+        for position in positions {
+            result.insert(position.node.clone());
+            visit(&position.children, result);
+        }
+    }
+    let mut result = HashSet::new();
+    visit(positions, &mut result);
+    result
+}
+
 #[derive(Debug, Error, PartialEq)]
 pub enum ValidationError {
     #[error("position {position} references missing node {node}")]
