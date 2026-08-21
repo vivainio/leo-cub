@@ -127,6 +127,72 @@ fn cub_run_walks_the_tree_with_roots_children_parent_and_path() {
 }
 
 #[test]
+fn cub_run_clones_and_removes_nodes_directly_without_apply() {
+    let leo_path = temp_path("rhai_run_clone_remove.leo");
+    let _ = fs::remove_file(&leo_path);
+    LeoDocument::new("Root").save_new(&leo_path).unwrap();
+
+    let script_path = temp_path("rhai_run_clone_remove.rhai");
+    let escaped_path = leo_path.display().to_string().replace('\\', "\\\\");
+    fs::write(
+        &script_path,
+        format!(
+            r#"
+            let doc = open("{escaped_path}");
+            let tasks = doc.add("Team A/Tasks");
+            doc.add("Team A/Tasks/Write tests");
+            let team_b = doc.add("Team B");
+
+            // clone_node takes an existing parent by gnx -- no headline
+            // path to resolve, nothing gets auto-created. Appends by
+            // default.
+            doc.clone_node(tasks, team_b);
+            assert_eq(doc.children(team_b)[0], tasks);
+            assert_eq(doc.children(tasks).len(), 1);
+
+            // clone_node's 3-arg overload takes an explicit index.
+            let extra = doc.add("Extra");
+            doc.clone_node(extra, team_b, 0);
+            assert_eq(doc.children(team_b)[0], extra);
+            assert_eq(doc.children(team_b)[1], tasks);
+
+            // Fails cleanly on a parent gnx that doesn't exist, rather than
+            // silently creating anything.
+            try {{
+                doc.clone_node(tasks, "not-a-real-gnx");
+                assert(false, "expected clone_node to fail");
+            }} catch (e) {{
+                assert(e.to_string().contains("not-a-real-gnx"));
+            }}
+
+            // remove deletes a node's defining occurrence and its subtree;
+            // the clone under Team B is untouched.
+            doc.remove(doc.gnx("Team A/Tasks/Write tests"));
+            assert_eq(doc.children(tasks).len(), 0);
+            assert_eq(doc.children(team_b)[1], tasks);
+
+            assert_eq(doc.validate().len(), 0);
+            doc.save();
+            print("ok");
+            "#
+        ),
+    )
+    .unwrap();
+
+    let output = run_cub(&["run", script_path.to_str().unwrap()]);
+    assert!(
+        output.status.success(),
+        "cub run failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("ok"));
+
+    let saved = LeoDocument::open(&leo_path).unwrap();
+    assert!(saved.outline.validate().is_empty());
+}
+
+#[test]
 fn cub_run_exits_nonzero_and_reports_the_failed_assertion() {
     let script_path = temp_path("rhai_run_failure.rhai");
     fs::write(&script_path, "assert_eq(1, 2);").unwrap();

@@ -181,6 +181,12 @@ cloning only makes sense for a node that already has an identity. `"parent"`
 most one, omit both to clone to the outline root, and `"parent-headline"`
 creates any missing segments of the path the same way `cub add` does.
 
+A [rhai script](scripting.md#cloning-and-removing-a-node) can reach for
+`doc.clone_node(gnx, parent_gnx)` instead of building this JSON by hand;
+unlike this JSON form it takes the parent as a gnx rather than a headline
+path, so resolve `"parent-headline"`-style paths with `doc.gnx`/`doc.add`
+first if that's what the script has.
+
 Because a clone is another occurrence of the *same* node, editing the
 headline, body, or children through either occurrence — the original or the
 new one — changes both, the same way editing any clone does in the Leo

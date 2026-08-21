@@ -13,12 +13,13 @@
 //!   was invoked on -- the same role env vars like `CUB_GNX` play for
 //!   subprocess-based actions.
 
+use std::collections::BTreeMap;
 #[cfg(feature = "tui")]
 use std::{cell::RefCell, rc::Rc};
 use std::{fs, path::PathBuf};
 
 use anyhow::{Context, Result};
-use leo::{LeoDocument, NodeId, OperationBatch};
+use leo::{LeoDocument, NodeId, Operation, OperationBatch};
 #[cfg(feature = "tui")]
 use rhai::Scope;
 use rhai::{Array, Dynamic, Engine, EvalAltResult};
@@ -191,6 +192,67 @@ impl Doc {
         Ok(())
     }
 
+    /// Inserts a new occurrence of `gnx` as the last child of `parent_gnx`.
+    /// Fails if either `gnx` or `parent_gnx` isn't already a node in the
+    /// outline -- nothing is created. Returns `gnx` unchanged, so the call
+    /// can be chained. If a script only has a headline path for the parent,
+    /// resolve it first with `doc.gnx(path)`/`doc.add(path)` rather than
+    /// passing the path here directly: every `Doc` method takes a gnx, so
+    /// there's exactly one place a path ever needs resolving.
+    fn clone_node(&mut self, gnx: &str, parent_gnx: &str) -> RhaiResult<String> {
+        self.clone_operation(gnx, parent_gnx, None)
+    }
+
+    /// The `clone_node(gnx, parent_gnx, index)` overload: inserts at a
+    /// specific position among `parent_gnx`'s existing children instead of
+    /// appending.
+    fn clone_node_with_index(
+        &mut self,
+        gnx: &str,
+        parent_gnx: &str,
+        index: i64,
+    ) -> RhaiResult<String> {
+        self.clone_operation(gnx, parent_gnx, Some(index as usize))
+    }
+
+    fn clone_operation(
+        &mut self,
+        gnx: &str,
+        parent_gnx: &str,
+        index: Option<usize>,
+    ) -> RhaiResult<String> {
+        let batch = OperationBatch {
+            operations: vec![Operation::Clone {
+                parent: Some(NodeId(parent_gnx.to_owned())),
+                parent_headline: None,
+                index,
+                node: NodeId(gnx.to_owned()),
+            }],
+            ..Default::default()
+        };
+        self.document.outline.apply(&batch).map_err(rhai_err)?;
+        self.touched = true;
+        Ok(gnx.to_owned())
+    }
+
+    /// Removes `gnx`'s defining occurrence and its whole subtree from the
+    /// outline. If `gnx` is cloned elsewhere, those other occurrences are
+    /// left in place -- the next one in outline order becomes the new
+    /// defining occurrence. Fails if `gnx` isn't a node in the outline.
+    fn remove(&mut self, gnx: &str) -> RhaiResult<()> {
+        let batch = OperationBatch {
+            operations: vec![Operation::ReplaceTree {
+                node: Some(NodeId(gnx.to_owned())),
+                headline: None,
+                tree: BTreeMap::new(),
+            }],
+            ..Default::default()
+        };
+        self.document.outline.apply(&batch).map_err(rhai_err)?;
+        self.touched = true;
+        Ok(())
+    }
+
     fn render(&mut self) -> String {
         leo::render_compact(&self.document.outline)
     }
@@ -262,6 +324,9 @@ fn register_doc_api(engine: &mut Engine) {
     engine.register_fn("set_headline", Doc::set_headline);
     engine.register_fn("body", Doc::body);
     engine.register_fn("set_body", Doc::set_body);
+    engine.register_fn("clone_node", Doc::clone_node);
+    engine.register_fn("clone_node", Doc::clone_node_with_index);
+    engine.register_fn("remove", Doc::remove);
     engine.register_fn("render", Doc::render);
     engine.register_fn("count", Doc::count);
     engine.register_fn("validate", Doc::validate);
