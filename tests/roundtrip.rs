@@ -104,6 +104,7 @@ fn clone_copies_the_source_occurrences_children_so_it_does_not_diverge_on_creati
         .apply(&OperationBatch {
             operations: vec![Operation::Clone {
                 parent: None,
+                parent_headline: None,
                 index: Some(0),
                 node: NodeId::from("b"),
             }],
@@ -133,6 +134,48 @@ fn clone_copies_the_source_occurrences_children_so_it_does_not_diverge_on_creati
     let b_under_a = &reparsed.outline.roots[1].children[0];
     assert_eq!(b_under_a.node, NodeId::from("b"));
     assert_eq!(b_under_a.children[0].node, NodeId::from("c"));
+}
+
+#[test]
+fn clone_creates_a_missing_parent_headline_path_like_insert_tree_does() {
+    let mut outline = LeoDocument::parse(SAMPLE).unwrap().outline;
+    outline
+        .apply(&OperationBatch {
+            operations: vec![Operation::Clone {
+                parent: None,
+                parent_headline: Some("Imports/PRs".into()),
+                index: None,
+                node: NodeId::from("b"),
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+
+    let imports = outline
+        .roots
+        .iter()
+        .find(|p| outline.nodes[&p.node].headline == "Imports")
+        .unwrap();
+    assert_eq!(imports.children.len(), 1);
+    let prs = &imports.children[0];
+    assert_eq!(outline.nodes[&prs.node].headline, "PRs");
+    assert_eq!(prs.children.len(), 1);
+    assert_eq!(prs.children[0].node, NodeId::from("b"));
+}
+
+#[test]
+fn clone_rejects_both_parent_and_parent_headline() {
+    let mut outline = LeoDocument::parse(SAMPLE).unwrap().outline;
+    let result = outline.apply(&OperationBatch {
+        operations: vec![Operation::Clone {
+            parent: Some(NodeId::from("a")),
+            parent_headline: Some("Imports/PRs".into()),
+            index: None,
+            node: NodeId::from("b"),
+        }],
+        ..Default::default()
+    });
+    assert!(result.is_err());
 }
 
 #[test]

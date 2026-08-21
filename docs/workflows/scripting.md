@@ -135,6 +135,57 @@ doc.save();
 (Rhai's `` `...` `` backtick strings span multiple lines, which is handy for
 inline JSON like this.)
 
+### Building structure with a loop
+
+`doc.add` is usually the more direct way to build a tree from a script than
+`doc.apply` with `insert-tree` — since it creates missing headline segments
+as it goes, a script can just loop over the structure it wants:
+
+```rhai
+let doc = open("notes.leo");
+
+let teams = ["Team A", "Team B", "Team C"];
+for team in teams {
+    let tasks = doc.add(team + "/Tasks");
+    doc.set_body(tasks, "Backlog for " + team);
+}
+doc.add("Team A/Tasks/Write onboarding docs");
+
+doc.save();
+```
+
+Reach for `doc.apply` with `insert-tree`/`merge-tree` instead when the shape
+is already data (parsed from JSON, say) rather than something the script is
+building up step by step.
+
+### Cloning a node
+
+Cloning — adding another occurrence of an existing node, rather than a new
+node — has no dedicated `Doc` method; go through `doc.apply` with a `clone`
+operation, the same as `cub apply` would:
+
+```rhai
+let doc = open("notes.leo");
+
+let source = doc.gnx("Team A/Tasks");
+doc.apply(`{
+  "operations": [
+    {"op": "clone", "parent-headline": "Shared/Cross-team", "index": 0, "node": "` + source + `"}
+  ]
+}`);
+
+// The clone is the same node, not a copy, so both headline paths resolve
+// to the same gnx and share the same children.
+assert_eq(doc.gnx("Shared/Cross-team/Tasks"), source);
+
+doc.save();
+```
+
+Like `insert-tree`, `clone` takes `"parent"` (a gnx) or `"parent-headline"`
+(created if missing), never both. See
+[the `clone` operation](../workflows/automation.md#cloning-a-node) for the
+full JSON shape.
+
 Every node reference in this API is a **gnx** (a Leo global node id, the
 same string `cub inspect`/`cub apply` use) — not a stateful position or
 cursor object. `doc.gnx(path)` and `doc.add(path)` are how a script turns a
