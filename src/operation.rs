@@ -212,6 +212,14 @@ impl Outline {
                 if !self.nodes.contains_key(node) {
                     return Err(ApplyError::NodeNotFound(node.0.clone()));
                 }
+                // A clone's whole point is that every occurrence shares the
+                // same subtree, so the new occurrence starts with a copy of
+                // an existing occurrence's children rather than none --
+                // otherwise it would diverge from the node it was just
+                // cloned from the instant it was created.
+                let cloned_children = children_ref(self, Some(node))
+                    .map(<[Position]>::to_vec)
+                    .unwrap_or_default();
                 let children = children_for_parent(self, parent.as_ref())
                     .ok_or_else(|| ApplyError::NodeNotFound(parent.as_ref().unwrap().0.clone()))?;
                 let at = index.unwrap_or(children.len());
@@ -225,7 +233,7 @@ impl Outline {
                     at,
                     Position {
                         node: node.clone(),
-                        children: vec![],
+                        children: cloned_children,
                     },
                 );
             }

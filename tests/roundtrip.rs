@@ -77,6 +77,65 @@ fn insert_uses_parent_gnx_and_updates_the_shared_clone_subtree() {
 }
 
 #[test]
+fn clone_copies_the_source_occurrences_children_so_it_does_not_diverge_on_creation() {
+    // "b" ("Child", under "a") has no children of its own in SAMPLE, so give
+    // it one first, then clone "b" to the top level.
+    let mut document = LeoDocument::parse(SAMPLE).unwrap();
+    document
+        .outline
+        .apply(&OperationBatch {
+            operations: vec![Operation::Insert {
+                parent: Some(NodeId::from("b")),
+                index: None,
+                node: Node {
+                    id: NodeId::from("c"),
+                    headline: "Grandchild".into(),
+                    body: String::new(),
+                    vnode_attributes: HashMap::new(),
+                    tnode_attributes: HashMap::new(),
+                },
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+
+    document
+        .outline
+        .apply(&OperationBatch {
+            operations: vec![Operation::Clone {
+                parent: None,
+                index: Some(0),
+                node: NodeId::from("b"),
+            }],
+            ..Default::default()
+        })
+        .unwrap();
+
+    // The new clone occurrence is now the first "b" in outline order (root
+    // index 0, ahead of the pre-existing occurrence nested under "a"), so if
+    // it didn't carry a copy of "b"'s children, serializing straight from
+    // this in-memory state would write it as "b"'s one full definition with
+    // no children -- silently losing "c" everywhere, not just locally.
+    assert_eq!(document.outline.roots[0].node, NodeId::from("b"));
+    assert_eq!(document.outline.roots[0].children.len(), 1);
+    assert_eq!(
+        document.outline.roots[0].children[0].node,
+        NodeId::from("c")
+    );
+
+    // Round-tripping through XML confirms both occurrences keep "c".
+    let reparsed = LeoDocument::parse(&document.to_xml().unwrap()).unwrap();
+    assert_eq!(reparsed.outline.roots[0].node, NodeId::from("b"));
+    assert_eq!(
+        reparsed.outline.roots[0].children[0].node,
+        NodeId::from("c")
+    );
+    let b_under_a = &reparsed.outline.roots[1].children[0];
+    assert_eq!(b_under_a.node, NodeId::from("b"));
+    assert_eq!(b_under_a.children[0].node, NodeId::from("c"));
+}
+
+#[test]
 fn insert_tree_generates_gnxs_with_the_batch_prefix_and_keeps_explicit_ones() {
     let mut outline = LeoDocument::parse(SAMPLE).unwrap().outline;
     let tree: BTreeMap<String, TreeNode> = serde_json::from_value(json!({
