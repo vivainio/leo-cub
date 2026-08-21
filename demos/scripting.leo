@@ -7,112 +7,35 @@
 <find_panel_settings/>
 <vnodes>
   <v t="cub.1787246563.223586211"><vh>GitHub CLI fetch demo</vh>
-    <v t="demo.1787246563.226321852.1"><vh>@action bash + jq</vh></v>
-    <v t="demo.1787246563.226321852.2"><vh>@action nushell</vh></v>
-    <v t="demo.1787246563.226321852.3"><vh>@action python</vh></v>
+    <v t="demo.1787246563.226321852.1"><vh>@action Import PRs and issues</vh></v>
   </v>
   <v t="cub.1787246563.998877665"><vh>Insert child at selection demo</vh>
     <v t="demo.1787246563.998877665.1"><vh>@action new child</vh></v>
   </v>
 </vnodes>
 <tnodes>
-  <t tx="demo.1787246563.226321852.1">@language bash
-@apply
-set -euo pipefail
+  <t tx="demo.1787246563.226321852.1">let prs = parse_json(doc.sh(&quot;gh pr list --json number,title,author,state,url&quot;).stdout);
+let issues = parse_json(doc.sh(&quot;gh issue list --json number,title,author,state,url&quot;).stdout);
 
-prs=$(gh pr list --json number,title,author,state,url)
-issues=$(gh issue list --json number,title,author,state,url)
-
-jq -n --argjson prs &quot;$prs&quot; --argjson issues &quot;$issues&quot; '
-  def entry:
-    { (&quot;#\(.number): \(.title)&quot;): { &quot;_body&quot;: &quot;\(.state) · \(.author.login) · \(.url)&quot; } };
-  {
-    &quot;gnx-prefix&quot;: &quot;gh&quot;,
-    &quot;operations&quot;: [
-      { &quot;op&quot;: &quot;merge-tree&quot;, &quot;parent-headline&quot;: &quot;Imports/PRs&quot;,
-        &quot;tree&quot;: ([$prs[] | entry] | add // {}) },
-      { &quot;op&quot;: &quot;merge-tree&quot;, &quot;parent-headline&quot;: &quot;Imports/Issues&quot;,
-        &quot;tree&quot;: ([$issues[] | entry] | add // {}) }
-    ]
-  }
-'
-</t>
-  <t tx="demo.1787246563.226321852.2">@language nu
-@apply
-def to-tree [items] {
-    $items
-    | reduce -f {} {|item, acc|
-        let key = $&quot;#($item.number): ($item.title)&quot;
-        let body = $&quot;($item.state) · ($item.author.login) · ($item.url)&quot;
-        $acc | insert $key { _body: $body }
-    }
+for pr in prs {
+    let n = doc.ensure(&quot;Imports/PRs/#&quot; + pr.number + &quot;: &quot; + pr.title);
+    n.b = pr.state + &quot; · &quot; + pr.author.login + &quot; · &quot; + pr.url;
 }
-
-let prs = (gh pr list --json number,title,author,state,url | from json)
-let issues = (gh issue list --json number,title,author,state,url | from json)
-
-{
-    &quot;gnx-prefix&quot;: &quot;gh&quot;,
+for issue in issues {
+    let n = doc.ensure(&quot;Imports/Issues/#&quot; + issue.number + &quot;: &quot; + issue.title);
+    n.b = issue.state + &quot; · &quot; + issue.author.login + &quot; · &quot; + issue.url;
+}
+print(&quot;imported &quot; + prs.len() + &quot; PR(s) and &quot; + issues.len() + &quot; issue(s)&quot;);
+</t>
+  <t tx="demo.1787246563.998877665.1">let t = doc.node(target);
+let batch = #{
     operations: [
-        { op: &quot;merge-tree&quot;, &quot;parent-headline&quot;: &quot;Imports/PRs&quot;, tree: (to-tree $prs) },
-        { op: &quot;merge-tree&quot;, &quot;parent-headline&quot;: &quot;Imports/Issues&quot;, tree: (to-tree $issues) }
+        #{ op: &quot;insert-tree&quot;, parent: target,
+           tree: #{ &quot;New child&quot;: #{ _body: &quot;child of &quot; + t.h } } }
     ]
-} | to json
-</t>
-  <t tx="demo.1787246563.226321852.3">@language python
-@apply
-import json
-import subprocess
-
-
-def gh_json(*args: str) -&gt; list[dict]:
-    result = subprocess.run(
-        [&quot;gh&quot;, *args, &quot;--json&quot;, &quot;number,title,author,state,url&quot;],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return json.loads(result.stdout)
-
-
-def tree(items: list[dict]) -&gt; dict:
-    return {
-        f&quot;#{item['number']}: {item['title']}&quot;: {
-            &quot;_body&quot;: f&quot;{item['state']} · {item['author']['login']} · {item['url']}&quot;
-        }
-        for item in items
-    }
-
-
-batch = {
-    &quot;gnx-prefix&quot;: &quot;gh&quot;,
-    &quot;operations&quot;: [
-        {
-            &quot;op&quot;: &quot;merge-tree&quot;,
-            &quot;parent-headline&quot;: &quot;Imports/PRs&quot;,
-            &quot;tree&quot;: tree(gh_json(&quot;pr&quot;, &quot;list&quot;)),
-        },
-        {
-            &quot;op&quot;: &quot;merge-tree&quot;,
-            &quot;parent-headline&quot;: &quot;Imports/Issues&quot;,
-            &quot;tree&quot;: tree(gh_json(&quot;issue&quot;, &quot;list&quot;)),
-        },
-    ],
-}
-
-print(json.dumps(batch))
-</t>
-  <t tx="demo.1787246563.998877665.1">@language bash
-@apply
-# CUB_GNX/CUB_PARENT_GNX/CUB_HEADLINE/CUB_POSITION/CUB_PATH/CUB_DOC describe
-# whichever node was selected when this action was invoked -- here, insert
-# a child under it.
-jq -n --arg gnx &quot;$CUB_GNX&quot; --arg headline &quot;$CUB_HEADLINE&quot; '{
-  operations: [
-    { op: &quot;insert-tree&quot;, parent: $gnx,
-      tree: { &quot;New child&quot;: { &quot;_body&quot;: &quot;child of \($headline)&quot; } } }
-  ]
-}'
+};
+doc.apply(batch.to_json());
+print(&quot;added child under &quot; + t.h);
 </t>
 </tnodes>
 </leo_file>

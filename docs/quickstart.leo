@@ -25,7 +25,7 @@
   </v>
   <v t="quickstart.actions"><vh>Run an action</vh>
     <v t="quickstart.actions.hello"><vh>@action Say hello</vh></v>
-    <v t="quickstart.actions.date"><vh>@action Show today's date</vh></v>
+    <v t="quickstart.actions.date"><vh>@action Mark this node</vh></v>
   </v>
   <v t="quickstart.automation"><vh>Automate from outside</vh></v>
   <v t="quickstart.next"><vh>Where to go next</vh></v>
@@ -33,19 +33,20 @@
 <tnodes>
   <t tx="quickstart.actions">Any node headlined &quot;@action &lt;name&gt;&quot; is runnable: press a to open
 the action palette, type to filter by name, and Enter runs the
-selected node's body as a script. The palette lists every @action node
-in the outline, wherever it lives.
+selected node's body as a rhai script. The palette lists every @action
+node in the outline, wherever it lives.
 
 Try it now: press a, type &quot;hello&quot;, Enter. The body pane below switches
 to the command's output until you select a different node.
 
-The interpreter is picked from an @language directive in the body (sh
-by default; python, node, ruby, and bash are also recognized).</t>
-  <t tx="quickstart.actions.date">@language python
-import datetime
-print(datetime.date.today())</t>
-  <t tx="quickstart.actions.hello">echo &quot;Hello from an action!&quot;
-echo &quot;This node's body just ran as a shell script.&quot;</t>
+The script runs with `doc` bound to this outline and `target` set to the
+gnx of the node you had selected when you invoked the action - see the
+second action below, which uses both to edit the outline in place.</t>
+  <t tx="quickstart.actions.date">let n = doc.node(target);
+n.h = n.h + &quot; ✓&quot;;
+print(&quot;marked \&quot;&quot; + n.h + &quot;\&quot;&quot;);</t>
+  <t tx="quickstart.actions.hello">print(&quot;Hello from an action!&quot;);
+print(&quot;This node's body just ran as a rhai script.&quot;);</t>
   <t tx="quickstart.automation">Everything above works by hand, inside the TUI. The same outline can
 be edited from the outside with the same guarantees: `cub inspect`
 gives a compact machine-readable view, and `cub apply` performs a

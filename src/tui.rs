@@ -5,7 +5,7 @@ use std::{
     io,
     io::Write,
     path::{Component, Path, PathBuf},
-    process::{Command, Stdio},
+    process::Command,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -20,8 +20,8 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use leo::{
-    AutoFile, DerivedFile, ExternalFormat, LeoDocument, Node, NodeId, OperationBatch,
-    OriginalExternalState, Outline, Position, PositionId, RelativeFile, WritableExternalFile,
+    AutoFile, DerivedFile, ExternalFormat, LeoDocument, Node, NodeId, OriginalExternalState,
+    Outline, Position, PositionId, RelativeFile, WritableExternalFile,
     comment_delimiters, external_snapshot, format_for_directive, prepare_external_updates,
     referenced_nodes, restore_external_state, search_outline, write_external_updates,
 };
@@ -1719,31 +1719,9 @@ fn escape_headline_path_component(headline: &str) -> String {
     headline.replace('\\', "\\\\").replace('/', "\\/")
 }
 
-/// Maps an `@language` directive (see `syntax::language_directive`) to the
-/// interpreter used to run an action's body, plus any fixed arguments
-/// needed to make that interpreter read a full script from stdin (most
-/// interpreters do this with no arguments at all; `nu` needs to be told to,
-/// since a bare `nu` with piped stdin tries to start an interactive REPL).
-/// Unrecognized or missing languages fall back to the shell, so a plain
-/// script needs no directive.
-fn interpreter_for(
-    #[cfg_attr(not(feature = "syntax"), allow(unused_variables))] language: Option<&str>,
-) -> (&'static str, &'static [&'static str]) {
-    #[cfg(feature = "syntax")]
-    match language.unwrap_or("sh") {
-        "python" | "python3" => return ("python3", &[]),
-        "javascript" | "js" | "node" => return ("node", &[]),
-        "ruby" => return ("ruby", &[]),
-        "bash" => return ("bash", &[]),
-        "nu" | "nushell" => return ("nu", &["--stdin", "-c", "source /dev/stdin"]),
-        _ => {}
-    }
-    ("sh", &[])
-}
-
 /// Removes `@language xxx` directive lines from a body before it is run as
-/// a script: the directive picks the interpreter (see `interpreter_for`)
-/// but isn't itself valid code in that language.
+/// a rhai script: legacy bodies may still carry a directive (from before
+/// every `@action` implicitly ran as rhai), but it isn't itself valid rhai.
 fn strip_language_directive(body: &str) -> String {
     body.lines()
         .filter(|line| {
@@ -1757,27 +1735,8 @@ fn strip_language_directive(body: &str) -> String {
         .join("\n")
 }
 
-/// An `@action` body containing a bare `@apply` directive line asks for its
-/// own stdout, once the script finishes, to be parsed as a `cub apply`-style
-/// JSON operation batch and applied straight to the outline in memory,
-/// instead of being shown as plain output text.
-fn wants_apply(body: &str) -> bool {
-    body.lines().any(|line| line.trim() == "@apply")
-}
-
-/// Removes bare `@apply` directive lines before the body is run as a
-/// script, the same way `strip_language_directive` does for `@language`.
-fn strip_apply_directive(body: &str) -> String {
-    body.lines()
-        .filter(|line| line.trim() != "@apply")
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 /// Marks the outline dirty and drops caches keyed on the old outline
-/// contents/layout after something outside the normal editing commands --
-/// an `@apply` batch or a `doc`-mutating rhai action -- changed it in place.
-/// Shared so both paths stay in sync rather than drifting apart.
+/// contents/layout after a `doc`-mutating rhai action changed it in place.
 fn mark_outline_touched(app: &mut App) {
     app.dirty = true;
     app.quit_armed = false;
@@ -1789,28 +1748,15 @@ fn mark_outline_touched(app: &mut App) {
     app.selected = app.selected.min(app.rows().len().saturating_sub(1));
 }
 
-/// The GNX of the node one position above `position`, i.e. `position`'s
-/// parent, or `None` when `position` is a root. Used to populate
-/// `CUB_PARENT_GNX`: a script can't derive this itself since it only sees
-/// what we hand it via env vars, not the outline.
-fn parent_gnx(outline: &Outline, position: &PositionId) -> Option<NodeId> {
-    let (parent, _) = position.0.rsplit_once('/')?;
-    outline
-        .position(&PositionId(parent.to_owned()))
-        .map(|position| position.node.clone())
-}
-
-/// Runs the body of the `@action` node at `position` as a script and puts
-/// the result in `app.action_output`, which the body pane shows in place of
-/// the node's body until the selection moves to a different node.
+/// Runs the body of the `@action` node at `position` as a rhai script and
+/// puts the result in `app.action_output`, which the body pane shows in
+/// place of the node's body until the selection moves to a different node.
 ///
-/// The script's environment carries the node the user had selected when
-/// they invoked the action (`target`) -- not the `@action` node itself,
-/// which may live anywhere in the tree -- since a spawned process otherwise
-/// has no way to know what it's meant to act on: `CUB_GNX` (the target's
-/// gnx, e.g. for `insert-tree`'s `parent`), `CUB_PARENT_GNX` (unset for a
-/// root), `CUB_HEADLINE`, `CUB_POSITION`, `CUB_PATH` (slash-separated
-/// headline path), and `CUB_DOC` (the open `.leo` file's absolute path).
+/// `doc` (bound to the outline already open in this session) and `target`
+/// (the gnx of the node the user had selected when they invoked the action
+/// -- not the `@action` node itself, which may live anywhere in the tree)
+/// are predefined in the script's scope. Its `print`/`debug` output becomes
+/// the action's displayed output.
 fn run_action(app: &mut App, position: &PositionId, target: &PositionId) {
     let Some(row) = all_rows(&app.document.outline)
         .into_iter()
@@ -1827,114 +1773,21 @@ fn run_action(app: &mut App, position: &PositionId, target: &PositionId) {
         .find(|row| &row.position == target)
         .unwrap_or_else(|| row.clone());
     let gnx = target_row.node.0.clone();
-    let headline = app.document.outline.nodes[&target_row.node]
-        .headline
-        .clone();
-    let headline_path = headline_path(app, &target_row);
-    let parent_gnx = parent_gnx(&app.document.outline, &target_row.position).map(|id| id.0);
-    let target_position = target_row.position.0.clone();
-    let doc_path = absolutize(&app.path, &env::current_dir().unwrap_or_default())
-        .to_string_lossy()
-        .into_owned();
-    #[cfg(feature = "syntax")]
-    let language = crate::syntax::language_directive(&node.body).map(str::to_owned);
-    #[cfg(not(feature = "syntax"))]
-    let language: Option<String> = None;
-    let apply_requested = wants_apply(&node.body);
-    // The `@language`/`@apply` directives pick the interpreter and the
-    // output handling but aren't themselves valid code in any language, so
-    // they must not be sent to the interpreter.
-    let body = strip_apply_directive(&strip_language_directive(&node.body));
+    // The `@language` directive isn't itself valid rhai, so it must be
+    // stripped before the body reaches the engine.
+    let body = strip_language_directive(&node.body);
 
-    // `@language rhai` runs in-process instead of spawning a subprocess: no
-    // interpreter to find on PATH, no stdin/stdout plumbing. `doc` (bound to
-    // the outline already open in this session) and `target` (this action's
-    // gnx) are predefined instead of the `CUB_*` env vars the subprocess
-    // path below uses, giving the script the same `Doc` API `cub run`
-    // scripts get. Its `print`/`debug` output stands in for stdout/stderr so
-    // the rest of this function (status line, `@apply` handling,
-    // `ActionOutput`) doesn't need to know the difference.
-    let (interpreter, status, stdout, stderr) = if language.as_deref() == Some("rhai") {
-        app.status = format!("running '{name}' with rhai...");
-        let document = std::mem::replace(&mut app.document, LeoDocument::empty());
-        let outcome = crate::rhai_run::run_bound(document, app.path.clone(), &gnx, &body);
-        app.document = outcome.document;
-        if outcome.touched {
-            mark_outline_touched(app);
-        }
-        push_log_lines(app, &name, &outcome.stdout);
-        push_log_lines(app, &name, &outcome.stderr);
-        ("rhai", outcome.status, outcome.stdout, outcome.stderr)
-    } else {
-        let (interpreter, interpreter_args) = interpreter_for(language.as_deref());
-        app.status = format!("running '{name}' with {interpreter}...");
-        // `parent()` of a bare filename like "foo.leo" is `Some("")`, and
-        // `current_dir("")` fails at `chdir`, so only set a cwd when non-empty.
-        let cwd = app
-            .path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            .map(Path::to_path_buf);
-        let mut command = Command::new(interpreter);
-        command.args(interpreter_args);
-        if let Some(cwd) = &cwd {
-            command.current_dir(cwd);
-        }
-        command
-            .env("CUB_GNX", &gnx)
-            .env("CUB_HEADLINE", &headline)
-            .env("CUB_POSITION", &target_position)
-            .env("CUB_PATH", &headline_path)
-            .env("CUB_DOC", &doc_path);
-        if let Some(parent_gnx) = &parent_gnx {
-            command.env("CUB_PARENT_GNX", parent_gnx);
-        }
-        command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        let outcome = command.spawn().and_then(move |mut child| {
-            let mut stdin = child.stdin.take().expect("stdin was piped");
-            let writer = std::thread::spawn(move || {
-                let _ = stdin.write_all(body.as_bytes());
-            });
-            let output = child.wait_with_output();
-            let _ = writer.join();
-            output
-        });
-
-        let (status, stdout, stderr) = match outcome {
-            Ok(output) => (
-                output.status.code(),
-                String::from_utf8_lossy(&output.stdout).into_owned(),
-                String::from_utf8_lossy(&output.stderr).into_owned(),
-            ),
-            Err(error) => (
-                None,
-                String::new(),
-                format!("failed to run {interpreter}: {error}"),
-            ),
-        };
-        (interpreter, status, stdout, stderr)
-    };
-
-    // `@apply` treats a successful run's stdout as a `cub apply`-style JSON
-    // operation batch to apply to the outline in memory, rather than as
-    // output text to display.
-    let apply_summary =
-        (apply_requested && status == Some(0)).then(|| {
-            match serde_json::from_str::<OperationBatch>(&stdout) {
-                Ok(batch) => match app.document.outline.apply(&batch) {
-                    Ok(report) => {
-                        mark_outline_touched(app);
-                        format!("applied {} operation(s) to the outline", report.applied)
-                    }
-                    Err(error) => format!("output parsed but could not be applied: {error}"),
-                },
-                Err(error) => format!("output was not a valid operation batch: {error}"),
-            }
-        });
+    app.status = format!("running '{name}' with rhai...");
+    let document = std::mem::replace(&mut app.document, LeoDocument::empty());
+    let outcome = crate::rhai_run::run_bound(document, app.path.clone(), &gnx, &body);
+    app.document = outcome.document;
+    if outcome.touched {
+        mark_outline_touched(app);
+    }
+    push_log_lines(app, &name, &outcome.stdout);
+    push_log_lines(app, &name, &outcome.stderr);
+    let (interpreter, status, stdout, stderr) =
+        ("rhai", outcome.status, outcome.stdout, outcome.stderr);
 
     let mut text = stdout;
     if !stderr.is_empty() {
@@ -1944,11 +1797,10 @@ fn run_action(app: &mut App, position: &PositionId, target: &PositionId) {
         text.push_str(&stderr);
     }
 
-    app.status = match (status, &apply_summary) {
-        (Some(0), Some(summary)) => format!("'{name}' finished; {summary}"),
-        (Some(0), None) => format!("'{name}' finished"),
-        (Some(code), _) => format!("'{name}' exited with status {code}"),
-        (None, _) => format!("'{name}' did not complete"),
+    app.status = match status {
+        Some(0) => format!("'{name}' finished"),
+        Some(code) => format!("'{name}' exited with status {code}"),
+        None => format!("'{name}' did not complete"),
     };
     app.action_output = Some(ActionOutput {
         node: row.node,
@@ -4850,23 +4702,6 @@ mod tests {
         assert_eq!(action_name("@action   Say Hi  "), "Say Hi");
     }
 
-    #[cfg(feature = "syntax")]
-    #[test]
-    fn maps_language_directives_to_interpreters() {
-        assert_eq!(interpreter_for(None), ("sh", [].as_slice()));
-        assert_eq!(interpreter_for(Some("bash")), ("bash", [].as_slice()));
-        assert_eq!(interpreter_for(Some("python")), ("python3", [].as_slice()));
-        assert_eq!(
-            interpreter_for(Some("nu")),
-            ("nu", ["--stdin", "-c", "source /dev/stdin"].as_slice())
-        );
-        assert_eq!(
-            interpreter_for(Some("nushell")),
-            ("nu", ["--stdin", "-c", "source /dev/stdin"].as_slice())
-        );
-        assert_eq!(interpreter_for(Some("cobol")), ("sh", [].as_slice()));
-    }
-
     #[test]
     fn palette_lists_only_action_nodes_and_filters_by_name() {
         let mut app = editing_app();
@@ -5022,7 +4857,7 @@ mod tests {
                 .get_mut(&NodeId::from("b"))
                 .unwrap();
             node.headline = "@action Greet".into();
-            node.body = "echo hello-from-action".into();
+            node.body = "print(\"hello-from-action\");".into();
         }
         app.selected = 1; // row "0/0" -> node "b"
 
@@ -5055,33 +4890,6 @@ mod tests {
             app.action_output.is_none(),
             "output should clear once selection moves to a different node"
         );
-    }
-
-    #[test]
-    fn a_rhai_action_runs_in_process_without_spawning_a_subprocess() {
-        let mut app = editing_app();
-        {
-            let node = app
-                .document
-                .outline
-                .nodes
-                .get_mut(&NodeId::from("b"))
-                .unwrap();
-            node.headline = "@action Greet in Rhai".into();
-            node.body = "@language rhai\nprint(\"hello from rhai\");".into();
-        }
-        app.selected = 1; // row "0/0" -> node "b"
-
-        run_action(
-            &mut app,
-            &PositionId("0/0".into()),
-            &PositionId("0/0".into()),
-        );
-
-        let output = app.action_output.as_ref().expect("action produced output");
-        assert_eq!(output.interpreter, "rhai");
-        assert_eq!(output.status, Some(0));
-        assert!(output.text.contains("hello from rhai"), "{:?}", output.text);
     }
 
     #[test]
@@ -5353,127 +5161,6 @@ mod tests {
     }
 
     #[test]
-    fn an_action_receives_the_previously_selected_node_as_cub_env_vars() {
-        // Node "b" ("@action Greet") is the action being run, but node "c"
-        // ("C") is what the user had selected before invoking it -- the env
-        // vars must describe "c", the target, not "b", the action itself.
-        let mut app = editing_app();
-        {
-            let node = app
-                .document
-                .outline
-                .nodes
-                .get_mut(&NodeId::from("b"))
-                .unwrap();
-            node.headline = "@action Greet".into();
-            node.body =
-                "echo $CUB_GNX/$CUB_PARENT_GNX/$CUB_HEADLINE/$CUB_POSITION/$CUB_PATH".into();
-        }
-
-        run_action(
-            &mut app,
-            &PositionId("0/0".into()),
-            &PositionId("0/1".into()),
-        );
-
-        let output = app.action_output.as_ref().expect("action produced output");
-        assert_eq!(output.text.trim(), "c/a/C/0/1/A/C");
-    }
-
-    #[test]
-    fn a_root_target_has_no_cub_parent_gnx() {
-        let mut app = editing_app();
-        {
-            let node = app
-                .document
-                .outline
-                .nodes
-                .get_mut(&NodeId::from("b"))
-                .unwrap();
-            node.headline = "@action Root".into();
-            node.body = "echo \"[$CUB_PARENT_GNX]\"".into();
-        }
-
-        run_action(&mut app, &PositionId("0/0".into()), &PositionId("0".into()));
-
-        let output = app.action_output.as_ref().expect("action produced output");
-        assert_eq!(output.text.trim(), "[]");
-    }
-
-    #[test]
-    fn an_apply_directive_applies_the_actions_stdout_to_the_outline() {
-        let mut app = editing_app();
-        {
-            let node = app
-                .document
-                .outline
-                .nodes
-                .get_mut(&NodeId::from("b"))
-                .unwrap();
-            node.headline = "@action Add child".into();
-            node.body = concat!(
-                "@apply\n",
-                "echo '{\"operations\":[{\"op\":\"insert-tree\",",
-                "\"parent-headline\":\"A\",",
-                "\"tree\":{\"New thing\":{\"_body\":\"hi\"}}}]}'",
-            )
-            .into();
-        }
-        app.selected = 1; // row "0/0" -> node "b"
-
-        run_action(
-            &mut app,
-            &PositionId("0/0".into()),
-            &PositionId("0/0".into()),
-        );
-
-        assert!(app.dirty, "applying an operation batch should mark dirty");
-        assert!(app.status.contains("applied 1 operation"), "{}", app.status);
-        assert!(
-            app.document
-                .outline
-                .nodes
-                .values()
-                .any(|node| node.headline == "New thing"),
-            "expected a new 'New thing' node in the outline"
-        );
-
-        let output = app.action_output.as_ref().expect("action produced output");
-        assert_eq!(output.status, Some(0));
-    }
-
-    #[test]
-    fn an_apply_directive_reports_invalid_json_without_touching_the_outline() {
-        let mut app = editing_app();
-        let node_count_before = app.document.outline.nodes.len();
-        {
-            let node = app
-                .document
-                .outline
-                .nodes
-                .get_mut(&NodeId::from("b"))
-                .unwrap();
-            node.headline = "@action Broken".into();
-            node.body = "@apply\necho 'not json'".into();
-        }
-        app.selected = 1;
-
-        run_action(
-            &mut app,
-            &PositionId("0/0".into()),
-            &PositionId("0/0".into()),
-        );
-
-        assert!(!app.dirty);
-        assert_eq!(app.document.outline.nodes.len(), node_count_before);
-        assert!(
-            app.status.contains("not a valid operation batch"),
-            "{}",
-            app.status
-        );
-    }
-
-    #[test]
     fn enter_in_the_palette_runs_the_selected_action_and_selects_its_node() {
         let mut app = editing_app();
         {
@@ -5484,7 +5171,7 @@ mod tests {
                 .get_mut(&NodeId::from("b"))
                 .unwrap();
             node.headline = "@action Greet".into();
-            node.body = "echo hi".into();
+            node.body = "print(\"hi\");".into();
         }
 
         start_palette(&mut app);
@@ -5504,8 +5191,8 @@ mod tests {
     #[test]
     fn enter_in_the_palette_runs_the_action_against_the_node_selected_beforehand() {
         // "c" is selected when the palette opens; "b" is the action node
-        // picked from it. The env vars must describe "c" -- reproduces a bug
-        // where they described "b" (the action itself) instead.
+        // picked from it. `target` must describe "c" -- reproduces a bug
+        // where it described "b" (the action itself) instead.
         let mut app = editing_app();
         {
             let node = app
@@ -5515,7 +5202,7 @@ mod tests {
                 .get_mut(&NodeId::from("b"))
                 .unwrap();
             node.headline = "@action Greet".into();
-            node.body = "echo $CUB_GNX".into();
+            node.body = "print(target);".into();
         }
         app.selected = 2; // row "0/1" -> node "c"
 

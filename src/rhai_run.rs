@@ -6,14 +6,13 @@
 //!   script opens its own `.leo` file and asserts on the result, exercising
 //!   the same library code `cub`'s other subcommands do, without a
 //!   terminal.
-//! - `@action` bodies with `@language rhai` ([`run_bound`]), run in-process
-//!   from inside the TUI (see `tui::run_action`). Rather than opening a
-//!   file, the action's `doc` is bound to the outline already open in the
-//!   editor, and `target` is predefined as the gnx of the node the action
-//!   was invoked on -- the same role env vars like `CUB_GNX` play for
-//!   subprocess-based actions.
+//! - `@action` bodies ([`run_bound`]), run in-process from inside the TUI
+//!   (see `tui::run_action`). Rather than opening a file, the action's
+//!   `doc` is bound to the outline already open in the editor, and `target`
+//!   is predefined as the gnx of the node the action was invoked on.
 
 use std::collections::BTreeMap;
+use std::process::Command;
 use std::{cell::RefCell, fs, path::PathBuf, rc::Rc};
 
 use anyhow::{Context, Result};
@@ -54,6 +53,87 @@ fn rhai_err(message: impl std::fmt::Display) -> Box<EvalAltResult> {
 
 fn ids_to_array(ids: Vec<NodeId>) -> Array {
     ids.into_iter().map(|id| Dynamic::from(id.0)).collect()
+}
+
+fn json_value_to_dynamic(value: serde_json::Value) -> Dynamic {
+    match value {
+        serde_json::Value::Null => Dynamic::UNIT,
+        serde_json::Value::Bool(b) => Dynamic::from(b),
+        serde_json::Value::Number(n) => n
+            .as_i64()
+            .map(Dynamic::from)
+            .unwrap_or_else(|| Dynamic::from(n.as_f64().unwrap_or(0.0))),
+        serde_json::Value::String(s) => Dynamic::from(s),
+        serde_json::Value::Array(items) => Dynamic::from(
+            items
+                .into_iter()
+                .map(json_value_to_dynamic)
+                .collect::<Array>(),
+        ),
+        serde_json::Value::Object(fields) => {
+            let mut map = rhai::Map::new();
+            for (key, value) in fields {
+                map.insert(key.into(), json_value_to_dynamic(value));
+            }
+            Dynamic::from(map)
+        }
+    }
+}
+
+/// Parses `json` (object, array, or scalar -- unlike Rhai's built-in
+/// `parse_json`, which only accepts an object) into the matching Rhai
+/// value. The obvious companion to `sh`: a script piping a subprocess's
+/// stdout (`gh pr list --json ...`, ...) through here gets Rhai arrays/maps
+/// back instead of having to pick the JSON apart as a string. Registered
+/// under the same name as Rhai's built-in `parse_json`, replacing it.
+fn parse_json(json: &str) -> RhaiResult<Dynamic> {
+    serde_json::from_str(json)
+        .map(json_value_to_dynamic)
+        .map_err(rhai_err)
+}
+
+/// Runs `cmd` through `sh -c` with `default_cwd` as its working directory
+/// unless `opts` overrides it with a `cwd` entry. Always succeeds and hands
+/// back a `#{stdout, stderr, code}` map -- a nonzero exit is something the
+/// caller decides how to handle, not something this function judges -- the
+/// `Err` case is reserved for `sh` itself failing to launch (e.g. missing
+/// from `PATH`).
+fn run_shell(
+    cmd: &str,
+    opts: &rhai::Map,
+    default_cwd: Option<&std::path::Path>,
+) -> RhaiResult<rhai::Map> {
+    let mut command = Command::new("sh");
+    command.arg("-c").arg(cmd);
+    match opts.get("cwd") {
+        Some(cwd) => {
+            command.current_dir(cwd.clone().into_string().map_err(|type_name| {
+                rhai_err(format!("sh: `cwd` must be a string, got {type_name}"))
+            })?);
+        }
+        None => {
+            if let Some(default_cwd) = default_cwd {
+                command.current_dir(default_cwd);
+            }
+        }
+    }
+    let output = command
+        .output()
+        .map_err(|error| rhai_err(format!("failed to run '{cmd}': {error}")))?;
+    let mut result = rhai::Map::new();
+    result.insert(
+        "stdout".into(),
+        Dynamic::from(String::from_utf8_lossy(&output.stdout).into_owned()),
+    );
+    result.insert(
+        "stderr".into(),
+        Dynamic::from(String::from_utf8_lossy(&output.stderr).into_owned()),
+    );
+    result.insert(
+        "code".into(),
+        Dynamic::from(output.status.code().unwrap_or(-1) as i64),
+    );
+    Ok(result)
 }
 
 fn find_node<'a>(document: &'a LeoDocument, gnx: &str) -> RhaiResult<&'a leo::Node> {
@@ -212,6 +292,24 @@ impl Doc {
             .outline
             .headline_path_of(&NodeId(gnx.to_owned()))
             .ok_or_else(|| rhai_err(format!("node not found: {gnx}")))
+    }
+
+    /// The on-disk path `gnx`'s `@file`/`@thin`/`@file-thin`/`@clean`/`@f`
+    /// body syncs to, resolved the same way `cub sync` finds it -- the
+    /// outline's own directory plus every ancestor (and `gnx`'s own) `@path`
+    /// directive, plus the filename in `gnx`'s headline. `""` if `gnx` isn't
+    /// itself an external-file node (an ordinary node with a `@path`
+    /// ancestor has no on-disk path of its own -- `@path` only names a
+    /// directory for descendants that *are* external-file nodes). Fails if
+    /// `gnx` isn't a node in the outline.
+    fn file_path(&mut self, gnx: &str) -> RhaiResult<String> {
+        let inner = self.inner.borrow();
+        find_node(&inner.document, gnx)?;
+        Ok(
+            leo::external_file_path(&inner.document.outline, &inner.path, &NodeId(gnx.to_owned()))
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        )
     }
 
     /// Wraps `gnx` as a `Node` bound to this `Doc` -- lets a script hold a
@@ -394,6 +492,33 @@ impl Doc {
         inner.path = PathBuf::from(path);
         Ok(())
     }
+
+    /// The escape hatch for the rare thing a script needs an external
+    /// process for (a build step, `git`, ...). Defaults `cwd` to the open
+    /// `.leo` file's directory, not `cub`'s own working directory, so a
+    /// script can reach a sibling file by relative path the same way an
+    /// external file reference in the outline itself would.
+    fn sh(&mut self, cmd: &str) -> RhaiResult<rhai::Map> {
+        run_shell(cmd, &rhai::Map::new(), self.dir().as_deref())
+    }
+
+    /// `sh` with an options map -- currently just `cwd`, to override the
+    /// default `.leo`-file-relative directory.
+    fn sh_with_opts(&mut self, cmd: &str, opts: rhai::Map) -> RhaiResult<rhai::Map> {
+        run_shell(cmd, &opts, self.dir().as_deref())
+    }
+
+    /// The directory holding this `Doc`'s `.leo` file, or `None` if `path`
+    /// is a bare filename with no directory component (in which case that
+    /// directory is already `cub`'s own working directory).
+    fn dir(&self) -> Option<PathBuf> {
+        self.inner
+            .borrow()
+            .path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .map(std::path::Path::to_path_buf)
+    }
 }
 
 /// A `Doc` node bound to one `gnx`, returned by `doc.node(gnx)`. Property
@@ -475,6 +600,10 @@ impl Node {
         self.doc.path(&self.gnx)
     }
 
+    fn file_path(&mut self) -> RhaiResult<String> {
+        self.doc.file_path(&self.gnx)
+    }
+
     fn describe(&mut self) -> String {
         format!("Node({})", self.gnx)
     }
@@ -510,6 +639,7 @@ fn register_doc_api(engine: &mut Engine) {
     engine.register_fn("all", Doc::all);
     engine.register_fn("parent", Doc::parent);
     engine.register_fn("path", Doc::path);
+    engine.register_fn("file_path", Doc::file_path);
     engine.register_fn("node", Doc::node);
     engine.register_fn("find_h", Doc::find_h);
     engine.register_fn("find_b", Doc::find_b);
@@ -526,6 +656,9 @@ fn register_doc_api(engine: &mut Engine) {
     engine.register_fn("apply", Doc::apply);
     engine.register_fn("save", Doc::save);
     engine.register_fn("save_as", Doc::save_as);
+    engine.register_fn("sh", Doc::sh);
+    engine.register_fn("sh", Doc::sh_with_opts);
+    engine.register_fn("parse_json", parse_json);
 
     engine.register_type_with_name::<Node>("Node");
     engine.register_get_set("h", Node::get_h, Node::set_h);
@@ -535,6 +668,7 @@ fn register_doc_api(engine: &mut Engine) {
     engine.register_fn("subtree", Node::subtree);
     engine.register_get("gnx", Node::gnx);
     engine.register_fn("path", Node::path);
+    engine.register_fn("file_path", Node::file_path);
     engine.register_fn("to_string", Node::describe);
 
     engine.register_fn("assert", |cond: bool| -> RhaiResult<()> {
@@ -581,9 +715,8 @@ pub fn run(script_path: &std::path::Path) -> Result<()> {
 
 /// What running a bound `@action` rhai script produced: the document as it
 /// stood after the script ran (mutated in place if the script touched
-/// `doc`, unchanged otherwise), plus output shaped like a subprocess's exit
-/// status/stdout/stderr so callers don't need a separate code path from the
-/// interpreter-based action runner.
+/// `doc`, unchanged otherwise), plus an exit status/stdout/stderr shape the
+/// caller can render the same way regardless of how the script failed.
 #[cfg(feature = "tui")]
 pub(crate) struct BoundOutcome {
     pub(crate) document: LeoDocument,

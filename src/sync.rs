@@ -204,6 +204,17 @@ fn select_jobs(
     Ok(unique)
 }
 
+/// The on-disk path a node's `@file`/`@thin`/`@file-thin`/`@clean`/`@f` body
+/// syncs to, accounting for every ancestor `@path` directive -- the same
+/// resolution `sync_document` uses to find each external file. `None` if
+/// `gnx` isn't itself an external-file node.
+pub fn external_file_path(outline: &Outline, outline_path: &Path, gnx: &NodeId) -> Option<PathBuf> {
+    external_jobs(outline, outline_path)
+        .into_iter()
+        .find(|job| &job.gnx == gnx)
+        .map(|job| job.path)
+}
+
 fn external_jobs(outline: &Outline, outline_path: &Path) -> Vec<Job> {
     fn visit(
         outline: &Outline,

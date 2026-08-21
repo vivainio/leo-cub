@@ -30,6 +30,9 @@ Learn how GNXs, positions, clones, and external files fit together.](reference/c
 [:lucide-bot: **Automate safely**  
 Use compact inspection and transactional JSON operations from scripts or agents.](workflows/automation.md)
 
+[:lucide-scroll: **Script it with Rhai**  
+Drive a `Doc` with `cub run` or `@action` bodies — `cub`'s main path for custom behavior.](workflows/scripting.md)
+
 </div>
 
 ## What it is good at
