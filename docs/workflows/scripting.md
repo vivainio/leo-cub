@@ -72,6 +72,8 @@ gets through its predefined `doc`:
 | `doc.gnx(path)` | Resolves a headline path to a gnx without creating anything; fails if it's missing or ambiguous. |
 | `doc.roots()` | An array of the gnxs of the outline's top-level nodes, in outline order. |
 | `doc.children(gnx)` | An array of `gnx`'s children's gnxs, in outline order (empty for a leaf); fails if `gnx` isn't in the outline. |
+| `doc.subtree(gnx)` | An array of `gnx` and every gnx under it, depth-first in outline order (`gnx` itself first); fails if `gnx` isn't in the outline. |
+| `doc.all()` | An array of every gnx in the outline, depth-first in outline order. |
 | `doc.parent(gnx)` | `gnx`'s parent's gnx, or `""` if `gnx` is a root; fails if `gnx` isn't in the outline. |
 | `doc.path(gnx)` | The slash-separated headline path from the root down to `gnx` — the inverse of `doc.gnx(path)`/`doc.add(path)`, so `doc.gnx(doc.path(gnx)) == gnx`. |
 | `doc.headline(gnx)` / `doc.set_headline(gnx, text)` | Read or write a node's headline. |
@@ -83,32 +85,35 @@ gets through its predefined `doc`:
 | `doc.save()` | Writes back to the path the `Doc` was opened or bound with. |
 | `doc.save_as(path)` | Writes to a different path and retargets future `doc.save()` calls there. |
 
-`doc.children`/`doc.parent`/`doc.path` walk the tree structurally (parent/
-child links), independent of headlines, so they work even when headlines
-aren't unique. A script visits a whole subtree with an explicit
-worklist, since there's no built-in recursive walk:
+`doc.children`/`doc.subtree`/`doc.all`/`doc.parent`/`doc.path` walk the
+tree structurally (parent/child links), independent of headlines, so they
+work even when headlines aren't unique. `doc.subtree`/`doc.all` are the
+ones to reach for when a script wants to visit a whole (sub)tree — they
+return the full flattened list up front rather than making the script
+manage its own traversal:
 
 ```rhai
 let doc = open("notes.leo");
-let stack = [doc.gnx("Project")];
-while stack.len() > 0 {
-    let gnx = stack.pop();
+for gnx in doc.subtree(doc.gnx("Project")) {
     print(doc.headline(gnx));
-    for child in doc.children(gnx) {
-        stack.push(child);
-    }
 }
 ```
+
+Reach for `doc.children` directly, one level at a time, only when a walk
+needs to stop early or skip a branch based on what it finds — `doc.subtree`
+always visits everything under the node.
 
 Clones (the same node appearing at more than one position) don't have a
 separate identity in this API — a gnx is a node's identity, not one
 occurrence's, so `doc.children`/`doc.parent`/`doc.path` always answer for
 the node's first position in the outline, which is what you want almost
 all of the time since a clone's children are shared across every
-occurrence by definition. The one thing this API can't tell you is *which*
-occurrence of a multiply-cloned node a particular action targets — `target`
-in an `@action` body identifies the node, not the specific occurrence the
-user had selected.
+occurrence by definition. `doc.all` is the exception: it walks every
+*position*, the same way Leo's `c.all_positions()` does, so a node cloned
+to three places yields its gnx three times. The one thing this API can't
+tell you is *which* occurrence of a multiply-cloned node a particular
+action targets — `target` in an `@action` body identifies the node, not
+the specific occurrence the user had selected.
 
 `doc.apply` is the escape hatch for anything the other methods don't cover
 directly — `insert-tree`, `merge-tree`, `replace-tree`, and the rest of the
@@ -256,8 +261,9 @@ onto it loosely:
 | `p.h` / `p.b` | `doc.headline(gnx)` / `doc.body(gnx)` | Leo exposes headline/body as properties on the position; cub exposes them as `Doc` methods taking an explicit gnx, since cub has no position object to hang a property off of. |
 | `v.gnx` | *(the gnx string itself)* | Every node handle in cub's API already *is* its gnx — there's no separate node/vnode object to unwrap it from. |
 | `g.es(...)` | `print(...)` | Both write to a log a human is expected to read; cub's is plain Rhai `print`, not a Leo-specific function. |
-| `p.children()` / `p.parent()` | `doc.children(gnx)` / `doc.parent(gnx)` | Same idea, but methods on `doc` taking/returning gnx strings rather than generators yielding position objects — a script keeps its own worklist (see above) instead of getting a lazy iterator. |
-| `c.all_positions()` | *(none)* | No single call walks the whole outline in order. Combine `doc.roots()` with a `doc.children()` worklist, or use `doc.render()`/`doc.apply()` (structural batch edits keyed by headline path or gnx) when a full traversal isn't really what's needed. |
+| `p.children()` / `p.parent()` | `doc.children(gnx)` / `doc.parent(gnx)` | Same idea, but methods on `doc` taking/returning gnx strings rather than generators yielding position objects. |
+| `p.self_and_subtree()` | `doc.subtree(gnx)` | Leo's is a lazy generator you `for p in ...`; cub's returns the whole flattened array up front — outlines are small enough that this is simpler than adding lazy iterators to the embedding. |
+| `c.all_positions()` | `doc.all()` | Same trade-off as `subtree`: one eager array of every gnx in outline order, rather than a generator. |
 | `c.undoer` | *(none)* | cub scripts aren't undoable the way a Leo `@button` command is; treat a script's edits like any other unreviewed change and keep the file under version control. |
 
 The practical upshot: a cub script tends to look less like "walk the tree

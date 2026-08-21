@@ -106,6 +106,10 @@ fn cub_run_walks_the_tree_with_roots_children_parent_and_path() {
 
             assert_eq(doc.path(first), "Root/Tasks/First task");
             assert_eq(doc.gnx(doc.path(first)), first);
+
+            assert_eq(doc.subtree(tasks), [tasks, first, second]);
+            assert_eq(doc.subtree(first), [first]);
+            assert_eq(doc.all(), [root, tasks, first, second]);
             print("ok");
             "#
         ),
