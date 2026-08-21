@@ -1,5 +1,4 @@
 use std::{
-    cell::RefCell,
     collections::{HashMap, HashSet},
     env, fs,
     fs::OpenOptions,
@@ -7,7 +6,6 @@ use std::{
     io::Write,
     path::{Component, Path, PathBuf},
     process::{Command, Stdio},
-    rc::Rc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -1664,42 +1662,19 @@ fn strip_apply_directive(body: &str) -> String {
         .join("\n")
 }
 
-/// Runs `body` as a Rhai script and returns a `(status, stdout, stderr)`
-/// triple shaped like a subprocess's, so callers don't need a separate code
-/// path: `print`/`debug` calls accumulate as "stdout", a script error (or
-/// `Engine::eval`'s parse/runtime failure) becomes "stderr" with status `1`,
-/// and a clean run is status `0`. No outline access yet -- that's a
-/// follow-up; this only proves scripts can run in-process at all.
-///
-/// Deliberately doesn't receive the `CUB_GNX`/`CUB_HEADLINE`/etc. env vars
-/// `run_action`'s subprocess path sets: those exist because a spawned
-/// process has no other way to learn its target. A Rhai script runs
-/// in-process, so once it gets outline access, its target's identity
-/// belongs on that live object (e.g. a `target` position handle), not
-/// duplicated as string env vars.
-fn run_rhai_script(body: &str) -> (Option<i32>, String, String) {
-    let output = Rc::new(RefCell::new(String::new()));
-    let print_output = output.clone();
-    let debug_output = output.clone();
-
-    let mut engine = rhai::Engine::new();
-    engine.on_print(move |s| {
-        let mut output = print_output.borrow_mut();
-        output.push_str(s);
-        output.push('\n');
-    });
-    engine.on_debug(move |s, source, pos| {
-        let mut output = debug_output.borrow_mut();
-        match source {
-            Some(source) => output.push_str(&format!("{source} @ {pos:?} | {s}\n")),
-            None => output.push_str(&format!("{pos:?} | {s}\n")),
-        }
-    });
-
-    match engine.eval::<rhai::Dynamic>(body) {
-        Ok(_) => (Some(0), output.borrow().clone(), String::new()),
-        Err(error) => (Some(1), output.borrow().clone(), error.to_string()),
-    }
+/// Marks the outline dirty and drops caches keyed on the old outline
+/// contents/layout after something outside the normal editing commands --
+/// an `@apply` batch or a `doc`-mutating rhai action -- changed it in place.
+/// Shared so both paths stay in sync rather than drifting apart.
+fn mark_outline_touched(app: &mut App) {
+    app.dirty = true;
+    app.quit_armed = false;
+    #[cfg(feature = "syntax")]
+    app.highlight_cache.clear();
+    #[cfg(feature = "syntax")]
+    app.preview_cache.clear();
+    app.source_locations.clear();
+    app.selected = app.selected.min(app.rows().len().saturating_sub(1));
 }
 
 /// The GNX of the node one position above `position`, i.e. `position`'s
@@ -1760,14 +1735,22 @@ fn run_action(app: &mut App, position: &PositionId, target: &PositionId) {
     let body = strip_apply_directive(&strip_language_directive(&node.body));
 
     // `@language rhai` runs in-process instead of spawning a subprocess: no
-    // interpreter to find on PATH, no stdin/stdout plumbing. Its `print`/
-    // `debug` output stands in for stdout/stderr so the rest of this
-    // function (status line, `@apply` handling, `ActionOutput`) doesn't need
-    // to know the difference.
+    // interpreter to find on PATH, no stdin/stdout plumbing. `doc` (bound to
+    // the outline already open in this session) and `target` (this action's
+    // gnx) are predefined instead of the `CUB_*` env vars the subprocess
+    // path below uses, giving the script the same `Doc` API `cub run`
+    // scripts get. Its `print`/`debug` output stands in for stdout/stderr so
+    // the rest of this function (status line, `@apply` handling,
+    // `ActionOutput`) doesn't need to know the difference.
     let (interpreter, status, stdout, stderr) = if language.as_deref() == Some("rhai") {
         app.status = format!("running '{name}' with rhai...");
-        let (status, stdout, stderr) = run_rhai_script(&body);
-        ("rhai", status, stdout, stderr)
+        let document = std::mem::replace(&mut app.document, LeoDocument::empty());
+        let outcome = crate::rhai_run::run_bound(document, app.path.clone(), &gnx, &body);
+        app.document = outcome.document;
+        if outcome.touched {
+            mark_outline_touched(app);
+        }
+        ("rhai", outcome.status, outcome.stdout, outcome.stderr)
     } else {
         let (interpreter, interpreter_args) = interpreter_for(language.as_deref());
         app.status = format!("running '{name}' with {interpreter}...");
@@ -1830,14 +1813,7 @@ fn run_action(app: &mut App, position: &PositionId, target: &PositionId) {
             match serde_json::from_str::<OperationBatch>(&stdout) {
                 Ok(batch) => match app.document.outline.apply(&batch) {
                     Ok(report) => {
-                        app.dirty = true;
-                        app.quit_armed = false;
-                        #[cfg(feature = "syntax")]
-                        app.highlight_cache.clear();
-                        #[cfg(feature = "syntax")]
-                        app.preview_cache.clear();
-                        app.source_locations.clear();
-                        app.selected = app.selected.min(app.rows().len().saturating_sub(1));
+                        mark_outline_touched(app);
                         format!("applied {} operation(s) to the outline", report.applied)
                     }
                     Err(error) => format!("output parsed but could not be applied: {error}"),
@@ -4961,6 +4937,65 @@ mod tests {
         let output = app.action_output.as_ref().expect("action produced output");
         assert_eq!(output.interpreter, "rhai");
         assert_ne!(output.status, Some(0));
+    }
+
+    #[test]
+    fn a_rhai_action_gets_the_same_doc_api_as_cub_run_and_mutates_the_live_outline() {
+        // Node "b" ("@action Rename target") is the action; node "c" ("C")
+        // is the target it was invoked against -- `target` should be "c"'s
+        // gnx, and `doc` should be bound to the outline already open in the
+        // session, not a fresh one read from disk.
+        let mut app = editing_app();
+        {
+            let node = app
+                .document
+                .outline
+                .nodes
+                .get_mut(&NodeId::from("b"))
+                .unwrap();
+            node.headline = "@action Rename target".into();
+            node.body = "@language rhai\ndoc.set_headline(target, doc.headline(target) + \" (renamed)\");\nprint(doc.count());".into();
+        }
+
+        run_action(
+            &mut app,
+            &PositionId("0/0".into()),
+            &PositionId("0/1".into()),
+        );
+
+        assert_eq!(
+            app.document.outline.nodes[&NodeId::from("c")].headline,
+            "C (renamed)"
+        );
+        assert!(app.dirty);
+        let output = app.action_output.as_ref().expect("action produced output");
+        assert_eq!(output.status, Some(0));
+        assert_eq!(output.text.trim(), "3");
+    }
+
+    #[test]
+    fn a_read_only_rhai_action_does_not_mark_the_outline_dirty() {
+        let mut app = editing_app();
+        {
+            let node = app
+                .document
+                .outline
+                .nodes
+                .get_mut(&NodeId::from("b"))
+                .unwrap();
+            node.headline = "@action Inspect target".into();
+            node.body = "@language rhai\nprint(doc.headline(target));".into();
+        }
+
+        run_action(
+            &mut app,
+            &PositionId("0/0".into()),
+            &PositionId("0/1".into()),
+        );
+
+        assert!(!app.dirty);
+        let output = app.action_output.as_ref().expect("action produced output");
+        assert_eq!(output.text.trim(), "C");
     }
 
     #[test]
