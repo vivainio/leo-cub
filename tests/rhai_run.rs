@@ -74,6 +74,55 @@ fn cub_run_drives_a_temp_outline_through_the_rhai_api() {
 }
 
 #[test]
+fn cub_run_walks_the_tree_with_roots_children_parent_and_path() {
+    let leo_path = temp_path("rhai_run_tree.leo");
+    let _ = fs::remove_file(&leo_path);
+    LeoDocument::new("Root").save_new(&leo_path).unwrap();
+
+    let script_path = temp_path("rhai_run_tree.rhai");
+    let escaped_path = leo_path.display().to_string().replace('\\', "\\\\");
+    fs::write(
+        &script_path,
+        format!(
+            r#"
+            let doc = open("{escaped_path}");
+            let root = doc.gnx("Root");
+            assert_eq(doc.roots().len(), 1);
+            assert_eq(doc.roots()[0], root);
+            assert_eq(doc.parent(root), "");
+
+            let tasks = doc.add("Root/Tasks");
+            let first = doc.add("Root/Tasks/First task");
+            let second = doc.add("Root/Tasks/Second task");
+
+            assert_eq(doc.parent(first), tasks);
+            assert_eq(doc.parent(tasks), root);
+
+            let kids = doc.children(tasks);
+            assert_eq(kids.len(), 2);
+            assert_eq(kids[0], first);
+            assert_eq(kids[1], second);
+            assert_eq(doc.children(first).len(), 0);
+
+            assert_eq(doc.path(first), "Root/Tasks/First task");
+            assert_eq(doc.gnx(doc.path(first)), first);
+            print("ok");
+            "#
+        ),
+    )
+    .unwrap();
+
+    let output = run_cub(&["run", script_path.to_str().unwrap()]);
+    assert!(
+        output.status.success(),
+        "cub run failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("ok"));
+}
+
+#[test]
 fn cub_run_exits_nonzero_and_reports_the_failed_assertion() {
     let script_path = temp_path("rhai_run_failure.rhai");
     fs::write(&script_path, "assert_eq(1, 2);").unwrap();
