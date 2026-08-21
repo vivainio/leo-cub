@@ -1355,12 +1355,12 @@ fn command_import_available(app: &App) -> bool {
 
 /// Scans the selected `@path` node's directory for files that don't already
 /// have a matching `@auto`/`@file`/... child, and adds one `@auto <name>`
-/// node per new file. Subdirectories without a matching `@path` child get an
-/// `@path <name>` node of their own, so a directory holding only
-/// subdirectories still produces something to import into next, rather than
-/// requiring each `@path` node to be created by hand first. Content isn't
-/// fetched here — save and reload (Ctrl-S, Ctrl-R) load it the same way any
-/// other `@auto` node does.
+/// node per new file, immediately loading and expanding its content so it's
+/// visible without a save+reload round trip. Subdirectories without a
+/// matching `@path` child get an `@path <name>` node of their own, so a
+/// directory holding only subdirectories still produces something to import
+/// into next, rather than requiring each `@path` node to be created by hand
+/// first.
 fn command_import_run(app: &mut App) {
     let Some(row) = app.selected_row() else {
         app.status = "select a @path node to import into".into();
@@ -1424,11 +1424,18 @@ fn command_import_run(app: &mut App) {
 
     let file_count = new_files.len();
     let dir_count = new_dirs.len();
+    let mut child_index = position.children.len();
+    let mut jobs = Vec::new();
+    let mut new_positions = Vec::new();
     let headlines = new_files
         .into_iter()
-        .map(|filename| format!("@auto {filename}"))
-        .chain(new_dirs.into_iter().map(|name| format!("@path {name}")));
-    for headline in headlines {
+        .map(|filename| (format!("@auto {filename}"), Some(filename)))
+        .chain(
+            new_dirs
+                .into_iter()
+                .map(|name| (format!("@path {name}"), None)),
+        );
+    for (headline, filename) in headlines {
         let mut id = fresh_node_id();
         while app.document.outline.nodes.contains_key(&id) {
             id = fresh_node_id();
@@ -1447,16 +1454,55 @@ fn command_import_run(app: &mut App) {
             continue;
         };
         children.push(Position {
-            node: id,
+            node: id.clone(),
             children: Vec::new(),
         });
+        let position_id = if row.position.0.is_empty() {
+            child_index.to_string()
+        } else {
+            format!("{}/{}", row.position.0, child_index)
+        };
+        child_index += 1;
+        if let Some(filename) = filename {
+            jobs.push(DerivedJob {
+                position: PositionId(position_id.clone()),
+                path: directory.join(filename),
+                auto: true,
+                directive: "@auto".to_owned(),
+                root: id,
+            });
+        }
+        new_positions.push(PositionId(position_id));
+    }
+
+    let report = load_derived_jobs(&mut app.document.outline, jobs);
+    app.source_locations.extend(report.locations);
+    app.source_nodes.extend(report.node_locations);
+    app.derived_nodes.extend(report.derived_nodes);
+    app.writable_external.extend(report.writable_external);
+    app.original_external
+        .children
+        .extend(report.original_children);
+    app.original_external.bodies.extend(report.original_bodies);
+    app.original_external.nodes.extend(report.original_nodes);
+    for position in new_positions {
+        app.expanded.insert(position);
     }
 
     app.dirty = true;
     app.quit_armed = false;
+    let load_note = if report.errors.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "; {} error(s) loading content: {}",
+            report.errors.len(),
+            report.errors.join(" | ")
+        )
+    };
     app.status = format!(
-        "imported {file_count} new file(s) and {dir_count} new subdirectory(ies) \
-         (Ctrl-S to save, Ctrl-R to load content)"
+        "imported {file_count} new file(s) and {dir_count} new subdirectory(ies){load_note} \
+         (Ctrl-S to save)"
     );
 }
 
@@ -3644,6 +3690,15 @@ struct SourceLocation {
 
 fn load_derived_files(outline: &mut Outline, outline_path: &Path) -> LoadReport {
     let jobs = derived_jobs(outline, outline_path);
+    load_derived_jobs(outline, jobs)
+}
+
+/// Runs a specific set of derived-file jobs against `outline`, rather than
+/// every derived node in it. Used to fetch content for a handful of
+/// freshly-created nodes (e.g. from `command_import_run`) without re-merging
+/// -- and so silently discarding unsaved edits to -- every other derived node
+/// in the document, which a full `load_derived_files` pass would do.
+fn load_derived_jobs(outline: &mut Outline, jobs: Vec<DerivedJob>) -> LoadReport {
     let mut report = LoadReport::default();
     for job in jobs {
         let label = job.path.display().to_string();
@@ -4694,10 +4749,20 @@ mod tests {
 
         let path_position = &app.document.outline.roots[0];
         assert_eq!(path_position.children.len(), 2);
+        let added_position = PositionId("0/1".into());
         let added = &app.document.outline.nodes[&path_position.children[1].node];
         assert_eq!(added.headline, "@auto b.txt");
+        assert_eq!(
+            added.body, "new",
+            "new derived nodes should have their content loaded immediately, without a save+reload"
+        );
+        assert!(
+            app.expanded.contains(&added_position),
+            "a freshly imported derived node should start expanded so its loaded content is visible"
+        );
         assert!(app.dirty);
         assert!(app.status.starts_with("imported 1 new file(s)"));
+        assert!(!app.status.contains("Ctrl-R"));
 
         command_import_run(&mut app);
         assert!(
