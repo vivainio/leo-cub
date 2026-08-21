@@ -90,9 +90,10 @@ all-gnx `Doc` API (below) exists underneath it for structural operations
 ```rhai
 let doc = open("notes.leo");
 let tasks = doc.ensure("Project/Tasks");
-
-tasks.h = "Tasks (Q3)";
 tasks.b = "Backlog for the quarter.";
+
+doc.ensure("Project/Tasks/Write onboarding docs");
+doc.ensure("Project/Tasks/Ship v2");
 
 for child in tasks.children() {
     print(child.h);
