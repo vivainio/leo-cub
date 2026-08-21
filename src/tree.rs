@@ -179,6 +179,47 @@ impl Outline {
         let mut chain = Vec::new();
         find(&self.roots, node, &mut chain).then_some(chain)
     }
+
+    /// The gnxs of `node` and everything under it, depth-first and in
+    /// outline order (`node` itself first) -- the same shape as Leo's
+    /// `p.self_and_subtree()`. `None` if `node` isn't reachable from any
+    /// root. Uses the same first-occurrence search as
+    /// [`Outline::children_of`].
+    pub fn subtree_ids(&self, node: &NodeId) -> Option<Vec<NodeId>> {
+        fn find<'a>(positions: &'a [Position], node: &NodeId) -> Option<&'a Position> {
+            for position in positions {
+                if &position.node == node {
+                    return Some(position);
+                }
+                if let Some(found) = find(&position.children, node) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        let mut out = Vec::new();
+        collect_preorder(find(&self.roots, node)?, &mut out);
+        Some(out)
+    }
+
+    /// The gnxs of every node in the outline, depth-first and in outline
+    /// order -- the same shape as Leo's `c.all_positions()`. A node cloned
+    /// to more than one position appears once per occurrence, matching
+    /// Leo's generator (which yields positions, not distinct vnodes).
+    pub fn all_ids(&self) -> Vec<NodeId> {
+        let mut out = Vec::new();
+        for root in &self.roots {
+            collect_preorder(root, &mut out);
+        }
+        out
+    }
+}
+
+fn collect_preorder(position: &Position, out: &mut Vec<NodeId>) {
+    out.push(position.node.clone());
+    for child in &position.children {
+        collect_preorder(child, out);
+    }
 }
 
 /// Escapes a headline for use as one path component: `\` becomes `\\` and
@@ -317,6 +358,51 @@ mod tests {
         let path = outline.headline_path_of(&escaped).unwrap();
         assert_eq!(outline.resolve_headline_path(&path).unwrap(), escaped);
         assert_eq!(outline.headline_path_of(&NodeId::from("missing")), None);
+    }
+
+    #[test]
+    fn subtree_and_all_ids_walk_depth_first_in_outline_order() {
+        let mut outline = Outline::default();
+        outline
+            .add_headline_paths(&[
+                "Project/Tasks/First task".into(),
+                "Project/Tasks/Second task".into(),
+                "Project/Notes".into(),
+                "Standalone".into(),
+            ])
+            .unwrap();
+
+        let project = outline.resolve_headline_path("Project").unwrap();
+        let tasks = outline.resolve_headline_path("Project/Tasks").unwrap();
+        let notes = outline.resolve_headline_path("Project/Notes").unwrap();
+        let first_task = outline
+            .resolve_headline_path("Project/Tasks/First task")
+            .unwrap();
+        let second_task = outline
+            .resolve_headline_path("Project/Tasks/Second task")
+            .unwrap();
+        let standalone = outline.resolve_headline_path("Standalone").unwrap();
+
+        assert_eq!(
+            outline.subtree_ids(&project),
+            Some(vec![
+                project.clone(),
+                tasks.clone(),
+                first_task.clone(),
+                second_task.clone(),
+                notes.clone()
+            ])
+        );
+        assert_eq!(
+            outline.subtree_ids(&first_task),
+            Some(vec![first_task.clone()])
+        );
+        assert_eq!(outline.subtree_ids(&NodeId::from("missing")), None);
+
+        assert_eq!(
+            outline.all_ids(),
+            vec![project, tasks, first_task, second_task, notes, standalone]
+        );
     }
 
     #[test]

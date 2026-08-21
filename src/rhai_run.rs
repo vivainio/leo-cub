@@ -44,6 +44,10 @@ fn rhai_err(message: impl std::fmt::Display) -> Box<EvalAltResult> {
     message.to_string().into()
 }
 
+fn ids_to_array(ids: Vec<NodeId>) -> Array {
+    ids.into_iter().map(|id| Dynamic::from(id.0)).collect()
+}
+
 impl Doc {
     /// Binds an already-open document instead of reading one from disk --
     /// used to hand an `@action` script the outline the TUI already has in
@@ -95,26 +99,38 @@ impl Doc {
 
     /// The gnxs of the outline's top-level nodes, in outline order.
     fn roots(&mut self) -> Array {
-        self.document
-            .outline
-            .root_ids()
-            .into_iter()
-            .map(|id| Dynamic::from(id.0))
-            .collect()
+        ids_to_array(self.document.outline.root_ids())
     }
 
     /// The gnxs of `gnx`'s children, in outline order (empty if it's a
     /// leaf); fails if `gnx` isn't a node in the outline.
     fn children(&mut self, gnx: &str) -> RhaiResult<Array> {
         self.node(gnx)?;
-        Ok(self
-            .document
+        Ok(ids_to_array(
+            self.document
+                .outline
+                .children_of(&NodeId(gnx.to_owned()))
+                .unwrap_or_default(),
+        ))
+    }
+
+    /// The gnxs of `gnx` and everything under it, depth-first and in
+    /// outline order (`gnx` itself first) -- the flattened equivalent of
+    /// Leo's `p.self_and_subtree()`. Fails if `gnx` isn't a node in the
+    /// outline.
+    fn subtree(&mut self, gnx: &str) -> RhaiResult<Array> {
+        self.document
             .outline
-            .children_of(&NodeId(gnx.to_owned()))
-            .unwrap_or_default()
-            .into_iter()
-            .map(|id| Dynamic::from(id.0))
-            .collect())
+            .subtree_ids(&NodeId(gnx.to_owned()))
+            .map(ids_to_array)
+            .ok_or_else(|| rhai_err(format!("node not found: {gnx}")))
+    }
+
+    /// The gnxs of every node in the outline, depth-first and in outline
+    /// order -- the flattened equivalent of Leo's `c.all_positions()`. A
+    /// node cloned to more than one position appears once per occurrence.
+    fn all(&mut self) -> Array {
+        ids_to_array(self.document.outline.all_ids())
     }
 
     /// `gnx`'s parent's gnx, or `""` if `gnx` is a root; fails if `gnx`
@@ -238,6 +254,8 @@ fn register_doc_api(engine: &mut Engine) {
     engine.register_fn("gnx", Doc::gnx);
     engine.register_fn("roots", Doc::roots);
     engine.register_fn("children", Doc::children);
+    engine.register_fn("subtree", Doc::subtree);
+    engine.register_fn("all", Doc::all);
     engine.register_fn("parent", Doc::parent);
     engine.register_fn("path", Doc::path);
     engine.register_fn("headline", Doc::headline);
