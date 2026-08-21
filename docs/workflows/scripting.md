@@ -78,6 +78,8 @@ gets through its predefined `doc`:
 | `doc.path(gnx)` | The slash-separated headline path from the root down to `gnx` — the inverse of `doc.gnx(path)`/`doc.add(path)`, so `doc.gnx(doc.path(gnx)) == gnx`. |
 | `doc.headline(gnx)` / `doc.set_headline(gnx, text)` | Read or write a node's headline. |
 | `doc.body(gnx)` / `doc.set_body(gnx, text)` | Read or write a node's body. |
+| `doc.clone_node(gnx, parent_gnx)` / `doc.clone_node(gnx, parent_gnx, index)` | Inserts a new occurrence of `gnx` as `parent_gnx`'s last child (or at `index`, in the three-argument form). Both `gnx` and `parent_gnx` must already be nodes in the outline — nothing is created; resolve a headline path to a gnx first with `doc.gnx`/`doc.add` if that's what a script has. Returns `gnx`. |
+| `doc.remove(gnx)` | Removes `gnx`'s defining occurrence and its subtree. Other clone occurrences of `gnx`, if any, are left in place. |
 | `doc.render()` | The whole outline as `cub render`'s compact Markdown. |
 | `doc.count()` | Number of nodes in the outline. |
 | `doc.validate()` | An array of validation error strings; empty means valid. |
@@ -115,10 +117,12 @@ tell you is *which* occurrence of a multiply-cloned node a particular
 action targets — `target` in an `@action` body identifies the node, not
 the specific occurrence the user had selected.
 
-`doc.apply` is the escape hatch for anything the other methods don't cover
-directly — `insert-tree`, `merge-tree`, `replace-tree`, and the rest of the
-[operation batch](../workflows/automation.md) format all work from a script
-the same way they do from `cub apply`:
+`doc.apply` runs a `cub apply`-style [operation batch](../workflows/automation.md)
+straight from a script. `insert-tree`/`merge-tree`/`replace-tree` predate the
+rhai API and are still the right tool when a script already has a tree's
+worth of *data* to drop in — say, JSON pulled from an import or generated
+report — but for structure the script is building up itself, `doc.add`
+(below) is usually more direct than assembling this JSON:
 
 ```rhai
 let doc = open("notes.leo");
@@ -137,9 +141,8 @@ inline JSON like this.)
 
 ### Building structure with a loop
 
-`doc.add` is usually the more direct way to build a tree from a script than
-`doc.apply` with `insert-tree` — since it creates missing headline segments
-as it goes, a script can just loop over the structure it wants:
+Since `doc.add` creates missing headline segments as it goes, a script can
+just loop over the structure it wants instead of assembling a tree upfront:
 
 ```rhai
 let doc = open("notes.leo");
@@ -158,31 +161,50 @@ Reach for `doc.apply` with `insert-tree`/`merge-tree` instead when the shape
 is already data (parsed from JSON, say) rather than something the script is
 building up step by step.
 
-### Cloning a node
+### Cloning and removing a node
 
-Cloning — adding another occurrence of an existing node, rather than a new
-node — has no dedicated `Doc` method; go through `doc.apply` with a `clone`
-operation, the same as `cub apply` would:
+`doc.clone_node` adds another occurrence of an existing node — not a copy,
+the same node appearing at a second position — as a specific parent's last
+child:
 
 ```rhai
 let doc = open("notes.leo");
 
-let source = doc.gnx("Team A/Tasks");
-doc.apply(`{
-  "operations": [
-    {"op": "clone", "parent-headline": "Shared/Cross-team", "index": 0, "node": "` + source + `"}
-  ]
-}`);
+let source = doc.add("Team A/Tasks");
+let team_b = doc.add("Team B");
+doc.clone_node(source, team_b);
 
-// The clone is the same node, not a copy, so both headline paths resolve
-// to the same gnx and share the same children.
-assert_eq(doc.gnx("Shared/Cross-team/Tasks"), source);
+// The clone is the same node, not a copy, so both parents' children
+// resolve to the same gnx.
+assert_eq(doc.children(team_b)[0], source);
 
 doc.save();
 ```
 
-Like `insert-tree`, `clone` takes `"parent"` (a gnx) or `"parent-headline"`
-(created if missing), never both. See
+Give a third argument to insert at a specific index instead of appending:
+`doc.clone_node(source, team_b, 0)`.
+
+Like every other `Doc` method, `clone_node` takes gnxs, not headline paths
+— if a script only has a path for the parent, resolve it once with
+`doc.gnx(path)`/`doc.add(path)` rather than passing the path around;
+that's the only place in the whole API a path ever needs resolving, and it
+means `clone_node` fails cleanly on a parent that doesn't exist yet instead
+of quietly creating one that doesn't match what the script meant.
+
+`doc.remove(gnx)` is the reverse: it deletes `gnx`'s defining occurrence and
+its whole subtree. If `gnx` is cloned elsewhere, those other occurrences are
+left alone — the next one in outline order becomes the new defining
+occurrence, transparently, so nothing else in the script needs to change:
+
+```rhai
+// Removes "Team A/Tasks" (source's defining occurrence). The clone under
+// team_b survives and becomes source's new defining occurrence.
+doc.remove(source);
+assert_eq(doc.parent(source), team_b);
+```
+
+Reach for `doc.apply` directly instead when a script needs to batch a
+clone or removal together with other operations atomically. See
 [the `clone` operation](../workflows/automation.md#cloning-a-node) for the
 full JSON shape.
 
