@@ -758,14 +758,30 @@ fn handle_mouse(app: &mut App, area: Rect, mouse: MouseEvent) {
 /// an actual drag copies the selected headlines to the system clipboard,
 /// same as releasing a body drag copies the selected body text.
 fn handle_outline_mouse(app: &mut App, outline: Rect, kind: MouseEventKind, mouse: MouseEvent) {
+    let row = app.outline_scroll + usize::from(mouse.row - outline.y - 1);
+    let rows = app.rows();
     if let MouseEventKind::Up(MouseButton::Left) = kind {
-        if app.selection_anchor.is_some() {
+        let Some(anchor) = app.selection_anchor else {
+            return;
+        };
+        // Trust the release position over whatever a jittery mid-drag event
+        // last left `selected` at: many terminals report a spurious one-row
+        // Drag for what's really just a plain click, which would otherwise
+        // both leave the wrong row selected and copy headlines nobody meant
+        // to select.
+        if rows.get(row).is_some() {
+            if row != app.selected {
+                app.reset_body_view();
+            }
+            app.selected = row;
+        }
+        if app.selected == anchor {
+            app.selection_anchor = None;
+        } else {
             copy_outline_selection_to_clipboard(app);
         }
         return;
     }
-    let row = app.outline_scroll + usize::from(mouse.row - outline.y - 1);
-    let rows = app.rows();
     let Some(clicked) = rows.get(row) else {
         return;
     };
@@ -5776,6 +5792,50 @@ mod tests {
         assert_eq!(
             app.status, "untouched",
             "a plain click (no drag) shouldn't touch the clipboard"
+        );
+    }
+
+    #[test]
+    fn a_click_with_a_spurious_jittery_drag_still_just_selects_the_clicked_row() {
+        let mut app = editing_app();
+        assert_eq!(app.rows().len(), 3, "root starts expanded with 2 children");
+        app.status = "untouched".into();
+        let area = Rect::new(0, 0, 80, 24);
+        let press = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 10,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        };
+        handle_mouse(&mut app, area, press);
+        assert_eq!(app.selected, 0);
+
+        // Some terminals report a one-row Drag for what's really just a
+        // stationary click.
+        let jittered_drag = MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: 10,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        };
+        handle_mouse(&mut app, area, jittered_drag);
+        assert_eq!(app.selection_anchor, Some(0));
+        assert_eq!(app.selected, 1, "the spurious drag moves it mid-gesture");
+
+        // But the release lands back on the row that was actually clicked.
+        let release = MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            ..press
+        };
+        handle_mouse(&mut app, area, release);
+        assert_eq!(
+            app.selected, 0,
+            "release should correct the selection back to where the mouse actually let go"
+        );
+        assert_eq!(app.selection_anchor, None);
+        assert_eq!(
+            app.status, "untouched",
+            "a click that jitters back to its start row shouldn't copy anything"
         );
     }
 
