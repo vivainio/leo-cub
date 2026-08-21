@@ -9,12 +9,12 @@ places:
 - **`@action` bodies** with an `@language rhai` directive, run in-process
   from inside the TUI when you trigger the action (`Shift-A`).
 
-Both give a script the exact same `Doc` API — a script that works under
-`cub run` works, unchanged, as an `@action` body, and vice versa. The only
-difference is how the script gets its `Doc`: `cub run` scripts call
-`open(path)` themselves, while an `@action` script gets `doc` and `target`
-predefined, already bound to the outline the editor has open. Neither is a
-cut-down version of the other.
+Both give a script the exact same API — a script that works under `cub run`
+works, unchanged, as an `@action` body, and vice versa. The only difference
+is how the script gets its `Doc`: `cub run` scripts call `open(path)`
+themselves, while an `@action` script gets `doc` and `target` predefined,
+already bound to the outline the editor has open. Neither is a cut-down
+version of the other.
 
 ## Why `cub run`
 
@@ -35,10 +35,10 @@ else.
 ```rhai
 let doc = open("notes.leo");
 
-let gnx = doc.add("Project/Tasks/Write docs");
-doc.set_body(gnx, "Cover the Rhai API.");
+let task = doc.node(doc.add("Project/Tasks/Write docs"));
+task.b = "Cover the Rhai API.";
 
-assert_eq(doc.headline(gnx), "Write docs");
+assert_eq(task.h, "Write docs");
 assert(doc.count() > 0, "outline should not be empty");
 
 doc.save();
@@ -53,83 +53,127 @@ cub run notes.rhai
 
 `open` reads an existing `.leo` file — create one first with `cub new` if
 you're starting from nothing. Nothing is written back to disk until the
-script calls `doc.save()` or `doc.save_as(path)`.
+script calls `doc.save()` or `doc.save_as(path)`. `doc.node(gnx)` wraps a
+gnx as a `Node` handle with `.h`/`.b` properties — the primary way scripts
+work with a node; see [Node handles](#node-handles) below for the full
+reference.
 
-## The `Doc` API
+## Node handles
 
-`open(path)` returns a `Doc`, whose methods mutate or read the in-memory
-outline. This is the complete API — the same one an `@action` rhai body
-gets through its predefined `doc` — grouped below by what each group of
-methods is for.
+`doc.node(gnx)` wraps a gnx as a `Node` — a handle with `.h`/`.b`
+properties and `.parent()`/`.children()`/`.subtree()` traversal, so a
+script that reads, writes, or walks from the same node doesn't have to
+keep re-passing its gnx. This is the API to reach for first; a lower-level,
+all-gnx `Doc` API (below) exists underneath it for structural operations
+(`clone_node`, `remove`) and batches that don't have a `Node` form.
+
+| Signature | Does |
+| --- | --- |
+| `doc.node(gnx: string) -> Node` | Wraps `gnx` as a `Node`. Fails if `gnx` isn't a node in the outline. |
+| `node.h: string` (get/set) | The node's headline. |
+| `node.b: string` (get/set) | The node's body. |
+| `node.gnx: string` (read-only) | The plain gnx string this `Node` wraps — for passing to a `Doc` method that doesn't have a `Node` form, like `doc.clone_node`. |
+| `node.parent() -> Node` | The parent `Node` (wraps `""` if this node is a root, same as `doc.parent`). |
+| `node.children() -> array` | This node's children, in outline order, as `Node`s. |
+| `node.subtree() -> array` | This node and everything under it, depth-first (itself first), as `Node`s — the deeper counterpart to `.children()`. |
+| `node.path() -> string` | The slash-separated headline path from the root down to this node — same as `doc.path(gnx)`. |
+| `doc.find_h(pattern: string) -> array` | Nodes whose headline matches `pattern` (a regex — same syntax as `cub inspect --search`), as `Node`s in outline order. Fails if `pattern` isn't a valid regex. |
+| `doc.find_b(pattern: string) -> array` | Same as `doc.find_h`, but matching a node's body instead of its headline. |
+
+```rhai
+let doc = open("notes.leo");
+let tasks = doc.node(doc.add("Project/Tasks"));
+
+tasks.h = "Tasks (Q3)";
+tasks.b = "Backlog for the quarter.";
+
+for child in tasks.children() {
+    print(child.h);
+}
+
+doc.save();
+```
+
+A `Node` is just a gnx plus a handle back onto the `Doc` it came from —
+`tasks.h = "..."` and the low-level `doc.headline(gnx)` read and write the
+exact same data, so the two styles mix freely in one script. A node matched
+or visited more than once because of a clone occurrence still yields one
+`Node` (its first occurrence), the same rule `doc.children`/`.parent` use.
+
+`doc.find_h`/`doc.find_b` return `Node`s too, so a search result chains
+straight into `.h`/`.b`/`.children()` without an extra `doc.node()` call:
+
+```rhai
+for n in doc.find_h("^TODO") {
+    print(n.path() + ": " + n.b);
+}
+```
+
+### Building structure with a loop
+
+Since `doc.add` creates missing headline segments as it goes, a script can
+just loop over the structure it wants instead of assembling a tree upfront:
+
+```rhai
+let doc = open("notes.leo");
+
+let teams = ["Team A", "Team B", "Team C"];
+for team in teams {
+    let tasks = doc.node(doc.add(team + "/Tasks"));
+    tasks.b = "Backlog for " + team;
+}
+doc.add("Team A/Tasks/Write onboarding docs");
+
+doc.save();
+```
+
+Reach for `doc.apply` with `insert-tree`/`merge-tree` (below) instead when
+the shape is already data (parsed from JSON, say) rather than something the
+script is building up step by step.
+
+## The low-level `Doc` API
+
+`Node` is built on top of a lower-level API directly on `Doc`, where every
+node reference is a plain **gnx** string (a Leo global node id, the same
+one `cub inspect`/`cub apply` use) rather than a handle. Reach for it
+directly for structural operations that don't have a `Node` form yet
+(`clone_node`, `remove`), JSON batches (`apply`), or a one-off read/write
+that doesn't need a handle. This is the same API an `@action` rhai body
+gets through its predefined `doc`, grouped below by what each group is for.
 
 ### Opening and saving
 
-| Method | Does |
+| Signature | Does |
 | --- | --- |
-| `open(path)` | Global function (not a `Doc` method): reads a `.leo` file from disk and returns a new `Doc`. Available to `@action` scripts too, for reading a *different* file than the one the editor has open — the action's own outline arrives already bound as `doc`, not through this call. |
+| `open(path: string) -> Doc` | Global function (not a `Doc` method): reads a `.leo` file from disk and returns a new `Doc`. Available to `@action` scripts too, for reading a *different* file than the one the editor has open — the action's own outline arrives already bound as `doc`, not through this call. |
 | `doc.save()` | Writes back to the path the `Doc` was opened or bound with. |
-| `doc.save_as(path)` | Writes to a different path and retargets future `doc.save()` calls there. |
+| `doc.save_as(path: string)` | Writes to a different path and retargets future `doc.save()` calls there. |
 
 ### Resolving and creating nodes
 
-| Method | Does |
+| Signature | Does |
 | --- | --- |
-| `doc.gnx(path)` | Resolves a headline path to a gnx without creating anything; fails if it's missing or ambiguous. |
-| `doc.add(path)` | Ensures a slash-separated headline path exists (creating missing segments, reusing existing ones — same rules as `cub add`); returns the leaf's gnx. |
-| `doc.path(gnx)` | The slash-separated headline path from the root down to `gnx` — the inverse of `doc.gnx(path)`/`doc.add(path)`, so `doc.gnx(doc.path(gnx)) == gnx`. |
+| `doc.gnx(path: string) -> string` | Resolves a headline path to a gnx without creating anything; fails if it's missing or ambiguous. |
+| `doc.add(path: string) -> string` | Ensures a slash-separated headline path exists (creating missing segments, reusing existing ones — same rules as `cub add`); returns the leaf's gnx. |
+| `doc.path(gnx: string) -> string` | The slash-separated headline path from the root down to `gnx` — the inverse of `doc.gnx(path)`/`doc.add(path)`, so `doc.gnx(doc.path(gnx)) == gnx`. |
 
 ### Traversing structure
 
-| Method | Does |
+| Signature | Does |
 | --- | --- |
-| `doc.roots()` | An array of the gnxs of the outline's top-level nodes, in outline order. |
-| `doc.children(gnx)` | An array of `gnx`'s children's gnxs, in outline order (empty for a leaf); fails if `gnx` isn't in the outline. |
-| `doc.subtree(gnx)` | An array of `gnx` and every gnx under it, depth-first in outline order (`gnx` itself first); fails if `gnx` isn't in the outline. |
-| `doc.all()` | An array of every gnx in the outline, depth-first in outline order. |
-| `doc.parent(gnx)` | `gnx`'s parent's gnx, or `""` if `gnx` is a root; fails if `gnx` isn't in the outline. |
-| `doc.node(gnx)` | Wraps `gnx` as a [`Node`](#node-handles) — a handle with `.h`/`.b` properties and `.parent()`/`.children()` traversal, for a script that wants to read, write, or walk from the same node repeatedly instead of re-passing its gnx. Fails if `gnx` isn't in the outline. |
-
-### Searching
-
-| Method | Does |
-| --- | --- |
-| `doc.find_h(pattern)` | An array of `Node`s whose headline matches `pattern` (a regex — same syntax as `cub inspect --search`), in outline order. Fails if `pattern` isn't a valid regex. |
-| `doc.find_b(pattern)` | Same as `doc.find_h`, but matching a node's body instead of its headline. |
-
-### Reading and writing content
-
-| Method | Does |
-| --- | --- |
-| `doc.headline(gnx)` / `doc.set_headline(gnx, text)` | Read or write a node's headline. |
-| `doc.body(gnx)` / `doc.set_body(gnx, text)` | Read or write a node's body. |
-
-### Clone and remove
-
-| Method | Does |
-| --- | --- |
-| `doc.clone_node(gnx, parent_gnx)` / `doc.clone_node(gnx, parent_gnx, index)` | Inserts a new occurrence of `gnx` as `parent_gnx`'s last child (or at `index`, in the three-argument form). Both `gnx` and `parent_gnx` must already be nodes in the outline — nothing is created; resolve a headline path to a gnx first with `doc.gnx`/`doc.add` if that's what a script has. Returns `gnx`. |
-| `doc.remove(gnx)` | Removes `gnx`'s defining occurrence and its subtree. Other clone occurrences of `gnx`, if any, are left in place. |
-
-### Batch operations
-
-| Method | Does |
-| --- | --- |
-| `doc.apply(json)` | Applies a `cub apply`-style [operation batch](../workflows/automation.md) given as a JSON string; returns the report as a JSON string. |
-
-### Inspecting the outline
-
-| Method | Does |
-| --- | --- |
-| `doc.render()` | The whole outline as `cub render`'s compact Markdown. |
-| `doc.count()` | Number of nodes in the outline. |
-| `doc.validate()` | An array of validation error strings; empty means valid. |
+| `doc.roots() -> array` | The gnxs of the outline's top-level nodes, in outline order. |
+| `doc.children(gnx: string) -> array` | `gnx`'s children's gnxs, in outline order (empty for a leaf); fails if `gnx` isn't in the outline. |
+| `doc.subtree(gnx: string) -> array` | `gnx` and every gnx under it, depth-first in outline order (`gnx` itself first); fails if `gnx` isn't in the outline. |
+| `doc.all() -> array` | Every gnx in the outline, depth-first in outline order. |
+| `doc.parent(gnx: string) -> string` | `gnx`'s parent's gnx, or `""` if `gnx` is a root; fails if `gnx` isn't in the outline. |
 
 `doc.children`/`doc.subtree`/`doc.all`/`doc.parent`/`doc.path` walk the
 tree structurally (parent/child links), independent of headlines, so they
 work even when headlines aren't unique. `doc.subtree`/`doc.all` are the
 ones to reach for when a script wants to visit a whole (sub)tree — they
 return the full flattened list up front rather than making the script
-manage its own traversal:
+manage its own traversal (`node.subtree()` above returns the same thing as
+`Node`s, which is usually the more convenient form):
 
 ```rhai
 let doc = open("notes.leo");
@@ -154,12 +198,32 @@ tell you is *which* occurrence of a multiply-cloned node a particular
 action targets — `target` in an `@action` body identifies the node, not
 the specific occurrence the user had selected.
 
-`doc.apply` runs a `cub apply`-style [operation batch](../workflows/automation.md)
-straight from a script. `insert-tree`/`merge-tree`/`replace-tree` predate the
-rhai API and are still the right tool when a script already has a tree's
-worth of *data* to drop in — say, JSON pulled from an import or generated
-report — but for structure the script is building up itself, `doc.add`
-(below) is usually more direct than assembling this JSON:
+### Reading and writing content
+
+| Signature | Does |
+| --- | --- |
+| `doc.headline(gnx: string) -> string` / `doc.set_headline(gnx: string, text: string)` | Read or write a node's headline — the low-level equivalent of `node.h`. |
+| `doc.body(gnx: string) -> string` / `doc.set_body(gnx: string, text: string)` | Read or write a node's body — the low-level equivalent of `node.b`. |
+
+### Clone and remove
+
+| Signature | Does |
+| --- | --- |
+| `doc.clone_node(gnx: string, parent_gnx: string) -> string` | Inserts a new occurrence of `gnx` as `parent_gnx`'s last child. Both `gnx` and `parent_gnx` must already be nodes in the outline — nothing is created; resolve a headline path to a gnx first with `doc.gnx`/`doc.add` if that's what a script has. Returns `gnx`. |
+| `doc.clone_node(gnx: string, parent_gnx: string, index: int) -> string` | Same, inserting at `index` among `parent_gnx`'s existing children instead of appending. |
+| `doc.remove(gnx: string)` | Removes `gnx`'s defining occurrence and its subtree. Other clone occurrences of `gnx`, if any, are left in place. |
+
+### Batch operations
+
+| Signature | Does |
+| --- | --- |
+| `doc.apply(json: string) -> string` | Applies a `cub apply`-style [operation batch](../workflows/automation.md) given as a JSON string; returns the report as a JSON string. |
+
+`insert-tree`/`merge-tree`/`replace-tree` predate the rhai API and are
+still the right tool when a script already has a tree's worth of *data* to
+drop in — say, JSON pulled from an import or generated report — but for
+structure the script is building up itself, `doc.add` is usually more
+direct than assembling this JSON:
 
 ```rhai
 let doc = open("notes.leo");
@@ -176,71 +240,13 @@ doc.save();
 (Rhai's `` `...` `` backtick strings span multiple lines, which is handy for
 inline JSON like this.)
 
-### Building structure with a loop
+### Inspecting the outline
 
-Since `doc.add` creates missing headline segments as it goes, a script can
-just loop over the structure it wants instead of assembling a tree upfront:
-
-```rhai
-let doc = open("notes.leo");
-
-let teams = ["Team A", "Team B", "Team C"];
-for team in teams {
-    let tasks = doc.node(doc.add(team + "/Tasks"));
-    tasks.b = "Backlog for " + team;
-}
-doc.add("Team A/Tasks/Write onboarding docs");
-
-doc.save();
-```
-
-Reach for `doc.apply` with `insert-tree`/`merge-tree` instead when the shape
-is already data (parsed from JSON, say) rather than something the script is
-building up step by step.
-
-### Node handles
-
-Every example above passes a `gnx` to whichever `Doc` method it needs. For
-a script that's going to read, write, or walk from the same node several
-times in a row, `doc.node(gnx)` wraps it once as a `Node` — a handle with
-`.h`/`.b` properties and `.parent()`/`.children()` traversal, so a script
-doesn't have to keep re-passing the gnx:
-
-```rhai
-let doc = open("notes.leo");
-let tasks = doc.node(doc.add("Project/Tasks"));
-
-tasks.h = "Tasks (Q3)";
-tasks.b = "Backlog for the quarter.";
-
-for child in tasks.children() {
-    print(child.h);
-}
-
-doc.save();
-```
-
-A `Node` is just a gnx plus a handle back onto the `Doc` it came from —
-`tasks.h = "..."` and `doc.headline(gnx)` read and write the exact same
-data, so the two styles mix freely in one script. `.parent()` returns
-another `Node` (wrapping `""` if called on a root, same as `doc.parent`),
-and `.children()`/`.subtree()` each return an array of `Node`s rather than
-gnxs — `.subtree()` is `.children()`'s deeper counterpart, this node and
-everything under it, depth-first (itself first), mirroring `doc.subtree`.
-Reach for the `.gnx` property to get the plain gnx back out — for passing
-to a method `Node` doesn't wrap directly, like `doc.clone_node` or
-`doc.apply` — and `.path()` for the same headline path `doc.path(gnx)`
-gives.
-
-`doc.find_h(pattern)`/`doc.find_b(pattern)` return `Node`s too, so a search
-result chains straight into `.h`/`.b`/`.children()` without a `doc.node()`
-detour:
-
-```rhai
-for n in doc.find_h("^TODO") {
-    print(n.path() + ": " + n.b);
-}
-```
+| Signature | Does |
+| --- | --- |
+| `doc.render() -> string` | The whole outline as `cub render`'s compact Markdown. |
+| `doc.count() -> int` | Number of nodes in the outline. |
+| `doc.validate() -> array` | Validation error strings; empty means valid. |
 
 ### Cloning and removing a node
 
@@ -265,12 +271,13 @@ doc.save();
 Give a third argument to insert at a specific index instead of appending:
 `doc.clone_node(source, team_b, 0)`.
 
-Like every other `Doc` method, `clone_node` takes gnxs, not headline paths
-— if a script only has a path for the parent, resolve it once with
-`doc.gnx(path)`/`doc.add(path)` rather than passing the path around;
-that's the only place in the whole API a path ever needs resolving, and it
-means `clone_node` fails cleanly on a parent that doesn't exist yet instead
-of quietly creating one that doesn't match what the script meant.
+Like every other low-level `Doc` method, `clone_node` takes gnxs, not
+headline paths — if a script only has a path for the parent, resolve it
+once with `doc.gnx(path)`/`doc.add(path)` rather than passing the path
+around; that's the only place in the whole API a path ever needs
+resolving, and it means `clone_node` fails cleanly on a parent that
+doesn't exist yet instead of quietly creating one that doesn't match what
+the script meant.
 
 `doc.remove(gnx)` is the reverse: it deletes `gnx`'s defining occurrence and
 its whole subtree. If `gnx` is cloned elsewhere, those other occurrences are
@@ -289,21 +296,18 @@ clone or removal together with other operations atomically. See
 [the `clone` operation](../workflows/automation.md#cloning-a-node) for the
 full JSON shape.
 
-Every node reference in this API is a **gnx** (a Leo global node id, the
-same string `cub inspect`/`cub apply` use) — not a stateful position or
-cursor object. `doc.gnx(path)` and `doc.add(path)` are how a script turns a
-readable slash-separated headline path into the gnx the rest of the API
-takes.
-
 ## Assertions and output
 
-- `assert(cond)` / `assert(cond, "message")` — fails the script if `cond` is
-  false.
-- `assert_eq(a, b)` — fails the script if `a` and `b` differ; compares
-  numbers, booleans, and strings.
-- `print(...)` writes to stdout; `debug(...)` writes to stderr with its
-  source position. Ordinary Rhai — string concatenation with `+`, `if`,
-  `for`, functions, and so on — all works too.
+| Signature | Does |
+| --- | --- |
+| `assert(cond: bool)` | Fails the script if `cond` is false. |
+| `assert(cond: bool, msg: string)` | Same, with a message included in the failure. |
+| `assert_eq(a: any, b: any)` | Fails the script if `a` and `b` differ; compares numbers, booleans, and strings. |
+| `print(...)` | Writes to stdout. |
+| `debug(...)` | Writes to stderr, with its source position. |
+
+Ordinary Rhai — string concatenation with `+`, `if`, `for`, functions, and
+so on — all works too.
 
 A failed assertion aborts the script and `cub run` exits non-zero:
 
@@ -326,14 +330,15 @@ no `open()` call needed:
 
 | Symbol | Is |
 | --- | --- |
-| `doc` | A `Doc` already bound to the outline this editor session has open — the same object the TUI itself is showing, not a fresh read from disk. Every `Doc` method above works on it, and mutations are visible in the editor as soon as the action finishes. |
-| `target` | The gnx of the node the user had selected when they invoked the action — not the `@action` node itself, which may live anywhere in the tree. Combine it with `doc.headline`/`doc.body`/`doc.set_headline`/`doc.set_body` to read or change the node the action was run against. |
+| `doc` | A `Doc` already bound to the outline this editor session has open — the same object the TUI itself is showing, not a fresh read from disk. Every method above works on it, and mutations are visible in the editor as soon as the action finishes. |
+| `target` | The gnx of the node the user had selected when they invoked the action — not the `@action` node itself, which may live anywhere in the tree. Wrap it with `doc.node(target)` for a `Node` handle, or use it directly with the low-level `doc.headline`/`doc.body`/`doc.set_headline`/`doc.set_body`. |
 
 ```rhai
 @language rhai
-doc.set_headline(target, doc.headline(target) + " ✓");
-doc.set_body(target, doc.body(target) + "\nDone: " + doc.count() + " nodes total.");
-print("marked " + doc.headline(target));
+let n = doc.node(target);
+n.h = n.h + " ✓";
+n.b = n.b + "\nDone: " + doc.count() + " nodes total.";
+print("marked " + n.h);
 ```
 
 `print`/`debug` output becomes the action's displayed output (shown in the
@@ -341,11 +346,11 @@ body pane until the selection moves), exactly like a subprocess action's
 captured stdout/stderr — `@apply` (below) also still works for a rhai body,
 since it only looks at that same output text.
 
-Running a script that calls a `doc` method which mutates the outline
-(`add`, `set_headline`, `set_body`, `apply`) marks the outline dirty and
-refreshes the editor's caches, the same as any other edit; a script that
-only reads (`doc.headline(target)`, `doc.render()`, …) or that throws before
-mutating anything leaves the outline exactly as it was.
+Running a script that calls a method which mutates the outline (`doc.add`,
+`node.h =`/`node.b =`, `doc.set_headline`, `doc.set_body`, `doc.apply`, …)
+marks the outline dirty and refreshes the editor's caches, the same as any
+other edit; a script that only reads (`n.h`, `doc.render()`, …) or that
+throws before mutating anything leaves the outline exactly as it was.
 
 ### `@action` bodies in other languages
 
@@ -358,9 +363,9 @@ information through environment variables instead:
 | --- | --- |
 | `CUB_GNX` | The target's gnx — the subprocess equivalent of `target`. |
 | `CUB_PARENT_GNX` | The target's parent's gnx; unset if the target is a root. Rhai equivalent: `doc.parent(target)` (`""` for a root instead of unset). |
-| `CUB_HEADLINE` | The target's headline. Rhai equivalent: `doc.headline(target)`. |
+| `CUB_HEADLINE` | The target's headline. Rhai equivalent: `doc.node(target).h`. |
 | `CUB_POSITION` | The target's position id (e.g. `0/1`) — identifies the specific clone *occurrence* invoked, which gnx-based `target` cannot. |
-| `CUB_PATH` | The target's slash-separated headline path from the root. Rhai equivalent: `doc.path(target)`. |
+| `CUB_PATH` | The target's slash-separated headline path from the root. Rhai equivalent: `doc.node(target).path()`. |
 | `CUB_DOC` | The open `.leo` file's absolute path. |
 
 A subprocess can't mutate the outline directly — it can only shell out to
@@ -379,7 +384,7 @@ print(json.dumps({
 ```
 
 A rhai body needs none of this — `doc` already *is* the outline, so
-`doc.set_body(target, "done")` does the same thing directly, in-process,
+`doc.node(target).b = "done"` does the same thing directly, in-process,
 with no serialization round trip.
 
 ## Practical guardrails
@@ -411,18 +416,19 @@ onto it loosely:
 | Leo | cub | Difference |
 | --- | --- | --- |
 | `c` | `doc` | `c` is a live, mutable handle onto Leo's entire running commander (undo stack, GUI frame, all subsystems). `doc` is just the outline plus save/apply/validate — no undo stack, no GUI. |
-| `p` | `target` | Leo's `p` is a stateful **position** object: it can walk the tree (`p.next()`, `p.parent()`, `p.children()`) and becomes invalid if the outline changes under it. cub's `target` is a plain gnx **string** — stable across edits, with no traversal methods of its own. Wrap it with `doc.node(target)` for a `Node` handle that *does* offer `.parent()`/`.children()`, or reach a different node directly with `doc.gnx(path)`/`doc.add(path)`. |
-| `p.h` / `p.b` | `doc.node(gnx).h` / `.b`, or `doc.headline(gnx)` / `doc.body(gnx)` | Leo exposes headline/body as properties on the position. cub's `Node` (from `doc.node(gnx)`) offers the same property syntax; `Doc`'s plain `headline`/`body` methods are the lower-level equivalent for a one-off read or write that doesn't need a handle. Both read and write the same data. |
-| `v.gnx` | *(the gnx string itself, or `node.gnx`)* | Every node handle in cub's API already *is*, or wraps, its gnx — there's no separate node/vnode object to unwrap it from. |
+| `p` | `doc.node(target)` | Leo's `p` is a stateful **position** object: it can walk the tree (`p.next()`, `p.parent()`, `p.children()`) and becomes invalid if the outline changes under it. `doc.node(gnx)` returns a `Node` handle with the same shape of API, keyed by stable gnx instead of a position that can go stale. `target` itself is the plain gnx **string**, for scripts that don't need a handle. |
+| `p.h` / `p.b` | `node.h` / `node.b` | Same property syntax; cub's is backed by gnx identity rather than a live tree position, so it stays valid even if the outline changes around it. The low-level `doc.headline(gnx)`/`doc.body(gnx)` read and write the same data for a one-off call. |
+| `v.gnx` | `node.gnx`, or the gnx string itself | Every node handle in cub's API already *is*, or wraps, its gnx — there's no separate node/vnode object to unwrap it from. |
 | `g.es(...)` | `print(...)` | Both write to a log a human is expected to read; cub's is plain Rhai `print`, not a Leo-specific function. |
-| `p.children()` / `p.parent()` | `doc.children(gnx)` / `doc.parent(gnx)`, or `node.children()` / `node.parent()` | `Doc`'s methods take/return plain gnx strings; a `Node`'s traversal methods are the closer analogue to Leo's, returning further `Node`s instead of gnxs so a walk can keep chaining `.h`/`.b`/`.children()` without re-wrapping. |
-| `p.self_and_subtree()` | `doc.subtree(gnx)`, or `node.subtree()` | Leo's is a lazy generator you `for p in ...`; cub's returns the whole flattened array up front — outlines are small enough that this is simpler than adding lazy iterators to the embedding. |
-| `c.all_positions()` | `doc.all()` | Same trade-off as `subtree`: one eager array of every gnx in outline order, rather than a generator. |
+| `p.children()` / `p.parent()` | `node.children()` / `node.parent()` | Same idea, returning further `Node`s so a walk can keep chaining `.h`/`.b`/`.children()`. The low-level `doc.children(gnx)`/`doc.parent(gnx)` return plain gnx strings instead. |
+| `p.self_and_subtree()` | `node.subtree()` | Leo's is a lazy generator you `for p in ...`; cub's returns the whole flattened array of `Node`s up front — outlines are small enough that this is simpler than adding lazy iterators to the embedding. |
+| `c.all_positions()` | `doc.all()` | Same trade-off as `subtree`, but document-wide rather than node-scoped: one eager array of every gnx in outline order, rather than a generator. No `Node` form, since it isn't rooted at one node. |
 | `c.undoer` | *(none)* | cub scripts aren't undoable the way a Leo `@button` command is; treat a script's edits like any other unreviewed change and keep the file under version control. |
 
-The practical upshot: a cub script tends to look less like "walk the tree
-and touch what you find" and more like "resolve the headline path or gnx
-you want, then read or write it directly" — closer to `cub apply`'s
-operation-batch style than to Leo's position-generator style. `Node`
-handles narrow that gap for scripts that do want to walk from a starting
-point, without bringing back a stateful cursor that invalidates itself.
+The practical upshot: a cub script built on `Node` reads a lot like Leo's
+`p`-based scripts — walk from a node, read or write `.h`/`.b`, recurse into
+`.children()` — just keyed by a stable gnx instead of a position that can
+invalidate itself. The low-level `Doc` API underneath is closer to `cub
+apply`'s operation-batch style: resolve the gnx you want, then read or
+write it directly, without a handle. Reach for it for structural edits
+(`clone_node`, `remove`) and JSON batches that don't have a `Node` form.
