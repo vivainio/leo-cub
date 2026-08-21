@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     env, fs,
     fs::OpenOptions,
     io,
@@ -81,6 +81,10 @@ struct App {
     palette: Option<ActionPalette>,
     command_palette: Option<CommandPalette>,
     action_output: Option<ActionOutput>,
+    logs: VecDeque<String>,
+    log_view: bool,
+    log_scroll: usize,
+    log_repl: Option<String>,
     dirty: bool,
     dirty_nodes: HashSet<NodeId>,
     updated_nodes: HashSet<NodeId>,
@@ -155,6 +159,10 @@ impl App {
             palette: None,
             command_palette: None,
             action_output: None,
+            logs: VecDeque::new(),
+            log_view: false,
+            log_scroll: 0,
+            log_repl: None,
             dirty: false,
             dirty_nodes: HashSet::new(),
             updated_nodes: HashSet::new(),
@@ -591,6 +599,14 @@ fn handle_key(
         handle_command_palette_input(app, key);
         return KeyOutcome::Continue;
     }
+    if app.log_repl.is_some() {
+        handle_log_repl_key(app, key);
+        return KeyOutcome::Continue;
+    }
+    if app.log_view {
+        handle_log_view_key(app, key);
+        return KeyOutcome::Continue;
+    }
     if app.help {
         if matches!(
             key.code,
@@ -630,6 +646,7 @@ fn handle_key(
             app.extend_selection(1);
         }
         KeyCode::Char('?') => app.help = true,
+        KeyCode::Char('l') if key.modifiers.is_empty() => app.log_view = true,
         KeyCode::Char('q') | KeyCode::Esc => {
             if !app.dirty || app.quit_armed {
                 return KeyOutcome::Quit;
@@ -1040,6 +1057,101 @@ fn selected_body_text(lines: &[String], selection: BodySelection) -> Option<Stri
         text.extend(line.chars().skip(from).take(to.saturating_sub(from)));
     }
     Some(text)
+}
+
+/// Cap on `app.logs` so a long session doesn't grow the ring buffer without
+/// bound; old lines fall off the front once this is exceeded.
+const LOG_CAPACITY: usize = 5000;
+
+/// Appends `text`'s lines to the log ring buffer, trimming the oldest lines
+/// once it exceeds `LOG_CAPACITY`, and snaps the view back to the latest
+/// output (`log_scroll = 0`) the way `tail -f` would.
+fn push_log(app: &mut App, text: &str) {
+    for line in text.split('\n') {
+        if line.is_empty() {
+            continue;
+        }
+        app.logs.push_back(line.to_owned());
+    }
+    while app.logs.len() > LOG_CAPACITY {
+        app.logs.pop_front();
+    }
+    app.log_scroll = 0;
+}
+
+/// Like `push_log`, but prefixes each non-empty line with `[{prefix}]` so
+/// output from different `@action` runs stays distinguishable in the log.
+fn push_log_lines(app: &mut App, prefix: &str, text: &str) {
+    for line in text.split('\n') {
+        if line.is_empty() {
+            continue;
+        }
+        push_log(app, &format!("[{prefix}] {line}"));
+    }
+}
+
+fn handle_log_view_key(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Char('l') | KeyCode::Char('q') | KeyCode::Esc => {
+            app.log_view = false;
+            app.log_repl = None;
+        }
+        KeyCode::Enter => app.log_repl = Some(String::new()),
+        KeyCode::Up => app.log_scroll = app.log_scroll.saturating_add(1),
+        KeyCode::Down => app.log_scroll = app.log_scroll.saturating_sub(1),
+        KeyCode::PageUp => app.log_scroll = app.log_scroll.saturating_add(20),
+        KeyCode::PageDown => app.log_scroll = app.log_scroll.saturating_sub(20),
+        _ => {}
+    }
+}
+
+fn handle_log_repl_key(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc => app.log_repl = None,
+        KeyCode::Enter => {
+            let snippet = app.log_repl.replace(String::new()).unwrap_or_default();
+            if !snippet.is_empty() {
+                run_repl_snippet(app, &snippet);
+            }
+        }
+        KeyCode::Backspace => {
+            app.log_repl.as_mut().expect("repl input exists").pop();
+        }
+        KeyCode::Char(character)
+            if !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
+            app.log_repl
+                .as_mut()
+                .expect("repl input exists")
+                .push(character);
+        }
+        _ => {}
+    }
+}
+
+/// Runs `snippet` as a rhai script bound to the currently selected node (the
+/// same `run_bound` path `@action` rhai scripts use, so `doc`/`target`/`p`
+/// all behave identically), and appends the echoed snippet plus its output
+/// to the log.
+fn run_repl_snippet(app: &mut App, snippet: &str) {
+    let Some(row) = app.selected_row() else {
+        push_log(app, "no node selected");
+        return;
+    };
+    let gnx = row.node.0.clone();
+    let document = std::mem::replace(&mut app.document, LeoDocument::empty());
+    let outcome = crate::rhai_run::run_bound(document, app.path.clone(), &gnx, snippet);
+    app.document = outcome.document;
+    if outcome.touched {
+        mark_outline_touched(app);
+    }
+    push_log(app, &format!("> {snippet}"));
+    push_log(app, &outcome.stdout);
+    if !outcome.stderr.is_empty() {
+        push_log(app, &outcome.stderr);
+    }
 }
 
 fn start_find(app: &mut App) {
@@ -1750,6 +1862,8 @@ fn run_action(app: &mut App, position: &PositionId, target: &PositionId) {
         if outcome.touched {
             mark_outline_touched(app);
         }
+        push_log_lines(app, &name, &outcome.stdout);
+        push_log_lines(app, &name, &outcome.stderr);
         ("rhai", outcome.status, outcome.stdout, outcome.stderr)
     } else {
         let (interpreter, interpreter_args) = interpreter_for(language.as_deref());
@@ -3123,6 +3237,65 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
     if app.help {
         draw_help(frame, app.body_full_width, app.outline_full_width);
     }
+    if app.log_view {
+        draw_log(frame, app);
+    }
+}
+
+/// Renders the full-screen log/REPL overlay: the scrollback buffer of
+/// `@action`/REPL rhai output, windowed by `app.log_scroll` (0 = pinned to
+/// the latest line), plus a bottom input line when the REPL is active.
+fn draw_log(frame: &mut ratatui::Frame<'_>, app: &App) {
+    let area = frame.area();
+    frame.render_widget(Clear, area);
+
+    let title = if app.log_repl.is_some() {
+        " Log — Esc: back to browse  Enter: run "
+    } else {
+        " Log — l/q/Esc: close  Enter: run rhai "
+    };
+    let block = Block::default().title(title).borders(Borders::ALL);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let (log_area, input_area) = if app.log_repl.is_some() && inner.height > 0 {
+        (
+            Rect::new(
+                inner.x,
+                inner.y,
+                inner.width,
+                inner.height.saturating_sub(1),
+            ),
+            Some(Rect::new(
+                inner.x,
+                inner.y + inner.height - 1,
+                inner.width,
+                1,
+            )),
+        )
+    } else {
+        (inner, None)
+    };
+
+    let visible = log_area.height as usize;
+    let total = app.logs.len();
+    let end = total.saturating_sub(app.log_scroll.min(total));
+    let start = end.saturating_sub(visible);
+    let lines: Vec<Line> = app
+        .logs
+        .iter()
+        .skip(start)
+        .take(end - start)
+        .map(|line| Line::from(line.as_str()))
+        .collect();
+    frame.render_widget(Paragraph::new(lines), log_area);
+
+    if let (Some(input_area), Some(buffer)) = (input_area, app.log_repl.as_ref()) {
+        frame.render_widget(
+            Paragraph::new(Line::from(format!("> {buffer}"))),
+            input_area,
+        );
+    }
 }
 
 /// Renders the docked find/search minibuffer: up to 5 candidate rows on
@@ -3346,17 +3519,17 @@ fn headline_spans(headline: &str) -> Vec<Span<'_>> {
 fn controls(body_full_width: bool, outline_full_width: bool) -> &'static str {
     if body_full_width {
         #[cfg(feature = "syntax")]
-        return "? help  arrows scroll  W wrap  c/x/v/V tree  f split  F outline  s split dir  o open/edit  Ctrl-P find  / search  a commands  Shift-A actions  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  y syntax  q quit";
+        return "? help  arrows scroll  W wrap  c/x/v/V tree  f split  F outline  s split dir  o open/edit  Ctrl-P find  / search  a commands  Shift-A actions  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  y syntax  l log  q quit";
         #[cfg(not(feature = "syntax"))]
-        return "? help  arrows scroll  W wrap  c/x/v/V tree  f split  F outline  s split dir  o open/edit  Ctrl-P find  / search  a commands  Shift-A actions  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  q quit";
+        return "? help  arrows scroll  W wrap  c/x/v/V tree  f split  F outline  s split dir  o open/edit  Ctrl-P find  / search  a commands  Shift-A actions  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  l log  q quit";
     }
     if outline_full_width {
-        return "? help  arrows navigate  W wrap  c/x/v/V tree  F split view  s split dir  o open/edit  Ctrl-P find  / search  a commands  Shift-A actions  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  q quit";
+        return "? help  arrows navigate  W wrap  c/x/v/V tree  F split view  s split dir  o open/edit  Ctrl-P find  / search  a commands  Shift-A actions  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  l log  q quit";
     }
     #[cfg(feature = "syntax")]
-    return "? help  arrows navigate  PgUp/PgDn body  W wrap  c/x/v/V tree  f body  F outline  s split dir  o open/edit  Ctrl-P find  / search  a commands  Shift-A actions  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  y syntax  q quit";
+    return "? help  arrows navigate  PgUp/PgDn body  W wrap  c/x/v/V tree  f body  F outline  s split dir  o open/edit  Ctrl-P find  / search  a commands  Shift-A actions  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  y syntax  l log  q quit";
     #[cfg(not(feature = "syntax"))]
-    "? help  arrows navigate  PgUp/PgDn body  W wrap  c/x/v/V tree  f body  F outline  s split dir  o open/edit  Ctrl-P find  / search  a commands  Shift-A actions  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  q quit"
+    "? help  arrows navigate  PgUp/PgDn body  W wrap  c/x/v/V tree  f body  F outline  s split dir  o open/edit  Ctrl-P find  / search  a commands  Shift-A actions  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  l log  q quit"
 }
 
 fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full_width: bool) {
@@ -3451,6 +3624,7 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full
         "m                Toggle rendered preview (Markdown for now)",
     ));
     lines.extend([
+        Line::from("l                Toggle full-screen log / rhai REPL"),
         Line::from("q or Esc         Quit"),
         Line::from(""),
         Line::styled(
@@ -4908,6 +5082,186 @@ mod tests {
         assert_eq!(output.interpreter, "rhai");
         assert_eq!(output.status, Some(0));
         assert!(output.text.contains("hello from rhai"), "{:?}", output.text);
+    }
+
+    #[test]
+    fn a_rhai_action_populates_the_persistent_log() {
+        let mut app = editing_app();
+        {
+            let node = app
+                .document
+                .outline
+                .nodes
+                .get_mut(&NodeId::from("b"))
+                .unwrap();
+            node.headline = "@action Greet in Rhai".into();
+            node.body = "@language rhai\nprint(\"hello from rhai\");".into();
+        }
+        app.selected = 1;
+
+        run_action(
+            &mut app,
+            &PositionId("0/0".into()),
+            &PositionId("0/0".into()),
+        );
+
+        assert!(
+            app.logs.iter().any(|line| line.contains("hello from rhai")),
+            "{:?}",
+            app.logs
+        );
+    }
+
+    #[test]
+    fn log_view_renders_buffered_lines_and_the_repl_input_line() {
+        let mut app = editing_app();
+        app.log_view = true;
+        push_log(&mut app, "hello from rhai");
+        let backend = TestBackend::new(60, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let screen = terminal.backend().buffer().content[..]
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(screen.contains("hello from rhai"), "{screen:?}");
+        assert!(
+            !screen.contains("> "),
+            "no REPL line until Enter is pressed"
+        );
+
+        app.log_repl = Some("print(1)".into());
+        terminal.draw(|frame| draw(frame, &mut app)).unwrap();
+        let screen = terminal.backend().buffer().content[..]
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(screen.contains("> print(1)"), "{screen:?}");
+    }
+
+    #[test]
+    fn l_toggles_the_log_view_open_and_closed() {
+        let mut app = editing_app();
+        assert!(!app.log_view);
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE),
+            None,
+        );
+        assert!(app.log_view);
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE),
+            None,
+        );
+        assert!(!app.log_view);
+    }
+
+    #[test]
+    fn enter_opens_the_repl_and_typing_l_inserts_a_literal_l_instead_of_closing() {
+        let mut app = editing_app();
+        app.log_view = true;
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            None,
+        );
+        assert!(app.log_repl.is_some());
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE),
+            None,
+        );
+        assert!(
+            app.log_view,
+            "log view must stay open while typing in the REPL"
+        );
+        assert_eq!(app.log_repl.as_deref(), Some("l"));
+    }
+
+    #[test]
+    fn esc_leaves_the_repl_but_keeps_the_log_view_open_then_closes_it() {
+        let mut app = editing_app();
+        app.log_view = true;
+        app.log_repl = Some("print(1)".into());
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            None,
+        );
+        assert!(app.log_repl.is_none());
+        assert!(
+            app.log_view,
+            "Esc from the REPL should return to browse mode"
+        );
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            None,
+        );
+        assert!(
+            !app.log_view,
+            "Esc from browse mode should close the log view"
+        );
+    }
+
+    #[test]
+    fn repl_snippet_reads_the_selected_node_via_p_and_can_mutate_the_outline() {
+        let mut app = editing_app();
+        app.selected = 2; // row "0/1" -> node "c"
+        app.log_view = true;
+        app.log_repl = Some(String::new());
+
+        for character in "print(p.h);".chars() {
+            handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+                None,
+            );
+        }
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            None,
+        );
+
+        assert!(
+            app.logs.iter().any(|line| line.contains("> print(p.h);")),
+            "{:?}",
+            app.logs
+        );
+        assert!(
+            app.logs.iter().any(|line| line.contains('C')),
+            "expected p.h's evaluation (\"C\") to print via the rhai REPL: {:?}",
+            app.logs
+        );
+
+        app.log_repl = Some(String::new());
+        for character in "doc.set_headline(target, \"C renamed\");".chars() {
+            handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+                None,
+            );
+        }
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            None,
+        );
+
+        assert!(app.dirty);
+        assert_eq!(
+            app.document.outline.nodes[&NodeId::from("c")].headline,
+            "C renamed"
+        );
     }
 
     #[test]

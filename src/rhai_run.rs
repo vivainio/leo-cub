@@ -635,9 +635,19 @@ pub(crate) fn run_bound(
     // the outline entirely.
     let original = document.clone();
 
+    let mut doc = Doc::bind(document, path.clone());
+    // `p` is the same handle `doc.node(target)` would hand back -- predefined
+    // so scripts (and REPL snippets) can write `p.h`/`p.b` instead of
+    // `doc.node(target)` every time. Absent only if `target_gnx` somehow
+    // doesn't resolve, which `run_bound`'s callers don't currently allow.
+    let node = doc.node(target_gnx).ok();
+
     let mut scope = Scope::new();
-    scope.push("doc", Doc::bind(document, path.clone()));
+    scope.push("doc", doc);
     scope.push_constant("target", target_gnx.to_owned());
+    if let Some(node) = node {
+        scope.push("p", node);
+    }
 
     let eval_result = engine.eval_with_scope::<Dynamic>(&mut scope, source);
     let (document, touched) = match scope.get_value::<Doc>("doc") {
