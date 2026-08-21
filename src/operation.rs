@@ -50,8 +50,12 @@ pub enum Operation {
         index: Option<usize>,
         tree: BTreeMap<String, TreeNode>,
     },
+    /// Insert a new occurrence of an existing node. "parent" may be given
+    /// instead as "parent-headline", the same as `insert-tree`.
     Clone {
         parent: Option<NodeId>,
+        #[serde(rename = "parent-headline", default)]
+        parent_headline: Option<String>,
         index: Option<usize>,
         node: NodeId,
     },
@@ -206,6 +210,7 @@ impl Outline {
             }
             Operation::Clone {
                 parent,
+                parent_headline,
                 index,
                 node,
             } => {
@@ -220,6 +225,7 @@ impl Outline {
                 let cloned_children = children_ref(self, Some(node))
                     .map(<[Position]>::to_vec)
                     .unwrap_or_default();
+                let parent = resolve_parent(self, parent, parent_headline, ids)?;
                 let children = children_for_parent(self, parent.as_ref())
                     .ok_or_else(|| ApplyError::NodeNotFound(parent.as_ref().unwrap().0.clone()))?;
                 let at = index.unwrap_or(children.len());

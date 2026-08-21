@@ -155,6 +155,38 @@ it out preserves the existing body) and its children merged the same way,
 recursively; a headline with no match is inserted fresh. `merge-tree` never
 deletes a node — an entry not mentioned in `tree` is left exactly as-is.
 
+## Cloning a node
+
+`clone` inserts a new occurrence of a node that already exists elsewhere in
+the outline, rather than creating a new node. The clone starts out with a
+copy of the source occurrence's children, so it never diverges from the node
+it was cloned from:
+
+```json
+{
+  "operations": [
+    {
+      "op": "clone",
+      "parent-headline": "Team B",
+      "index": 0,
+      "node": "ekr.20260811210000.7"
+    }
+  ]
+}
+```
+
+`"node"` is the GNX of the node to clone — not a headline path, since
+cloning only makes sense for a node that already has an identity. `"parent"`
+(a GNX) and `"parent-headline"` work the same way as `insert-tree`: give at
+most one, omit both to clone to the outline root, and `"parent-headline"`
+creates any missing segments of the path the same way `cub add` does.
+
+Because a clone is another occurrence of the *same* node, editing the
+headline, body, or children through either occurrence — the original or the
+new one — changes both, the same way editing any clone does in the Leo
+outline format. `cub render` marks every occurrence but the first with
+`↪ clone` so it's clear which one is which in output.
+
 ## Search before loading
 
 For large outlines, search headlines and body text directly:
