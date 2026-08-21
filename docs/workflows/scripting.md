@@ -40,7 +40,7 @@ else.
 ```rhai
 let doc = open("notes.leo");
 
-let task = doc.add("Project/Tasks/Write docs");
+let task = doc.ensure("Project/Tasks/Write docs");
 task.b = "Cover the Rhai API.";
 
 assert_eq(task.h, "Write docs");
@@ -58,7 +58,7 @@ cub run notes.rhai
 
 `open` reads an existing `.leo` file — create one first with `cub new` if
 you're starting from nothing. Nothing is written back to disk until the
-script calls `doc.save()` or `doc.save_as(path)`. `doc.add(path)` returns
+script calls `doc.save()` or `doc.save_as(path)`. `doc.ensure(path)` returns
 a `Node` — a handle with `.h`/`.b` properties, the primary way scripts work
 with a node; see [Node handles](#node-handles) below for the full
 reference.
@@ -75,7 +75,7 @@ all-gnx `Doc` API (below) exists underneath it for structural operations
 | Signature | Does |
 | --- | --- |
 | `doc.node(gnx: string) -> Node` | Wraps an existing `gnx` as a `Node`. Fails if `gnx` isn't a node in the outline. |
-| `doc.add(path: string) -> Node` | Ensures a slash-separated headline path exists (creating missing segments, reusing existing ones — same rules as `cub add`), and returns the leaf as a `Node`. |
+| `doc.ensure(path: string) -> Node` | Ensures a slash-separated headline path exists (creating missing segments, reusing existing ones — same rules as `cub add`), and returns the leaf as a `Node`. |
 | `node.h: string` (get/set) | The node's headline. |
 | `node.b: string` (get/set) | The node's body. |
 | `node.gnx: string` (read-only) | The plain gnx string this `Node` wraps — for passing to a `Doc` method that doesn't have a `Node` form, like `doc.clone_node`. |
@@ -88,7 +88,7 @@ all-gnx `Doc` API (below) exists underneath it for structural operations
 
 ```rhai
 let doc = open("notes.leo");
-let tasks = doc.add("Project/Tasks");
+let tasks = doc.ensure("Project/Tasks");
 
 tasks.h = "Tasks (Q3)";
 tasks.b = "Backlog for the quarter.";
@@ -117,7 +117,7 @@ for n in doc.find_h("^TODO") {
 
 ### Building structure with a loop
 
-Since `doc.add` creates missing headline segments as it goes, a script can
+Since `doc.ensure` creates missing headline segments as it goes, a script can
 just loop over the structure it wants instead of assembling a tree upfront:
 
 ```rhai
@@ -125,10 +125,10 @@ let doc = open("notes.leo");
 
 let teams = ["Team A", "Team B", "Team C"];
 for team in teams {
-    let tasks = doc.add(team + "/Tasks");
+    let tasks = doc.ensure(team + "/Tasks");
     tasks.b = "Backlog for " + team;
 }
-doc.add("Team A/Tasks/Write onboarding docs");
+doc.ensure("Team A/Tasks/Write onboarding docs");
 
 doc.save();
 ```
@@ -160,7 +160,7 @@ gets through its predefined `doc`, grouped below by what each group is for.
 | Signature | Does |
 | --- | --- |
 | `doc.gnx(path: string) -> string` | Resolves a headline path to a gnx without creating anything; fails if it's missing or ambiguous. |
-| `doc.add(path: string) -> Node` | Same [`doc.add`](#node-handles) as above — creating and reaching for a node is normally what you want a handle for. Use `.gnx` on the result for the plain string, e.g. to feed into `doc.clone_node`. |
+| `doc.ensure(path: string) -> Node` | Same [`doc.ensure`](#node-handles) as above — creating and reaching for a node is normally what you want a handle for. Use `.gnx` on the result for the plain string, e.g. to feed into `doc.clone_node`. |
 | `doc.path(gnx: string) -> string` | The slash-separated headline path from the root down to `gnx` — the inverse of `doc.gnx(path)`, so `doc.gnx(doc.path(gnx)) == gnx`. |
 
 ### Traversing structure
@@ -215,7 +215,7 @@ the specific occurrence the user had selected.
 
 | Signature | Does |
 | --- | --- |
-| `doc.clone_node(gnx: string, parent_gnx: string) -> string` | Inserts a new occurrence of `gnx` as `parent_gnx`'s last child. Both `gnx` and `parent_gnx` must already be nodes in the outline — nothing is created; resolve a headline path to a gnx first with `doc.gnx(path)`/`doc.add(path).gnx` if that's what a script has. Returns `gnx`. |
+| `doc.clone_node(gnx: string, parent_gnx: string) -> string` | Inserts a new occurrence of `gnx` as `parent_gnx`'s last child. Both `gnx` and `parent_gnx` must already be nodes in the outline — nothing is created; resolve a headline path to a gnx first with `doc.gnx(path)`/`doc.ensure(path).gnx` if that's what a script has. Returns `gnx`. |
 | `doc.clone_node(gnx: string, parent_gnx: string, index: int) -> string` | Same, inserting at `index` among `parent_gnx`'s existing children instead of appending. |
 | `doc.remove(gnx: string)` | Removes `gnx`'s defining occurrence and its subtree. Other clone occurrences of `gnx`, if any, are left in place. |
 
@@ -228,7 +228,7 @@ the specific occurrence the user had selected.
 `insert-tree`/`merge-tree`/`replace-tree` predate the rhai API and are
 still the right tool when a script already has a tree's worth of *data* to
 drop in — say, JSON pulled from an import or generated report — but for
-structure the script is building up itself, `doc.add` is usually more
+structure the script is building up itself, `doc.ensure` is usually more
 direct than assembling this JSON:
 
 ```rhai
@@ -263,8 +263,8 @@ child:
 ```rhai
 let doc = open("notes.leo");
 
-let source = doc.add("Team A/Tasks").gnx;
-let team_b = doc.add("Team B").gnx;
+let source = doc.ensure("Team A/Tasks").gnx;
+let team_b = doc.ensure("Team B").gnx;
 doc.clone_node(source, team_b);
 
 // The clone is the same node, not a copy, so both parents' children
@@ -279,7 +279,7 @@ Give a third argument to insert at a specific index instead of appending:
 
 Like every other low-level `Doc` method, `clone_node` takes gnxs, not
 headline paths — if a script only has a path for the parent, resolve it
-once with `doc.gnx(path)` (or `doc.add(path).gnx` if it also needs
+once with `doc.gnx(path)` (or `doc.ensure(path).gnx` if it also needs
 creating) rather than passing the path around; that's the only place in
 the whole API a path ever needs resolving, and it means `clone_node` fails
 cleanly on a parent that doesn't exist yet instead of quietly creating one
@@ -352,7 +352,7 @@ body pane until the selection moves), exactly like a subprocess action's
 captured stdout/stderr — `@apply` (below) also still works for a rhai body,
 since it only looks at that same output text.
 
-Running a script that calls a method which mutates the outline (`doc.add`,
+Running a script that calls a method which mutates the outline (`doc.ensure`,
 `node.h =`/`node.b =`, `doc.set_headline`, `doc.set_body`, `doc.apply`, …)
 marks the outline dirty and refreshes the editor's caches, the same as any
 other edit; a script that only reads (`n.h`, `doc.render()`, …) or that

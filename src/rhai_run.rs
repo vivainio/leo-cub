@@ -115,7 +115,7 @@ impl Doc {
 
     /// Ensures a slash-separated headline path exists (creating any missing
     /// segments, reusing existing ones) and returns the leaf as a `Node`.
-    fn add(&mut self, path: &str) -> RhaiResult<Node> {
+    fn ensure(&mut self, path: &str) -> RhaiResult<Node> {
         {
             let mut inner = self.inner.borrow_mut();
             inner
@@ -203,7 +203,7 @@ impl Doc {
     }
 
     /// The slash-separated headline path from the root down to `gnx`,
-    /// escaped the same way `doc.gnx(path)`/`doc.add(path)` expect, so it
+    /// escaped the same way `doc.gnx(path)`/`doc.ensure(path)` expect, so it
     /// can be fed straight back into either of them.
     fn path(&mut self, gnx: &str) -> RhaiResult<String> {
         self.inner
@@ -295,7 +295,7 @@ impl Doc {
     /// Fails if either `gnx` or `parent_gnx` isn't already a node in the
     /// outline -- nothing is created. Returns `gnx` unchanged, so the call
     /// can be chained. If a script only has a headline path for the parent,
-    /// resolve it first with `doc.gnx(path)`/`doc.add(path)` rather than
+    /// resolve it first with `doc.gnx(path)`/`doc.ensure(path)` rather than
     /// passing the path here directly: every `Doc` method takes a gnx, so
     /// there's exactly one place a path ever needs resolving.
     fn clone_node(&mut self, gnx: &str, parent_gnx: &str) -> RhaiResult<String> {
@@ -502,7 +502,7 @@ fn dynamic_eq(a: &Dynamic, b: &Dynamic) -> bool {
 fn register_doc_api(engine: &mut Engine) {
     engine.register_type_with_name::<Doc>("Doc");
     engine.register_fn("open", Doc::open);
-    engine.register_fn("add", Doc::add);
+    engine.register_fn("ensure", Doc::ensure);
     engine.register_fn("gnx", Doc::gnx);
     engine.register_fn("roots", Doc::roots);
     engine.register_fn("children", Doc::children);
