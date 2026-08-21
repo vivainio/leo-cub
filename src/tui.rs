@@ -725,6 +725,10 @@ fn handle_key(
 
 fn handle_mouse(app: &mut App, area: Rect, mouse: MouseEvent) {
     let kind = mouse.kind;
+    if matches!(kind, MouseEventKind::ScrollUp | MouseEventKind::ScrollDown) {
+        handle_mouse_scroll(app, area, kind, mouse);
+        return;
+    }
     if !matches!(
         kind,
         MouseEventKind::Down(MouseButton::Left)
@@ -750,6 +754,37 @@ fn handle_mouse(app: &mut App, area: Rect, mouse: MouseEvent) {
         return;
     }
     handle_body_mouse(app, columns[1], kind, mouse);
+}
+
+/// Mouse wheel: moves the outline selection when the wheel is over the
+/// tree, same as Up/Down, or scrolls the body content when it's over the
+/// node pane, same as PgUp/PgDn -- there's no independent outline scroll
+/// position to move (the render clamps it to follow `selected`), so
+/// wheeling over the tree has to move the selection itself.
+fn handle_mouse_scroll(app: &mut App, area: Rect, kind: MouseEventKind, mouse: MouseEvent) {
+    const LINES_PER_NOTCH: isize = 3;
+    let delta = if matches!(kind, MouseEventKind::ScrollUp) {
+        -LINES_PER_NOTCH
+    } else {
+        LINES_PER_NOTCH
+    };
+    let content_height = area.height.saturating_sub(1);
+    let content = Rect::new(area.x, area.y, area.width, content_height);
+    let columns = content_columns(content, app);
+    let outline = columns[0];
+    let in_outline = !app.body_full_width
+        && mouse.column >= outline.x
+        && mouse.column < outline.right()
+        && mouse.row >= outline.y.saturating_add(1)
+        && mouse.row < outline.bottom().saturating_sub(1);
+    if in_outline {
+        app.move_selection(delta);
+        return;
+    }
+    if app.outline_full_width {
+        return;
+    }
+    app.scroll_body_lines(delta);
 }
 
 /// Click-to-select and click-the-expand-marker, plus drag-to-extend the
@@ -5837,6 +5872,55 @@ mod tests {
             app.status, "untouched",
             "a click that jitters back to its start row shouldn't copy anything"
         );
+    }
+
+    #[test]
+    fn mouse_wheel_over_the_outline_moves_the_selection() {
+        let mut app = editing_app();
+        assert_eq!(app.rows().len(), 3, "root starts expanded with 2 children");
+        let area = Rect::new(0, 0, 80, 24);
+        let scroll_down = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 10,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        };
+        handle_mouse(&mut app, area, scroll_down);
+        assert_eq!(app.selected, 2, "clamped at the last row");
+
+        let scroll_up = MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            ..scroll_down
+        };
+        handle_mouse(&mut app, area, scroll_up);
+        assert_eq!(app.selected, 0, "clamped at the first row");
+    }
+
+    #[test]
+    fn mouse_wheel_over_the_body_scrolls_it() {
+        let mut app = editing_app();
+        app.split_horizontal = false;
+        app.body_scroll_max = 10;
+        let area = Rect::new(0, 0, 80, 24);
+        let scroll_down = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 50,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        };
+        handle_mouse(&mut app, area, scroll_down);
+        assert_eq!(app.body_scroll, 3);
+        assert_eq!(
+            app.selected, 0,
+            "scrolling the body doesn't move the outline selection"
+        );
+
+        let scroll_up = MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            ..scroll_down
+        };
+        handle_mouse(&mut app, area, scroll_up);
+        assert_eq!(app.body_scroll, 0);
     }
 
     #[test]
