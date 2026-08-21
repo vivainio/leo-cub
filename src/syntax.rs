@@ -339,25 +339,17 @@ fn markdown_scope_style(scopes: &str) -> Option<Style> {
 }
 
 /// Body-level Leo directives (`@language`, `@tabwidth`, `@others`,
-/// `@apply`, `@nonl`, `@first`, `@last`) aren't part of any target
-/// language's grammar, so no grammar highlights them meaningfully on its
-/// own -- not even a hand-picked one like the bundled Nushell syntax, and
-/// syntect's built-in defaults (Python, Rust, Bash, JavaScript, ...) can't
-/// be patched from here at all. Overriding a directive line's rendering
-/// with the same cyan used for headline directives (see `tui::headline_spans`)
-/// keeps it visually distinct regardless of which language is active,
-/// instead of needing every grammar -- vendored or not -- to special-case
-/// Leo's syntax.
+/// `@nonl`, `@first`, `@last`) aren't part of any target language's
+/// grammar, so no grammar highlights them meaningfully on its own -- not
+/// even a hand-picked one like the bundled Nushell syntax, and syntect's
+/// built-in defaults (Python, Rust, Bash, JavaScript, ...) can't be patched
+/// from here at all. Overriding a directive line's rendering with the same
+/// cyan used for headline directives (see `tui::headline_spans`) keeps it
+/// visually distinct regardless of which language is active, instead of
+/// needing every grammar -- vendored or not -- to special-case Leo's
+/// syntax.
 fn leo_directive_spans(line: &str) -> Option<Vec<Span<'static>>> {
-    const DIRECTIVES: &[&str] = &[
-        "@language",
-        "@tabwidth",
-        "@others",
-        "@apply",
-        "@nonl",
-        "@first",
-        "@last",
-    ];
+    const DIRECTIVES: &[&str] = &["@language", "@tabwidth", "@others", "@nonl", "@first", "@last"];
     let trimmed = line.trim_end_matches(['\n', '\r']);
     let content = trimmed.trim_start();
     let leading = trimmed.len() - content.len();
@@ -409,21 +401,15 @@ mod tests {
         // fall back to different (or no) syntax highlighting for their
         // code -- but the directive lines should render identically in
         // both, since neither grammar can be expected to know about them.
-        let nu = SyntaxHighlighter::new().highlight_with_language(
-            "@language nu\n@apply\nls\n",
-            None,
-            None,
-        );
+        let nu = SyntaxHighlighter::new().highlight_with_language("@language nu\nls\n", None, None);
         let cobol = SyntaxHighlighter::new().highlight_with_language(
-            "@language cobol\n@apply\nDISPLAY 'HI'.\n",
+            "@language cobol\nDISPLAY 'HI'.\n",
             None,
             None,
         );
         for text in [&nu, &cobol] {
             assert_eq!(text.lines[0].spans[0].content, "@language");
             assert_eq!(text.lines[0].spans[0].style.fg, Some(Color::Cyan));
-            assert_eq!(text.lines[1].spans[0].content, "@apply");
-            assert_eq!(text.lines[1].spans[0].style.fg, Some(Color::Cyan));
         }
     }
 

@@ -28,7 +28,7 @@ cub docs/quickstart.leo
   - @clean quickstart-files/greeting.txt
 - Run an action
   - @action Say hello
-  - @action Show today's date
+  - @action Mark this node
 - Automate from outside
 - Where to go next
 ```
@@ -49,13 +49,15 @@ Press `a`, type `hello`, `Enter` - you'll see:
 
 ```text
 Hello from an action!
-This node's body just ran as a shell script.
+This node's body just ran as a rhai script.
 ```
 
-The second action, **Show today's date**, carries an `@language python`
-directive in its body, so `cub` runs it with `python3` instead of the
-default shell. The interpreter is picked from that directive; `node`,
-`ruby`, and `bash` are recognized the same way.
+The second action, **Mark this node**, uses the two names every `@action`
+body gets predefined: `doc`, bound to this outline, and `target`, the gnx
+of the node you had selected when you invoked the action (here, the action
+node itself). It appends a checkmark to that node's headline and prints
+the result - a script can read and mutate the live outline directly,
+without any serialization round trip.
 
 ## Pull in a real external file
 

@@ -6,8 +6,8 @@ places:
 - **`cub run SCRIPT.rhai`**, a headless command that drives a `.leo` file
   outside the TUI — the tool to reach for when you want to script or test a
   sequence of edits without a terminal.
-- **`@action` bodies** with an `@language rhai` directive, run in-process
-  from inside the TUI when you trigger the action (`Shift-A`).
+- **`@action` bodies**, run in-process from inside the TUI when you
+  trigger the action (`Shift-A`).
 
 Both give a script the exact same API — a script that works under `cub run`
 works, unchanged, as an `@action` body, and vice versa. The only difference
@@ -83,6 +83,7 @@ all-gnx `Doc` API (below) exists underneath it for structural operations
 | `node.children() -> array` | This node's children, in outline order, as `Node`s. |
 | `node.subtree() -> array` | This node and everything under it, depth-first (itself first), as `Node`s — the deeper counterpart to `.children()`. |
 | `node.path() -> string` | The slash-separated headline path from the root down to this node — same as `doc.path(gnx)`. |
+| `node.file_path() -> string` | The on-disk path this node's `@file`/`@thin`/`@file-thin`/`@clean`/`@f` body syncs to — the outline's own directory plus every ancestor `@path` directive plus the filename in the headline, resolved the same way `cub sync` finds it. `""` if this node isn't itself an external-file node — an ancestor's `@path` names a directory for such descendants, not a path for itself. Same as `doc.file_path(gnx)`. |
 | `doc.find_h(pattern: string) -> array` | Nodes whose headline matches `pattern` (a regex — same syntax as `cub inspect --search`), as `Node`s in outline order. Fails if `pattern` isn't a valid regex. |
 | `doc.find_b(pattern: string) -> array` | Same as `doc.find_h`, but matching a node's body instead of its headline. |
 
@@ -162,6 +163,7 @@ gets through its predefined `doc`, grouped below by what each group is for.
 | `doc.gnx(path: string) -> string` | Resolves a headline path to a gnx without creating anything; fails if it's missing or ambiguous. |
 | `doc.ensure(path: string) -> Node` | Same [`doc.ensure`](#node-handles) as above — creating and reaching for a node is normally what you want a handle for. Use `.gnx` on the result for the plain string, e.g. to feed into `doc.clone_node`. |
 | `doc.path(gnx: string) -> string` | The slash-separated headline path from the root down to `gnx` — the inverse of `doc.gnx(path)`, so `doc.gnx(doc.path(gnx)) == gnx`. |
+| `doc.file_path(gnx: string) -> string` | See [`node.file_path()`](#node-handles) above — the same lookup, taking a gnx instead of a `Node`. |
 
 ### Traversing structure
 
@@ -327,12 +329,35 @@ $ echo $?
 1
 ```
 
+## Running a subprocess
+
+Every script — `cub run` or a bound `@action` alike — runs in-process
+against the `Doc` API above. For the rare case where a script still needs
+to shell out (a build step, `git`, some other CLI tool), use `sh`:
+
+| Signature | Does |
+| --- | --- |
+| `sh(cmd: string) -> #{stdout, stderr, code}` | Runs `cmd` through `sh -c` and returns a map of what it produced. `code` is the exit status (`-1` if the process was killed by a signal). |
+| `sh(cmd: string, opts: #{cwd?: string}) -> #{stdout, stderr, code}` | Same, with `opts.cwd` as the subprocess's working directory. Without it, `cmd` runs relative to `cub`'s own working directory, not the open `.leo` file's. |
+
+```rhai
+let r = sh("git rev-parse --short HEAD");
+assert_eq(r.code, 0, "git failed: " + r.stderr);
+print("HEAD is " + r.stdout.trim());
+
+let r2 = sh("cat notes.txt", #{ cwd: "quickstart-files" });
+```
+
+`sh` never throws for a nonzero exit — that's for the script to check via
+`r.code`, same as `cub apply`'s `$?` in a shell script. It only fails
+(throwing, like the rest of the `Doc` API) if `sh` itself can't be
+launched.
+
 ## `@action` bodies
 
 An `@action` node's headline marks it as runnable from the action palette
-(`Shift-A`); its body is the script. A body that starts with an
-`@language rhai` directive runs in-process, with two symbols predefined —
-no `open()` call needed:
+(`Shift-A`); its body is a rhai script, run in-process with two symbols
+predefined — no `open()` call needed:
 
 | Symbol | Is |
 | --- | --- |
@@ -340,17 +365,14 @@ no `open()` call needed:
 | `target` | The gnx of the node the user had selected when they invoked the action — not the `@action` node itself, which may live anywhere in the tree. Wrap it with `doc.node(target)` for a `Node` handle, or use it directly with the low-level `doc.headline`/`doc.body`/`doc.set_headline`/`doc.set_body`. |
 
 ```rhai
-@language rhai
 let n = doc.node(target);
 n.h = n.h + " ✓";
 n.b = n.b + "\nDone: " + doc.count() + " nodes total.";
 print("marked " + n.h);
 ```
 
-`print`/`debug` output becomes the action's displayed output (shown in the
-body pane until the selection moves), exactly like a subprocess action's
-captured stdout/stderr — `@apply` (below) also still works for a rhai body,
-since it only looks at that same output text.
+`print`/`debug` output becomes the action's displayed output, shown in the
+body pane until the selection moves.
 
 Running a script that calls a method which mutates the outline (`doc.ensure`,
 `node.h =`/`node.b =`, `doc.set_headline`, `doc.set_body`, `doc.apply`, …)
@@ -358,40 +380,9 @@ marks the outline dirty and refreshes the editor's caches, the same as any
 other edit; a script that only reads (`n.h`, `doc.render()`, …) or that
 throws before mutating anything leaves the outline exactly as it was.
 
-### `@action` bodies in other languages
-
-Without `@language rhai`, an `@action` body runs as a subprocess (`sh` by
-default; `@language python`/`js`/`ruby`/`bash`/`nu` select an interpreter).
-A subprocess has no in-process access to `doc`/`target`, so it gets the same
-information through environment variables instead:
-
-| Env var | Is |
-| --- | --- |
-| `CUB_GNX` | The target's gnx — the subprocess equivalent of `target`. |
-| `CUB_PARENT_GNX` | The target's parent's gnx; unset if the target is a root. Rhai equivalent: `doc.parent(target)` (`""` for a root instead of unset). |
-| `CUB_HEADLINE` | The target's headline. Rhai equivalent: `doc.node(target).h`. |
-| `CUB_POSITION` | The target's position id (e.g. `0/1`) — identifies the specific clone *occurrence* invoked, which gnx-based `target` cannot. |
-| `CUB_PATH` | The target's slash-separated headline path from the root. Rhai equivalent: `doc.node(target).path()`. |
-| `CUB_DOC` | The open `.leo` file's absolute path. |
-
-A subprocess can't mutate the outline directly — it can only shell out to
-`cub` itself (`cub apply "$CUB_DOC" ...`), or write a JSON operation batch
-to stdout and add a bare `@apply` directive line to the body, which tells
-`cub` to parse that stdout as a batch and apply it once the process exits
-successfully:
-
-```
-@language python
-@apply
-import json, os
-print(json.dumps({
-    "operations": [{"op": "set-body", "node": os.environ["CUB_GNX"], "body": "done"}]
-}))
-```
-
-A rhai body needs none of this — `doc` already *is* the outline, so
-`doc.node(target).b = "done"` does the same thing directly, in-process,
-with no serialization round trip.
+A body may still start with a leftover `@language rhai` directive from
+before every `@action` body ran as rhai unconditionally — it's stripped
+before the script runs, so it's harmless, but no longer needed.
 
 ## Practical guardrails
 
