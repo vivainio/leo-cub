@@ -37,7 +37,7 @@ fn cub_run_drives_a_temp_outline_through_the_rhai_api() {
             let doc = open("{escaped_path}");
             assert_eq(doc.count(), 1);
 
-            let n = doc.add("Root/Tasks/First task");
+            let n = doc.ensure("Root/Tasks/First task");
             n.b = "hello from rhai";
 
             assert_eq(n.h, "First task");
@@ -91,9 +91,9 @@ fn cub_run_walks_the_tree_with_roots_children_parent_and_path() {
             assert_eq(doc.roots()[0], root);
             assert_eq(doc.parent(root), "");
 
-            let tasks = doc.add("Root/Tasks").gnx;
-            let first = doc.add("Root/Tasks/First task").gnx;
-            let second = doc.add("Root/Tasks/Second task").gnx;
+            let tasks = doc.ensure("Root/Tasks").gnx;
+            let first = doc.ensure("Root/Tasks/First task").gnx;
+            let second = doc.ensure("Root/Tasks/Second task").gnx;
 
             assert_eq(doc.parent(first), tasks);
             assert_eq(doc.parent(tasks), root);
@@ -139,9 +139,9 @@ fn cub_run_reads_and_writes_nodes_through_the_node_wrapper() {
         format!(
             r#"
             let doc = open("{escaped_path}");
-            let tasks = doc.add("Root/Tasks").gnx;
-            let first = doc.add("Root/Tasks/First task").gnx;
-            doc.add("Root/Tasks/Second task");
+            let tasks = doc.ensure("Root/Tasks").gnx;
+            let first = doc.ensure("Root/Tasks/First task").gnx;
+            doc.ensure("Root/Tasks/Second task");
 
             let n = doc.node(first);
             n.h = "First task (renamed)";
@@ -201,8 +201,8 @@ fn cub_run_finds_nodes_by_headline_and_body_pattern() {
         format!(
             r#"
             let doc = open("{escaped_path}");
-            let a = doc.add("Root/Alpha task");
-            let b = doc.add("Root/Beta task");
+            let a = doc.ensure("Root/Alpha task");
+            let b = doc.ensure("Root/Beta task");
             a.b = "TODO: write tests";
             b.b = "already done";
 
@@ -245,9 +245,9 @@ fn cub_run_clones_and_removes_nodes_directly_without_apply() {
         format!(
             r#"
             let doc = open("{escaped_path}");
-            let tasks = doc.add("Team A/Tasks").gnx;
-            doc.add("Team A/Tasks/Write tests");
-            let team_b = doc.add("Team B").gnx;
+            let tasks = doc.ensure("Team A/Tasks").gnx;
+            doc.ensure("Team A/Tasks/Write tests");
+            let team_b = doc.ensure("Team B").gnx;
 
             // clone_node takes an existing parent by gnx -- no headline
             // path to resolve, nothing gets auto-created. Appends by
@@ -257,7 +257,7 @@ fn cub_run_clones_and_removes_nodes_directly_without_apply() {
             assert_eq(doc.children(tasks).len(), 1);
 
             // clone_node's 3-arg overload takes an explicit index.
-            let extra = doc.add("Extra").gnx;
+            let extra = doc.ensure("Extra").gnx;
             doc.clone_node(extra, team_b, 0);
             assert_eq(doc.children(team_b)[0], extra);
             assert_eq(doc.children(team_b)[1], tasks);
