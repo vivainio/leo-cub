@@ -16,6 +16,11 @@ themselves, while an `@action` script gets `doc` and `target` predefined,
 already bound to the outline the editor has open. Neither is a cut-down
 version of the other.
 
+This same `Doc`/`Node` API is meant to be `cub`'s main path for
+customization and extension going forward — the way to teach `cub` a new
+behavior is generally to script it against this API, rather than to wait
+on a new CLI flag or subcommand.
+
 ## Why `cub run`
 
 `cub run` opens an outline, calls methods on it, and asserts — no terminal,
@@ -35,7 +40,7 @@ else.
 ```rhai
 let doc = open("notes.leo");
 
-let task = doc.node(doc.add("Project/Tasks/Write docs"));
+let task = doc.add("Project/Tasks/Write docs");
 task.b = "Cover the Rhai API.";
 
 assert_eq(task.h, "Write docs");
@@ -53,9 +58,9 @@ cub run notes.rhai
 
 `open` reads an existing `.leo` file — create one first with `cub new` if
 you're starting from nothing. Nothing is written back to disk until the
-script calls `doc.save()` or `doc.save_as(path)`. `doc.node(gnx)` wraps a
-gnx as a `Node` handle with `.h`/`.b` properties — the primary way scripts
-work with a node; see [Node handles](#node-handles) below for the full
+script calls `doc.save()` or `doc.save_as(path)`. `doc.add(path)` returns
+a `Node` — a handle with `.h`/`.b` properties, the primary way scripts work
+with a node; see [Node handles](#node-handles) below for the full
 reference.
 
 ## Node handles
@@ -69,7 +74,8 @@ all-gnx `Doc` API (below) exists underneath it for structural operations
 
 | Signature | Does |
 | --- | --- |
-| `doc.node(gnx: string) -> Node` | Wraps `gnx` as a `Node`. Fails if `gnx` isn't a node in the outline. |
+| `doc.node(gnx: string) -> Node` | Wraps an existing `gnx` as a `Node`. Fails if `gnx` isn't a node in the outline. |
+| `doc.add(path: string) -> Node` | Ensures a slash-separated headline path exists (creating missing segments, reusing existing ones — same rules as `cub add`), and returns the leaf as a `Node`. |
 | `node.h: string` (get/set) | The node's headline. |
 | `node.b: string` (get/set) | The node's body. |
 | `node.gnx: string` (read-only) | The plain gnx string this `Node` wraps — for passing to a `Doc` method that doesn't have a `Node` form, like `doc.clone_node`. |
@@ -82,7 +88,7 @@ all-gnx `Doc` API (below) exists underneath it for structural operations
 
 ```rhai
 let doc = open("notes.leo");
-let tasks = doc.node(doc.add("Project/Tasks"));
+let tasks = doc.add("Project/Tasks");
 
 tasks.h = "Tasks (Q3)";
 tasks.b = "Backlog for the quarter.";
@@ -119,7 +125,7 @@ let doc = open("notes.leo");
 
 let teams = ["Team A", "Team B", "Team C"];
 for team in teams {
-    let tasks = doc.node(doc.add(team + "/Tasks"));
+    let tasks = doc.add(team + "/Tasks");
     tasks.b = "Backlog for " + team;
 }
 doc.add("Team A/Tasks/Write onboarding docs");
@@ -154,8 +160,8 @@ gets through its predefined `doc`, grouped below by what each group is for.
 | Signature | Does |
 | --- | --- |
 | `doc.gnx(path: string) -> string` | Resolves a headline path to a gnx without creating anything; fails if it's missing or ambiguous. |
-| `doc.add(path: string) -> string` | Ensures a slash-separated headline path exists (creating missing segments, reusing existing ones — same rules as `cub add`); returns the leaf's gnx. |
-| `doc.path(gnx: string) -> string` | The slash-separated headline path from the root down to `gnx` — the inverse of `doc.gnx(path)`/`doc.add(path)`, so `doc.gnx(doc.path(gnx)) == gnx`. |
+| `doc.add(path: string) -> Node` | Same [`doc.add`](#node-handles) as above — creating and reaching for a node is normally what you want a handle for. Use `.gnx` on the result for the plain string, e.g. to feed into `doc.clone_node`. |
+| `doc.path(gnx: string) -> string` | The slash-separated headline path from the root down to `gnx` — the inverse of `doc.gnx(path)`, so `doc.gnx(doc.path(gnx)) == gnx`. |
 
 ### Traversing structure
 
@@ -209,7 +215,7 @@ the specific occurrence the user had selected.
 
 | Signature | Does |
 | --- | --- |
-| `doc.clone_node(gnx: string, parent_gnx: string) -> string` | Inserts a new occurrence of `gnx` as `parent_gnx`'s last child. Both `gnx` and `parent_gnx` must already be nodes in the outline — nothing is created; resolve a headline path to a gnx first with `doc.gnx`/`doc.add` if that's what a script has. Returns `gnx`. |
+| `doc.clone_node(gnx: string, parent_gnx: string) -> string` | Inserts a new occurrence of `gnx` as `parent_gnx`'s last child. Both `gnx` and `parent_gnx` must already be nodes in the outline — nothing is created; resolve a headline path to a gnx first with `doc.gnx(path)`/`doc.add(path).gnx` if that's what a script has. Returns `gnx`. |
 | `doc.clone_node(gnx: string, parent_gnx: string, index: int) -> string` | Same, inserting at `index` among `parent_gnx`'s existing children instead of appending. |
 | `doc.remove(gnx: string)` | Removes `gnx`'s defining occurrence and its subtree. Other clone occurrences of `gnx`, if any, are left in place. |
 
@@ -257,8 +263,8 @@ child:
 ```rhai
 let doc = open("notes.leo");
 
-let source = doc.add("Team A/Tasks");
-let team_b = doc.add("Team B");
+let source = doc.add("Team A/Tasks").gnx;
+let team_b = doc.add("Team B").gnx;
 doc.clone_node(source, team_b);
 
 // The clone is the same node, not a copy, so both parents' children
@@ -273,11 +279,11 @@ Give a third argument to insert at a specific index instead of appending:
 
 Like every other low-level `Doc` method, `clone_node` takes gnxs, not
 headline paths — if a script only has a path for the parent, resolve it
-once with `doc.gnx(path)`/`doc.add(path)` rather than passing the path
-around; that's the only place in the whole API a path ever needs
-resolving, and it means `clone_node` fails cleanly on a parent that
-doesn't exist yet instead of quietly creating one that doesn't match what
-the script meant.
+once with `doc.gnx(path)` (or `doc.add(path).gnx` if it also needs
+creating) rather than passing the path around; that's the only place in
+the whole API a path ever needs resolving, and it means `clone_node` fails
+cleanly on a parent that doesn't exist yet instead of quietly creating one
+that doesn't match what the script meant.
 
 `doc.remove(gnx)` is the reverse: it deletes `gnx`'s defining occurrence and
 its whole subtree. If `gnx` is cloned elsewhere, those other occurrences are

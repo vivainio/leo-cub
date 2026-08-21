@@ -114,8 +114,8 @@ impl Doc {
     }
 
     /// Ensures a slash-separated headline path exists (creating any missing
-    /// segments, reusing existing ones) and returns its gnx.
-    fn add(&mut self, path: &str) -> RhaiResult<String> {
+    /// segments, reusing existing ones) and returns the leaf as a `Node`.
+    fn add(&mut self, path: &str) -> RhaiResult<Node> {
         {
             let mut inner = self.inner.borrow_mut();
             inner
@@ -125,7 +125,11 @@ impl Doc {
                 .map_err(rhai_err)?;
             inner.touched = true;
         }
-        self.gnx(path)
+        let gnx = self.gnx(path)?;
+        Ok(Node {
+            doc: self.clone(),
+            gnx,
+        })
     }
 
     /// Resolves a slash-separated headline path to its gnx without creating
