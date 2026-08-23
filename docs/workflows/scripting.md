@@ -139,9 +139,9 @@ print(clone_of_tasks.path()); // names whichever team's Tasks came first
 `.remove()` is the one place this distinction is easy to get burned by,
 since it's destructive: called on a positioned handle it deletes exactly
 that occurrence, but called on a bare-gnx handle it falls back to deleting
-whichever occurrence happens to be defining — which, for a script working
-from `p` in an `@action` on a node that turns out to be cloned, is *not*
-the occurrence the user had selected unless it's also the defining one:
+whichever occurrence happens to be defining — which, for a script holding
+a handle to a node that turns out to be cloned, isn't necessarily the
+occurrence the script meant unless it's also the defining one:
 
 ```rhai
 let team_a_tasks = doc.node_at("0/1"); // the exact occurrence under Team A
@@ -321,12 +321,12 @@ always answer for (or act on) the node's first position in the outline.
 That's what you want almost all of the time for `children`/`parent`/`path`,
 since a clone's children are shared across every occurrence by definition
 — but it's a sharp edge for the destructive `doc.remove`, which silently
-deletes the *wrong* occurrence if a script meant a specific clone. `p` (in
-an `@action` body) and `doc.node_at(position)` exist to sidestep exactly
-this: they carry the exact occurrence with them, so `.remove()` called on
-one of them (or a `Node` derived from one, via `.children()`, `.parent()`,
-`.subtree()`) acts on that occurrence and no other, even if it isn't the
-defining one — see [Node handles](#node-handles) above.
+deletes the *wrong* occurrence if a script meant a specific clone.
+Position-anchored handles (`doc.node_at(position)`, or any `Node` derived
+from one via `.children()`, `.parent()`, `.subtree()`) exist to sidestep
+exactly this: they carry the exact occurrence with them, so `.remove()`
+called on one of them acts on that occurrence and no other, even if it
+isn't the defining one — see [Node handles](#node-handles) above.
 
 `doc.remove(source)` deletes `source`'s defining occurrence and its whole
 subtree. If `source` is cloned elsewhere, those other occurrences are left
