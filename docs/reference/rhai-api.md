@@ -49,7 +49,7 @@ occurrence. Nodes returned by `node_at()`, `parent()`, `children()`, and
 
 This distinction is most important for removal:
 
-```rhai
+```rust
 let exact = doc.node_at("0/1");
 exact.remove();                 // removes occurrence 0/1
 
@@ -174,13 +174,13 @@ Rhai's string case/whitespace/substitution methods -- `trim()`,
 similar -- mutate their target in place and return nothing. Chaining one onto
 a temporary throws the result away:
 
-```rhai
+```rust
 print(result.stdout.trim());   // prints nothing; the trimmed copy is discarded
 ```
 
 Call it as a statement on a variable instead, then use that variable:
 
-```rhai
+```rust
 let hash = result.stdout;
 hash.trim();
 print(hash);                   // prints the trimmed value
