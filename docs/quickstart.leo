@@ -31,12 +31,12 @@
   <v t="quickstart.next"><vh>Where to go next</vh></v>
 </vnodes>
 <tnodes>
-  <t tx="quickstart.actions">Any node headlined &quot;@action &lt;name&gt;&quot; is runnable: press a to open
+  <t tx="quickstart.actions">Any node headlined &quot;@action &lt;name&gt;&quot; is runnable: press Shift-A to open
 the action palette, type to filter by name, and Enter runs the
 selected node's body as a rhai script. The palette lists every @action
 node in the outline, wherever it lives.
 
-Try it now: press a, type &quot;hello&quot;, Enter. The body pane below switches
+Try it now: press Shift-A, type &quot;hello&quot;, Enter. The body pane below switches
 to the command's output until you select a different node.
 
 The script runs with `doc` bound to this outline and `target` set to the

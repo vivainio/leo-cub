@@ -40,12 +40,12 @@ you press `Ctrl-S`, so there's nothing to undo by skipping around.
 ## Try an action live
 
 The two nodes under **Run an action** are `@action` nodes: any node
-headlined `@action <name>` is runnable from inside the TUI. Press `a` to
+headlined `@action <name>` is runnable from inside the TUI. Press `Shift-A` to
 open the action palette, type to filter by name, and `Enter` runs the
 selected node's body as a script. The body pane switches to the command's
 output until you select a different node.
 
-Press `a`, type `hello`, `Enter` - you'll see:
+Press `Shift-A`, type `hello`, `Enter` - you'll see:
 
 ```text
 Hello from an action!
