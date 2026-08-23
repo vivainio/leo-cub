@@ -1,6 +1,6 @@
 # Scripting with Rhai
 
-`cub` embeds [Rhai](https://rhai.rs), a small scripting language, in two
+`cub` embeds [Rhai](https://rhai.rs), a small scripting language, in three
 places:
 
 - **`cub run SCRIPT.rhai`**, a headless command that drives a `.leo` file
@@ -8,13 +8,17 @@ places:
   sequence of edits without a terminal.
 - **`@action` bodies**, run in-process from inside the TUI when you
   trigger the action (`Shift-A`).
+- **`@import`ed scripts**, external `.rhai` files that expose their own
+  `COMMANDS` to the action palette — see "`@import`ed commands" further
+  below.
 
-Both give a script the exact same API — a script that works under `cub run`
-works, unchanged, as an `@action` body, and vice versa. The only difference
-is how the script gets its `Doc`: `cub run` scripts call `open(path)`
-themselves, while an `@action` script gets `doc` and `target` predefined,
-already bound to the outline the editor has open. Neither is a cut-down
-version of the other.
+All three give a script the exact same `Doc`/`Node` API — a script that
+works under `cub run` works, unchanged, as an `@action` body or an
+imported command's function body. The only difference is how the script
+gets its `Doc`: `cub run` scripts call `open(path)` themselves, while an
+`@action` script gets `doc` and `target` predefined, already bound to the
+outline the editor has open, and an imported command's function receives
+`doc` as its one argument. None is a cut-down version of the others.
 
 This same `Doc`/`Node` API is meant to be `cub`'s main path for
 customization and extension going forward — the way to teach `cub` a new
@@ -357,19 +361,19 @@ launched.
 ## `@action` bodies
 
 An `@action` node's headline marks it as runnable from the action palette
-(`Shift-A`); its body is a rhai script, run in-process with two symbols
+(`Shift-A`); its body is a rhai script, run in-process with three symbols
 predefined — no `open()` call needed:
 
 | Symbol | Is |
 | --- | --- |
 | `doc` | A `Doc` already bound to the outline this editor session has open — the same object the TUI itself is showing, not a fresh read from disk. Every method above works on it, and mutations are visible in the editor as soon as the action finishes. |
-| `target` | The gnx of the node the user had selected when they invoked the action — not the `@action` node itself, which may live anywhere in the tree. Wrap it with `doc.node(target)` for a `Node` handle, or use it directly with the low-level `doc.headline`/`doc.body`/`doc.set_headline`/`doc.set_body`. |
+| `target` | The gnx of the node the user had selected when they invoked the action — **the current position**, not the `@action` node itself, which may live anywhere in the tree. Use it directly with the low-level `doc.headline`/`doc.body`/`doc.set_headline`/`doc.set_body`, or reach for `p` below instead of wrapping it yourself. |
+| `p` | `doc.node(target)` — the current position as a `Node` handle, predefined so a body can write `p.h`/`p.b` straight away instead of calling `doc.node(target)` itself first. Exactly the same object `doc.node(target)` would hand back; the two are interchangeable. |
 
 ```rhai
-let n = doc.node(target);
-n.h = n.h + " ✓";
-n.b = n.b + "\nDone: " + doc.count() + " nodes total.";
-print("marked " + n.h);
+p.h = p.h + " ✓";
+p.b = p.b + "\nDone: " + doc.count() + " nodes total.";
+print("marked " + p.h);
 ```
 
 `print`/`debug` output becomes the action's displayed output, shown in the
@@ -384,6 +388,75 @@ throws before mutating anything leaves the outline exactly as it was.
 A body may still start with a leftover `@language rhai` directive from
 before every `@action` body ran as rhai unconditionally — it's stripped
 before the script runs, so it's harmless, but no longer needed.
+
+## `@import`ed commands
+
+An `@action` body keeps its logic inline, in the outline itself. `@import`
+is the alternative for logic you want to keep in a real file — versioned,
+shared across outlines, edited with a text editor's rhai support — with
+the outline holding only a pointer to it:
+
+```
+@import scripts/github.rhai
+```
+
+That's the entire node: a headline of `@import` followed by a path, and no
+body of its own. The path resolves relative to the open `.leo` file's own
+directory (the same convention `doc.sh`'s default `cwd` uses), and the
+import applies **outline-wide** — the node can live anywhere in the tree,
+not just at the root, and isn't itself an `@action`.
+
+The imported script declares which of its functions are directly runnable
+by listing their names in a top-level `COMMANDS` array:
+
+```rhai
+const COMMANDS = ["gh_pr_list", "gh_issue_list", "import_prs_and_issues"];
+
+fn gh_pr_list(doc, target) {
+    parse_json(doc.sh("gh pr list --json number,title,author,state,url").stdout)
+}
+```
+
+Every name in `COMMANDS` shows up in the action palette (`Shift-A`) —
+labeled `name  (file-stem)`, e.g. `gh_pr_list  (github)`, so two imports
+that happen to define same-named commands stay distinguishable — and runs
+the same way an `@action` does: `print`/`debug` output becomes the
+displayed result, shown in the currently selected node's body pane until
+the selection moves, and a mutation (`doc.ensure`, `node.h =`, `doc.apply`,
+…) marks the outline dirty exactly like any other edit.
+
+The one contract a `COMMANDS` function must meet: it takes **exactly
+`(doc, target)`**, where `target` is a **`Node`** for whatever was
+selected when the command was run — the current position — with
+`.h`/`.b`/`.gnx`/`.parent()`/`.children()` available straight away, no
+`doc.node(...)` call needed first. (An `@action` body gets a `target`
+*string* plus a separately predefined `p` `Node` because both are cheap to
+predefine in a scope; a command has only one argument slot for "the
+current position", so it gets the more useful `Node` form directly —
+`target.gnx` recovers the plain string if a script needs it.) Even a
+command like `gh_pr_list` above that doesn't happen to need it still
+declares the parameter — the palette always passes both arguments, so it
+has to be there regardless.
+
+```rhai
+fn tag_current(doc, target) {
+    target.h = target.h + " ✓";
+}
+```
+
+A function needing input the palette can't supply (a title, a PR number,
+…) can still live in the script as a plain helper with whatever signature
+it needs — it just can't go in `COMMANDS`. A function left out of
+`COMMANDS` is invisible to the palette but still an ordinary function
+other functions *in the same file* can call.
+
+`scripts/github.rhai` in this repo is a worked example: `gh_pr_list`,
+`gh_issue_list`, and `import_prs_and_issues` are listed in `COMMANDS` and
+runnable straight from the palette (each takes `target` but ignores it);
+`gh_pr_view`, `gh_pr_create`, and the `shq` shell-quoting helper take
+different arguments entirely, so they stay library-only, called from
+`import_prs_and_issues` or from a `cub run` script rather than from the
+palette directly.
 
 ## Practical guardrails
 

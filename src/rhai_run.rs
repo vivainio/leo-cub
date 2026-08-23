@@ -808,3 +808,169 @@ pub(crate) fn run_bound(
         },
     }
 }
+
+/// One function an `@import`ed script's `COMMANDS` array names as directly
+/// runnable -- see [`discover_commands`].
+#[cfg(feature = "tui")]
+pub(crate) struct ImportedCommand {
+    pub(crate) name: String,
+}
+
+/// Reads back the `COMMANDS` array a script at `script_path` declares,
+/// without invoking anything in it: compiles the script, runs only its
+/// top-level `let`/`const` statements (registering its `fn`s along the
+/// way, same as any script load), then reads `COMMANDS` out of the
+/// resulting scope. `COMMANDS` names the functions meant to be exposed as
+/// zero-input commands -- runnable with just `doc` -- in the action
+/// palette; everything else the script defines is a library helper, or a
+/// function that needs more input than the palette can supply yet, and
+/// stays invisible there.
+///
+/// Returns an empty list -- rather than failing the whole palette -- if
+/// the file can't be read, doesn't parse, throws while its top level runs,
+/// or declares no `COMMANDS`.
+#[cfg(feature = "tui")]
+pub(crate) fn discover_commands(script_path: &std::path::Path) -> Vec<ImportedCommand> {
+    let Ok(source) = fs::read_to_string(script_path) else {
+        return Vec::new();
+    };
+    let mut engine = Engine::new();
+    engine.on_print(|_| {});
+    engine.on_debug(|_, _, _| {});
+    register_doc_api(&mut engine);
+    let Ok(ast) = engine.compile(&source) else {
+        return Vec::new();
+    };
+    let mut scope = Scope::new();
+    if engine
+        .eval_ast_with_scope::<Dynamic>(&mut scope, &ast)
+        .is_err()
+    {
+        return Vec::new();
+    }
+    scope
+        .get_value::<Array>("COMMANDS")
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|value| value.into_string().ok())
+        .map(|name| ImportedCommand { name })
+        .collect()
+}
+
+/// Runs the function `fn_name` from the script at `script_path` with
+/// `(doc, target)` as its two arguments -- `doc` bound to `document`,
+/// `target` the *`Node`* for the gnx selected when the command was invoked
+/// from the palette (not a bare gnx string -- unlike `@action`'s
+/// predefined `target`/`p` pair, a command has only one slot for "the
+/// current position", so it gets the more useful of the two forms
+/// directly; `target.gnx` recovers the string if a script needs it) --
+/// what the action palette does for a command an `@import`ed script's
+/// `COMMANDS` array named (see [`discover_commands`]). Mirrors
+/// [`run_bound`]'s output/mutation contract, but calls one named function
+/// instead of evaluating a whole script body -- and since a plain rhai
+/// `fn` can't see the caller's scope the way a whole evaluated script body
+/// can, `target` has to be passed as a real argument here rather than
+/// predefined in `scope` the way `run_bound` does it. Fails (rather than
+/// calling `fn_name` at all) if `target_gnx` no longer resolves to a node
+/// in `document`.
+#[cfg(feature = "tui")]
+pub(crate) fn run_command(
+    document: LeoDocument,
+    path: PathBuf,
+    script_path: &std::path::Path,
+    target_gnx: &str,
+    fn_name: &str,
+) -> BoundOutcome {
+    let source = match fs::read_to_string(script_path) {
+        Ok(source) => source,
+        Err(error) => {
+            return BoundOutcome {
+                document,
+                touched: false,
+                status: Some(1),
+                stdout: String::new(),
+                stderr: format!("read {}: {error}", script_path.display()),
+            };
+        }
+    };
+
+    let output = Rc::new(RefCell::new(String::new()));
+    let print_output = output.clone();
+    let debug_output = output.clone();
+
+    let mut engine = Engine::new();
+    engine.on_print(move |s| {
+        let mut output = print_output.borrow_mut();
+        output.push_str(s);
+        output.push('\n');
+    });
+    engine.on_debug(move |s, source, pos| {
+        let mut output = debug_output.borrow_mut();
+        match source {
+            Some(source) => output.push_str(&format!("{source} @ {pos:?} | {s}\n")),
+            None => output.push_str(&format!("{pos:?} | {s}\n")),
+        }
+    });
+    register_doc_api(&mut engine);
+
+    let ast = match engine.compile(&source) {
+        Ok(ast) => ast,
+        Err(error) => {
+            return BoundOutcome {
+                document,
+                touched: false,
+                status: Some(1),
+                stdout: output.borrow().clone(),
+                stderr: format!("{}: {error}", script_path.display()),
+            };
+        }
+    };
+
+    let mut scope = Scope::new();
+    // Runs the script's top-level `let`/`const` statements (`COMMANDS`
+    // among them) before the call below -- consistent with how a normal
+    // module load would make those available to the function it calls.
+    if let Err(error) = engine.eval_ast_with_scope::<Dynamic>(&mut scope, &ast) {
+        return BoundOutcome {
+            document,
+            touched: false,
+            status: Some(1),
+            stdout: output.borrow().clone(),
+            stderr: error.to_string(),
+        };
+    }
+
+    let mut doc = Doc::bind(document, path);
+    let target = match doc.node(target_gnx) {
+        Ok(node) => node,
+        Err(error) => {
+            return BoundOutcome {
+                document: doc.into_document(),
+                touched: false,
+                status: Some(1),
+                stdout: output.borrow().clone(),
+                stderr: error.to_string(),
+            };
+        }
+    };
+    let call_result = engine.call_fn::<Dynamic>(&mut scope, &ast, fn_name, (doc.clone(), target));
+    let touched = doc.touched();
+    let document = doc.into_document();
+
+    match call_result {
+        Ok(_) => BoundOutcome {
+            document,
+            touched,
+            status: Some(0),
+            stdout: output.borrow().clone(),
+            stderr: String::new(),
+        },
+        Err(error) => BoundOutcome {
+            document,
+            touched,
+            status: Some(1),
+            stdout: output.borrow().clone(),
+            stderr: error.to_string(),
+        },
+    }
+}

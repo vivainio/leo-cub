@@ -84,7 +84,7 @@ struct App {
     logs: VecDeque<String>,
     log_view: bool,
     log_scroll: usize,
-    log_repl: Option<String>,
+    log_repl: Option<ReplInput>,
     dirty: bool,
     dirty_nodes: HashSet<NodeId>,
     updated_nodes: HashSet<NodeId>,
@@ -407,10 +407,40 @@ struct FindInput {
     original: Option<PositionId>,
 }
 
+struct ReplInput {
+    value: String,
+    cursor: usize,
+}
+
+impl ReplInput {
+    fn new(value: impl Into<String>) -> Self {
+        let value = value.into();
+        let cursor = value.len();
+        Self { value, cursor }
+    }
+}
+
 struct ActionPalette {
     query: String,
-    matches: Vec<PositionId>,
+    matches: Vec<PaletteEntry>,
     active: usize,
+}
+
+/// One entry in the action palette (`Shift-A`): either an `@action` node in
+/// the outline, or a zero-input command an `@import`ed script's `COMMANDS`
+/// array names (see `discover_commands`). `label` is precomputed at
+/// [`palette_entries`] time so filtering/drawing never need to re-walk the
+/// outline or re-read a script per entry.
+#[derive(Clone, Debug, PartialEq)]
+struct PaletteEntry {
+    label: String,
+    kind: PaletteEntryKind,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum PaletteEntryKind {
+    Action(PositionId),
+    Command { script: PathBuf, name: String },
 }
 
 struct CommandPalette {
@@ -1096,7 +1126,7 @@ fn handle_log_view_key(app: &mut App, key: KeyEvent) {
             app.log_view = false;
             app.log_repl = None;
         }
-        KeyCode::Enter => app.log_repl = Some(String::new()),
+        KeyCode::Enter => app.log_repl = Some(ReplInput::new("")),
         KeyCode::Up => app.log_scroll = app.log_scroll.saturating_add(1),
         KeyCode::Down => app.log_scroll = app.log_scroll.saturating_sub(1),
         KeyCode::PageUp => app.log_scroll = app.log_scroll.saturating_add(20),
@@ -1106,26 +1136,62 @@ fn handle_log_view_key(app: &mut App, key: KeyEvent) {
 }
 
 fn handle_log_repl_key(app: &mut App, key: KeyEvent) {
+    let input = app.log_repl.as_mut().expect("repl input exists");
     match key.code {
         KeyCode::Esc => app.log_repl = None,
         KeyCode::Enter => {
-            let snippet = app.log_repl.replace(String::new()).unwrap_or_default();
-            if !snippet.is_empty() {
-                run_repl_snippet(app, &snippet);
+            let input = app.log_repl.take().expect("repl input exists");
+            if !input.value.is_empty() {
+                run_repl_snippet(app, &input.value);
             }
         }
         KeyCode::Backspace => {
-            app.log_repl.as_mut().expect("repl input exists").pop();
+            if input.cursor > 0 {
+                let previous = input.value[..input.cursor]
+                    .char_indices()
+                    .next_back()
+                    .map_or(0, |(index, _)| index);
+                input.value.drain(previous..input.cursor);
+                input.cursor = previous;
+            }
         }
+        KeyCode::Delete => {
+            if input.cursor < input.value.len() {
+                let next = input.cursor
+                    + input.value[input.cursor..]
+                        .chars()
+                        .next()
+                        .expect("cursor precedes a character")
+                        .len_utf8();
+                input.value.drain(input.cursor..next);
+            }
+        }
+        KeyCode::Left => {
+            if input.cursor > 0 {
+                input.cursor = input.value[..input.cursor]
+                    .char_indices()
+                    .next_back()
+                    .map_or(0, |(index, _)| index);
+            }
+        }
+        KeyCode::Right => {
+            if input.cursor < input.value.len() {
+                input.cursor += input.value[input.cursor..]
+                    .chars()
+                    .next()
+                    .expect("cursor precedes a character")
+                    .len_utf8();
+            }
+        }
+        KeyCode::Home => input.cursor = 0,
+        KeyCode::End => input.cursor = input.value.len(),
         KeyCode::Char(character)
             if !key
                 .modifiers
                 .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
         {
-            app.log_repl
-                .as_mut()
-                .expect("repl input exists")
-                .push(character);
+            input.value.insert(input.cursor, character);
+            input.cursor += character.len_utf8();
         }
         _ => {}
     }
@@ -1317,13 +1383,88 @@ fn action_rows(outline: &Outline) -> Vec<Row> {
         .collect()
 }
 
+/// An `@import path.rhai` node registers every function that path's script
+/// lists in its `COMMANDS` array as a runnable command in the action
+/// palette. Unlike `@action`, an import applies outline-wide regardless of
+/// where its node sits in the tree, and it has no body of its own to run
+/// -- only the headline's path argument matters.
+fn is_import_headline(headline: &str) -> bool {
+    let trimmed = headline.trim_start();
+    trimmed.starts_with("@import ") || trimmed.starts_with("@import\t")
+}
+
+fn import_path_arg(headline: &str) -> &str {
+    headline
+        .trim_start()
+        .strip_prefix("@import")
+        .unwrap_or("")
+        .trim()
+}
+
+/// The resolved, deduplicated paths every `@import` node in the outline
+/// names, in no particular order -- imports apply outline-wide, so this
+/// scans every node once by gnx (`outline.nodes`) rather than every
+/// position, unlike `action_rows`, where a clone occurrence matters.
+/// Relative paths resolve against the open `.leo` file's own directory,
+/// the same convention `doc.sh`'s default `cwd` uses.
+fn import_script_paths(app: &App) -> Vec<PathBuf> {
+    let dir = app
+        .path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let mut paths: Vec<PathBuf> = app
+        .document
+        .outline
+        .nodes
+        .values()
+        .filter(|node| is_import_headline(&node.headline))
+        .map(|node| import_path_arg(&node.headline))
+        .filter(|path| !path.is_empty())
+        .map(|path| dir.join(path))
+        .collect();
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+/// Every entry the action palette (`Shift-A`) offers: `@action` nodes from
+/// the outline, plus commands discovered from every `@import`ed script's
+/// `COMMANDS` array. Recomputed on open and on every keystroke (like
+/// `action_rows` before it) rather than cached -- outlines and imported
+/// scripts are both small enough that re-scanning is cheap, and this way
+/// the palette never shows a command a script no longer declares.
+fn palette_entries(app: &App) -> Vec<PaletteEntry> {
+    let outline = &app.document.outline;
+    let mut entries: Vec<PaletteEntry> = action_rows(outline)
+        .into_iter()
+        .map(|row| PaletteEntry {
+            label: action_name(&outline.nodes[&row.node].headline).to_owned(),
+            kind: PaletteEntryKind::Action(row.position),
+        })
+        .collect();
+    for script in import_script_paths(app) {
+        let stem = script
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("script");
+        for command in crate::rhai_run::discover_commands(&script) {
+            entries.push(PaletteEntry {
+                label: format!("{}  ({stem})", command.name),
+                kind: PaletteEntryKind::Command {
+                    script: script.clone(),
+                    name: command.name,
+                },
+            });
+        }
+    }
+    entries
+}
+
 fn start_palette(app: &mut App) {
     app.palette = Some(ActionPalette {
         query: String::new(),
-        matches: action_rows(&app.document.outline)
-            .into_iter()
-            .map(|row| row.position)
-            .collect(),
+        matches: palette_entries(app),
         active: 0,
     });
     app.status = "run action: type to filter, Enter runs, Esc cancels".into();
@@ -1332,23 +1473,36 @@ fn start_palette(app: &mut App) {
 fn handle_palette_input(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::Enter => {
-            let position = app
+            let entry = app
                 .palette
                 .as_ref()
                 .and_then(|palette| palette.matches.get(palette.active).cloned());
             app.palette = None;
-            if let Some(position) = position {
-                // Capture the selection as it stood *before* the action node
-                // takes it over below, so the env vars describe the node the
-                // user meant to act on, not the action node itself.
-                let target = app
-                    .selected_row()
-                    .map(|row| row.position)
-                    .unwrap_or_else(|| position.clone());
-                reveal_and_select(app, &position);
-                run_action(app, &position, &target);
-            } else {
-                app.status = "no matching action".into();
+            match entry {
+                Some(PaletteEntry {
+                    kind: PaletteEntryKind::Action(position),
+                    ..
+                }) => {
+                    // Capture the selection as it stood *before* the action
+                    // node takes it over below, so the env vars describe the
+                    // node the user meant to act on, not the action node
+                    // itself.
+                    let target = app
+                        .selected_row()
+                        .map(|row| row.position)
+                        .unwrap_or_else(|| position.clone());
+                    reveal_and_select(app, &position);
+                    run_action(app, &position, &target);
+                }
+                Some(PaletteEntry {
+                    kind: PaletteEntryKind::Command { script, name },
+                    ..
+                }) => {
+                    run_command(app, &script, &name);
+                }
+                None => {
+                    app.status = "no matching action".into();
+                }
             }
         }
         KeyCode::Esc => {
@@ -1388,14 +1542,9 @@ fn update_palette_matches(app: &mut App) {
         .expect("palette input exists")
         .query
         .to_lowercase();
-    let matches = action_rows(&app.document.outline)
+    let matches = palette_entries(app)
         .into_iter()
-        .filter(|row| {
-            action_name(&app.document.outline.nodes[&row.node].headline)
-                .to_lowercase()
-                .contains(&query)
-        })
-        .map(|row| row.position)
+        .filter(|entry| entry.label.to_lowercase().contains(&query))
         .collect::<Vec<_>>();
     let palette = app.palette.as_mut().expect("palette input exists");
     palette.active = palette.active.min(matches.len().saturating_sub(1));
@@ -1806,6 +1955,54 @@ fn run_action(app: &mut App, position: &PositionId, target: &PositionId) {
         node: row.node,
         name,
         interpreter,
+        status,
+        text,
+    });
+}
+
+/// Runs the palette command named `fn_name` from the `@import`ed script at
+/// `script` and puts the result in `app.action_output`, shown in the
+/// currently selected node's body pane until the selection moves -- unlike
+/// `run_action`, a command isn't itself an outline node, so there's no
+/// action node to reveal/select first; whatever was already selected keeps
+/// its place, is passed to the command as `target`, and shows the output.
+fn run_command(app: &mut App, script: &Path, fn_name: &str) {
+    let Some(row) = app.selected_row() else {
+        app.status = format!("select a node first to run '{fn_name}'");
+        return;
+    };
+    let node = row.node.clone();
+    let target = node.0.clone();
+
+    app.status = format!("running '{fn_name}' with rhai...");
+    let document = std::mem::replace(&mut app.document, LeoDocument::empty());
+    let outcome =
+        crate::rhai_run::run_command(document, app.path.clone(), script, &target, fn_name);
+    app.document = outcome.document;
+    if outcome.touched {
+        mark_outline_touched(app);
+    }
+    push_log_lines(app, fn_name, &outcome.stdout);
+    push_log_lines(app, fn_name, &outcome.stderr);
+    let (status, stdout, stderr) = (outcome.status, outcome.stdout, outcome.stderr);
+
+    let mut text = stdout;
+    if !stderr.is_empty() {
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(&stderr);
+    }
+
+    app.status = match status {
+        Some(0) => format!("'{fn_name}' finished"),
+        Some(code) => format!("'{fn_name}' exited with status {code}"),
+        None => format!("'{fn_name}' did not complete"),
+    };
+    app.action_output = Some(ActionOutput {
+        node,
+        name: fn_name.to_owned(),
+        interpreter: "rhai",
         status,
         text,
     });
@@ -3062,7 +3259,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
             &app.document.outline,
         );
     } else if let Some(palette) = &app.palette {
-        draw_palette_panel(frame, areas[1], palette, &app.document.outline);
+        draw_palette_panel(frame, areas[1], palette);
     } else if let Some(palette) = &app.command_palette {
         draw_command_palette_panel(frame, areas[1], palette);
     } else {
@@ -3142,9 +3339,10 @@ fn draw_log(frame: &mut ratatui::Frame<'_>, app: &App) {
         .collect();
     frame.render_widget(Paragraph::new(lines), log_area);
 
-    if let (Some(input_area), Some(buffer)) = (input_area, app.log_repl.as_ref()) {
+    if let (Some(input_area), Some(input)) = (input_area, app.log_repl.as_ref()) {
+        let (before, after) = input.value.split_at(input.cursor);
         frame.render_widget(
-            Paragraph::new(Line::from(format!("> {buffer}"))),
+            Paragraph::new(Line::from(format!("> {before}▏{after}"))),
             input_area,
         );
     }
@@ -3199,15 +3397,10 @@ fn draw_finder_panel(
     frame.render_widget(Paragraph::new(lines), area);
 }
 
-/// Renders the docked action palette (`Shift-A`), listing `@action` node names
+/// Renders the docked action palette (`Shift-A`), listing `@action` node
+/// names and imported commands (labels precomputed by `palette_entries`)
 /// rather than full headlines. Laid out the same as `draw_finder_panel`.
-fn draw_palette_panel(
-    frame: &mut ratatui::Frame<'_>,
-    area: Rect,
-    state: &ActionPalette,
-    outline: &Outline,
-) {
-    let rows = action_rows(outline);
+fn draw_palette_panel(frame: &mut ratatui::Frame<'_>, area: Rect, state: &ActionPalette) {
     let shown = state
         .matches
         .len()
@@ -3219,18 +3412,13 @@ fn draw_palette_panel(
         .enumerate()
         .skip(first)
         .take(shown)
-        .map(|(index, position)| {
-            let row = rows
-                .iter()
-                .find(|row| &row.position == position)
-                .expect("matched position exists");
+        .map(|(index, entry)| {
             let marker = if index == state.active { "› " } else { "  " };
-            let name = action_name(&outline.nodes[&row.node].headline);
-            Line::from(format!("{marker}{name}"))
+            Line::from(format!("{marker}{}", entry.label))
         })
         .collect();
-    let count = if rows.is_empty() {
-        "no @action nodes in this outline".to_owned()
+    let count = if state.matches.is_empty() && state.query.is_empty() {
+        "no @action nodes or imported commands in this outline".to_owned()
     } else if state.matches.is_empty() {
         "no matches".into()
     } else {
@@ -4726,7 +4914,74 @@ mod tests {
             KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE),
         );
         let palette = app.palette.as_ref().unwrap();
-        assert_eq!(palette.matches, vec![PositionId("0".into())]);
+        assert_eq!(
+            palette.matches,
+            vec![PaletteEntry {
+                label: "Build".into(),
+                kind: PaletteEntryKind::Action(PositionId("0".into())),
+            }]
+        );
+    }
+
+    #[test]
+    fn palette_lists_and_runs_commands_from_an_imported_script() {
+        let directory = env::temp_dir().join(format!(
+            "leo-cub-tui-import-rhai-{}-{}",
+            std::process::id(),
+            fresh_node_id().0
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            directory.join("lib.rhai"),
+            r#"
+const COMMANDS = ["greet"];
+
+fn greet(doc, target) {
+    target.h = target.h + " done";
+    print("greeted " + target.h);
+}
+
+fn private_helper(doc, target) {
+    doc.count()
+}
+"#,
+        )
+        .unwrap();
+
+        let mut app = editing_app();
+        app.path = directory.join("outline.leo");
+        app.document
+            .outline
+            .nodes
+            .get_mut(&NodeId::from("c"))
+            .unwrap()
+            .headline = "@import lib.rhai".into();
+
+        start_palette(&mut app);
+        // "greet" is listed (it's in COMMANDS); "private_helper" isn't, even
+        // though it's a function in the same script.
+        assert_eq!(
+            app.palette.as_ref().unwrap().matches,
+            vec![PaletteEntry {
+                label: "greet  (lib)".into(),
+                kind: PaletteEntryKind::Command {
+                    script: directory.join("lib.rhai"),
+                    name: "greet".into(),
+                },
+            }]
+        );
+
+        handle_palette_input(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(
+            app.document.outline.nodes[&NodeId::from("a")].headline,
+            "A done"
+        );
+        assert!(app.status.starts_with("'greet' finished"));
+        let output = app.action_output.as_ref().expect("command produced output");
+        assert_eq!(output.text.trim(), "greeted A done");
+
+        fs::remove_dir_all(&directory).ok();
     }
 
     #[test]
@@ -4939,13 +5194,13 @@ mod tests {
             "no REPL line until Enter is pressed"
         );
 
-        app.log_repl = Some("print(1)".into());
+        app.log_repl = Some(ReplInput::new("print(1)"));
         terminal.draw(|frame| draw(frame, &mut app)).unwrap();
         let screen = terminal.backend().buffer().content[..]
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(screen.contains("> print(1)"), "{screen:?}");
+        assert!(screen.contains("> print(1)▏"), "{screen:?}");
     }
 
     #[test]
@@ -4989,14 +5244,79 @@ mod tests {
             app.log_view,
             "log view must stay open while typing in the REPL"
         );
-        assert_eq!(app.log_repl.as_deref(), Some("l"));
+        assert_eq!(
+            app.log_repl.as_ref().map(|input| input.value.as_str()),
+            Some("l")
+        );
+    }
+
+    #[test]
+    fn left_and_right_move_the_repl_cursor_for_mid_string_editing() {
+        let mut app = editing_app();
+        app.log_view = true;
+        app.log_repl = Some(ReplInput::new("ac"));
+        app.log_repl.as_mut().unwrap().cursor = 1;
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE),
+            None,
+        );
+        assert_eq!(
+            app.log_repl.as_ref().map(|input| input.value.as_str()),
+            Some("abc")
+        );
+        assert_eq!(app.log_repl.as_ref().unwrap().cursor, 2);
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+            None,
+        );
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+            None,
+        );
+        assert_eq!(app.log_repl.as_ref().unwrap().cursor, 0);
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+            None,
+        );
+        assert_eq!(app.log_repl.as_ref().unwrap().cursor, 1);
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::End, KeyModifiers::NONE),
+            None,
+        );
+        assert_eq!(app.log_repl.as_ref().unwrap().cursor, 3);
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Home, KeyModifiers::NONE),
+            None,
+        );
+        assert_eq!(app.log_repl.as_ref().unwrap().cursor, 0);
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE),
+            None,
+        );
+        assert_eq!(
+            app.log_repl.as_ref().map(|input| input.value.as_str()),
+            Some("bc")
+        );
     }
 
     #[test]
     fn esc_leaves_the_repl_but_keeps_the_log_view_open_then_closes_it() {
         let mut app = editing_app();
         app.log_view = true;
-        app.log_repl = Some("print(1)".into());
+        app.log_repl = Some(ReplInput::new("print(1)"));
 
         handle_key(
             &mut app,
@@ -5025,7 +5345,7 @@ mod tests {
         let mut app = editing_app();
         app.selected = 2; // row "0/1" -> node "c"
         app.log_view = true;
-        app.log_repl = Some(String::new());
+        app.log_repl = Some(ReplInput::new(""));
 
         for character in "print(p.h);".chars() {
             handle_key(
@@ -5051,7 +5371,7 @@ mod tests {
             app.logs
         );
 
-        app.log_repl = Some(String::new());
+        app.log_repl = Some(ReplInput::new(""));
         for character in "doc.set_headline(target, \"C renamed\");".chars() {
             handle_key(
                 &mut app,
