@@ -16,6 +16,9 @@ Start with `cub run` when experimenting outside the editor. Use an `@action`
 when the behavior belongs in one outline, and `@import` when it belongs in a
 regular source file.
 
+`cub SCRIPT.rhai` (no `run`) works too -- the same shorthand as `cub
+notes.leo` opening the TUI, dispatched by the file's `.rhai` extension.
+
 ## Run your first script
 
 Create `notes.rhai`:

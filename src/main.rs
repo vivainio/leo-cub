@@ -26,7 +26,8 @@ mod tui;
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
-    /// Outline to browse interactively when no subcommand is given.
+    /// Outline to browse interactively when no subcommand is given (or, for
+    /// a `.rhai` file, the script to run -- shorthand for `cub run`).
     #[cfg(feature = "tui")]
     file: Option<PathBuf>,
     /// Show only the hierarchy stored directly in the .leo XML.
@@ -299,6 +300,9 @@ fn main() -> Result<()> {
     #[cfg(feature = "tui")]
     let command = match (cli.command, cli.file) {
         (Some(command), None) => command,
+        (None, Some(file)) if file.extension().and_then(|ext| ext.to_str()) == Some("rhai") => {
+            Command::Run { script: file }
+        }
         (None, Some(file)) => Command::Tui {
             file,
             no_derived: cli.no_derived,
