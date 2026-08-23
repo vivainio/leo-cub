@@ -368,6 +368,66 @@ fn cub_run_disambiguates_clone_occurrences_by_position() {
 }
 
 #[test]
+fn cub_run_node_remove_targets_the_exact_occurrence_not_the_defining_one() {
+    let leo_path = temp_path("rhai_run_node_remove.leo");
+    let _ = fs::remove_file(&leo_path);
+    LeoDocument::new("Root").save_new(&leo_path).unwrap();
+
+    let script_path = temp_path("rhai_run_node_remove.rhai");
+    let escaped_path = leo_path.display().to_string().replace('\\', "\\\\");
+    fs::write(
+        &script_path,
+        format!(
+            r#"
+            let doc = open("{escaped_path}");
+            let shared_gnx = doc.ensure("Root/Shared").gnx;
+            let team_b = doc.ensure("Root/Team B").gnx;
+            doc.clone_node(shared_gnx, team_b);
+
+            // The clone under Team B, anchored to that exact occurrence --
+            // not the defining one under Root.
+            let root = doc.node_at("0");
+            let team_b_node = root.children()[1];
+            let cloned = team_b_node.children()[0];
+            assert_eq(cloned.gnx, shared_gnx);
+            assert_eq(cloned.path(), "Root/Team B/Shared");
+
+            // Removing it deletes only that occurrence: the defining one
+            // under Root survives and stays the defining occurrence.
+            cloned.remove();
+            assert_eq(team_b_node.children().len(), 0);
+            assert_eq(doc.gnx("Root/Shared"), shared_gnx);
+            assert_eq(doc.parent(shared_gnx), doc.gnx("Root"));
+
+            // A bare-gnx handle has no position, so it falls back to
+            // Doc::remove's defining-occurrence behavior.
+            let bare = doc.node(shared_gnx);
+            assert_eq(bare.position, "");
+            bare.remove();
+            assert(doc.find_h("^Shared$").len() == 0, "defining occurrence should be gone");
+
+            assert_eq(doc.validate().len(), 0);
+            doc.save();
+            print("ok");
+            "#
+        ),
+    )
+    .unwrap();
+
+    let output = run_cub(&["run", script_path.to_str().unwrap()]);
+    assert!(
+        output.status.success(),
+        "cub run failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("ok"));
+
+    let saved = LeoDocument::open(&leo_path).unwrap();
+    assert!(saved.outline.validate().is_empty());
+}
+
+#[test]
 fn cub_run_exits_nonzero_and_reports_the_failed_assertion() {
     let script_path = temp_path("rhai_run_failure.rhai");
     fs::write(&script_path, "assert_eq(1, 2);").unwrap();
