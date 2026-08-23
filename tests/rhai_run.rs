@@ -506,16 +506,64 @@ fn cub_run_promotes_an_auto_node_to_at_f_by_renaming_and_saving() {
 #[cfg(feature = "tui")]
 fn cub_dispatches_a_bare_rhai_file_as_run_without_the_subcommand() {
     let script_path = temp_path("rhai_shorthand.rhai");
-    fs::write(&script_path, "print(\"ran via shorthand\");").unwrap();
+    fs::write(
+        &script_path,
+        r#"print("ran via shorthand, ARGS=" + ARGS.len());"#,
+    )
+    .unwrap();
 
-    let output = run_cub(&[script_path.to_str().unwrap()]);
+    let output = run_cub(&[script_path.to_str().unwrap(), "one", "two"]);
     assert!(
         output.status.success(),
         "cub <script.rhai> failed:\nstdout: {}\nstderr: {}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("ran via shorthand"));
+    // The shorthand passes trailing arguments through as ARGS too.
+    assert!(String::from_utf8_lossy(&output.stdout).contains("ran via shorthand, ARGS=2"));
+}
+
+#[test]
+fn cub_run_exposes_trailing_arguments_as_args() {
+    let script_path = temp_path("rhai_run_args.rhai");
+    fs::write(
+        &script_path,
+        r#"
+        assert_eq(ARGS.len(), 2);
+        assert_eq(ARGS[0], "notes.leo");
+        assert_eq(ARGS[1], "with a space");
+        print("saw " + ARGS.len() + " args");
+        "#,
+    )
+    .unwrap();
+
+    let output = run_cub(&[
+        "run",
+        script_path.to_str().unwrap(),
+        "notes.leo",
+        "with a space",
+    ]);
+    assert!(
+        output.status.success(),
+        "cub run failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("saw 2 args"));
+}
+
+#[test]
+fn cub_run_args_is_empty_when_none_are_given() {
+    let script_path = temp_path("rhai_run_no_args.rhai");
+    fs::write(&script_path, "assert_eq(ARGS.len(), 0);").unwrap();
+
+    let output = run_cub(&["run", script_path.to_str().unwrap()]);
+    assert!(
+        output.status.success(),
+        "cub run failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
