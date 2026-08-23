@@ -21,10 +21,9 @@ use crossterm::{
 };
 use leo::{
     DerivedJob, LeoDocument, NodeId, OriginalExternalState, Outline, Position, PositionId,
-    SourceLocation, WritableExternalFile, comment_delimiters, derived_filename, external_filename,
-    external_format, load_derived_files, load_derived_jobs, path_directive,
-    prepare_external_updates, referenced_nodes, restore_external_state, search_outline,
-    write_external_updates,
+    SourceLocation, WritableExternalFile, derived_filename, external_filename, external_format,
+    load_derived_files, load_derived_jobs, path_directive, referenced_nodes, save_document,
+    search_outline, track_external_rename,
 };
 use ratatui::{
     Terminal,
@@ -2161,26 +2160,17 @@ fn handle_headline_input(app: &mut App, key: KeyEvent) {
                 .expect("edited node exists")
                 .headline = headline.clone();
             if let Some(row) = app.rows().iter().find(|row| row.node == node_id).cloned()
-                && let Some(filename) = external_filename(&headline)
+                && external_filename(&headline).is_some()
             {
-                let (start_delimiter, end_delimiter) = comment_delimiters(Path::new(filename));
                 let path = dynamic_source_location(app, &row)
                     .map(|location| location.path)
                     .expect("edited external node has a source path");
-                app.writable_external
-                    .entry(node_id.clone())
-                    .and_modify(|file| {
-                        file.path = path.clone();
-                        file.start_delimiter = start_delimiter.to_owned();
-                        file.end_delimiter = end_delimiter.to_owned();
-                    })
-                    .or_insert(WritableExternalFile {
-                        path,
-                        start_delimiter: start_delimiter.to_owned(),
-                        end_delimiter: end_delimiter.to_owned(),
-                        original: Outline::default(),
-                        format: external_format(&headline),
-                    });
+                track_external_rename(
+                    &mut app.writable_external,
+                    node_id.clone(),
+                    path,
+                    external_format(&headline),
+                );
             }
             app.dirty_nodes.insert(node_id);
             app.input = None;
@@ -2753,37 +2743,13 @@ fn move_selected_block(app: &mut App, direction: MoveDirection, rows: Vec<Row>) 
 }
 
 fn save(app: &mut App) {
-    let external_updates =
-        match prepare_external_updates(&app.document.outline, &app.writable_external) {
-            Ok(updates) => updates,
-            Err(error) => {
-                app.status = format!("save failed: {error}");
-                return;
-            }
-        };
-    let mut persisted = app.document.clone();
-    restore_external_state(
-        &mut persisted.outline,
-        &app.original_external.children,
-        &app.original_external.bodies,
-        &app.original_external.nodes,
-    );
-    let referenced = referenced_nodes(&persisted.outline.roots);
-    persisted
-        .outline
-        .nodes
-        .retain(|id, _| referenced.contains(id));
-    if let Err(error) = write_external_updates(&external_updates) {
-        app.status = format!("save failed: {error}");
-        return;
-    }
-    match persisted.save(&app.path) {
+    match save_document(
+        &app.document,
+        &app.path,
+        &mut app.writable_external,
+        &app.original_external,
+    ) {
         Ok(()) => {
-            for update in external_updates {
-                if let Some(file) = app.writable_external.get_mut(&update.root) {
-                    file.original = update.snapshot;
-                }
-            }
             app.dirty = false;
             app.dirty_nodes.clear();
             app.quit_armed = false;
