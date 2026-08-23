@@ -23,9 +23,8 @@ use std::{
 use anyhow::{Context, Result};
 use leo::{
     LeoDocument, NodeId, Operation, OperationBatch, OriginalExternalState, Position, PositionId,
-    WritableExternalFile, comment_delimiters, external_filename, external_format,
-    load_derived_files, prepare_external_updates, referenced_nodes, restore_external_state,
-    write_external_updates,
+    WritableExternalFile, external_filename, external_format, load_derived_files, save_document,
+    track_external_rename,
 };
 use regex::Regex;
 #[cfg(feature = "tui")]
@@ -494,22 +493,12 @@ impl Doc {
                 .map(Path::to_path_buf)
                 .unwrap_or_else(|| PathBuf::from("."));
             let path = base.join(filename);
-            let (start_delimiter, end_delimiter) = comment_delimiters(&path);
-            inner
-                .writable_external
-                .entry(NodeId(gnx.to_owned()))
-                .and_modify(|file| {
-                    file.path = path.clone();
-                    file.start_delimiter = start_delimiter.to_owned();
-                    file.end_delimiter = end_delimiter.to_owned();
-                })
-                .or_insert(WritableExternalFile {
-                    path,
-                    start_delimiter: start_delimiter.to_owned(),
-                    end_delimiter: end_delimiter.to_owned(),
-                    original: leo::Outline::default(),
-                    format: external_format(text),
-                });
+            track_external_rename(
+                &mut inner.writable_external,
+                NodeId(gnx.to_owned()),
+                path,
+                external_format(text),
+            );
         }
         Ok(())
     }
@@ -636,36 +625,19 @@ impl Doc {
 
     /// Writes any diverged `writable_external` file (see `set_headline`)
     /// out with its own sentinels first, then serializes `document` to
-    /// `.leo` XML at `path` -- with derived/writable content restored to
-    /// its on-disk (pre-merge) shape first, so it doesn't get baked into
-    /// the `.leo` file itself. Mirrors `tui::save` exactly, so a script's
-    /// `open` -> `set_headline` -> `save` produces the same on-disk result
-    /// the same steps in the TUI would.
+    /// `.leo` XML at `path`. Mirrors `tui::save` exactly (both call the
+    /// same `leo::save_document`), so a script's `open` -> `set_headline`
+    /// -> `save` produces the same on-disk result the same steps in the
+    /// TUI would.
     fn save_to(&mut self, path: &Path) -> RhaiResult<()> {
         let mut inner = self.inner.borrow_mut();
-        let external_updates =
-            prepare_external_updates(&inner.document.outline, &inner.writable_external)
-                .map_err(rhai_err)?;
-        let mut persisted = inner.document.clone();
-        restore_external_state(
-            &mut persisted.outline,
-            &inner.original_external.children,
-            &inner.original_external.bodies,
-            &inner.original_external.nodes,
-        );
-        let referenced = referenced_nodes(&persisted.outline.roots);
-        persisted
-            .outline
-            .nodes
-            .retain(|id, _| referenced.contains(id));
-        write_external_updates(&external_updates).map_err(rhai_err)?;
-        persisted.save(path).map_err(rhai_err)?;
-        for update in external_updates {
-            if let Some(file) = inner.writable_external.get_mut(&update.root) {
-                file.original = update.snapshot;
-            }
-        }
-        Ok(())
+        let Inner {
+            document,
+            writable_external,
+            original_external,
+            ..
+        } = &mut *inner;
+        save_document(&*document, path, writable_external, original_external).map_err(rhai_err)
     }
 
     /// The escape hatch for the rare thing a script needs an external

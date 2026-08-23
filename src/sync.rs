@@ -46,6 +46,11 @@ pub enum SyncError {
         label: &'static str,
         source: crate::SentinelError,
     },
+    #[error("{path}: {source}")]
+    Save {
+        path: PathBuf,
+        source: crate::LeoXmlError,
+    },
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -354,6 +359,79 @@ pub struct WritableExternalFile {
     pub end_delimiter: String,
     pub original: Outline,
     pub format: ExternalFormat,
+}
+
+/// Starts (or updates) write-back tracking for `node` -- the bookkeeping a
+/// headline rename into an external directive (`@file`/`@thin`/
+/// `@file-thin`/`@f`/`@clean`) needs so a later [`save_document`] renders
+/// and writes it. `path` is the caller's already-resolved on-disk path for
+/// the new headline's filename; resolving it (including any ancestor
+/// `@path` directives) is the caller's job, since that resolution differs
+/// between the TUI (walks ancestors) and the rhai `Doc` API (doesn't).
+/// Shared by `tui::handle_headline_input` and `Doc::set_headline` so both
+/// track a rename identically.
+pub fn track_external_rename(
+    writable_external: &mut HashMap<NodeId, WritableExternalFile>,
+    node: NodeId,
+    path: PathBuf,
+    format: ExternalFormat,
+) {
+    let (start_delimiter, end_delimiter) = comment_delimiters(&path);
+    writable_external
+        .entry(node)
+        .and_modify(|file| {
+            file.path = path.clone();
+            file.start_delimiter = start_delimiter.to_owned();
+            file.end_delimiter = end_delimiter.to_owned();
+        })
+        .or_insert(WritableExternalFile {
+            path,
+            start_delimiter: start_delimiter.to_owned(),
+            end_delimiter: end_delimiter.to_owned(),
+            original: Outline::default(),
+            format,
+        });
+}
+
+/// Writes any diverged `writable_external` entry to its own file with
+/// sentinels, then serializes `document`'s outline to `.leo` XML at `path`
+/// -- with derived/writable content restored to its pre-merge, on-disk
+/// shape first (via `original_external`), so it isn't baked into the
+/// `.leo` file itself. On success, updates each written entry's `original`
+/// snapshot in place, so a later call only re-renders what changed since.
+/// Shared by `tui::save` and the rhai `Doc` API's `save`/`save_as`, so a
+/// script's `open`/`set_headline`/`save` produces the same on-disk result
+/// the same steps in the TUI would.
+pub fn save_document(
+    document: &LeoDocument,
+    path: &Path,
+    writable_external: &mut HashMap<NodeId, WritableExternalFile>,
+    original_external: &OriginalExternalState,
+) -> Result<(), SyncError> {
+    let external_updates = prepare_external_updates(&document.outline, writable_external)?;
+    let mut persisted = document.clone();
+    restore_external_state(
+        &mut persisted.outline,
+        &original_external.children,
+        &original_external.bodies,
+        &original_external.nodes,
+    );
+    let referenced = referenced_nodes(&persisted.outline.roots);
+    persisted
+        .outline
+        .nodes
+        .retain(|id, _| referenced.contains(id));
+    write_external_updates(&external_updates)?;
+    persisted.save(path).map_err(|source| SyncError::Save {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    for update in external_updates {
+        if let Some(file) = writable_external.get_mut(&update.root) {
+            file.original = update.snapshot;
+        }
+    }
+    Ok(())
 }
 
 /// The on-disk state of every writable external file at load time, captured
