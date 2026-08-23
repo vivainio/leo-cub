@@ -8,10 +8,11 @@ useful when an operation specifically requires a node id.
 
 | Signature | Description |
 | --- | --- |
-| `open(path: string) -> Doc` | Read a `.leo` file. In a TUI action, use the predefined `doc` instead. |
-| `doc.save()` | Write to the path from which the document was opened or bound. |
+| `open(path: string) -> Doc` | Read a `.leo` file. In a TUI action, use the predefined `doc` instead. Also loads and merges `@auto`/`@file`/`@thin`/`@file-thin`/`@f`/`@clean` content, same as the TUI. |
+| `doc.save()` | Write to the path from which the document was opened or bound, including any diverged `@file`/`@thin`/`@file-thin`/`@f`/`@clean` external file. |
 | `doc.save_as(path: string)` | Write to another path and use it for later `save()` calls. |
 | `doc.dir() -> string` | Directory containing the document, or `"."` when it has none. |
+| `ARGS` | Array of strings: the command-line arguments after the script path (`cub run script.rhai a b` -> `["a", "b"]`). `[]` when none were given. |
 
 ## Nodes
 

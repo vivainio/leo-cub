@@ -27,10 +27,8 @@ use leo::{
     track_external_rename,
 };
 use regex::Regex;
-#[cfg(feature = "tui")]
-use rhai::Scope;
 use rhai::packages::Package;
-use rhai::{Array, Dynamic, Engine, EvalAltResult};
+use rhai::{Array, Dynamic, Engine, EvalAltResult, Scope};
 
 /// The outline handle a script gets back from `open(path)` (or, for a bound
 /// `@action` script, from the predefined `doc`). Every method mutates or
@@ -993,8 +991,10 @@ fn register_doc_api(engine: &mut Engine) {
 }
 
 /// Runs a Rhai test script; returns an error (nonzero exit) if it fails to
-/// parse, throws, or fails an `assert`/`assert_eq`.
-pub fn run(script_path: &std::path::Path) -> Result<()> {
+/// parse, throws, or fails an `assert`/`assert_eq`. `args` -- whatever the
+/// CLI passed after the script path -- is predefined for it as `ARGS`, an
+/// array of strings (`[]` when none were given).
+pub fn run(script_path: &std::path::Path, args: &[String]) -> Result<()> {
     let source = fs::read_to_string(script_path)
         .with_context(|| format!("read script {}", script_path.display()))?;
     let mut engine = Engine::new();
@@ -1004,8 +1004,13 @@ pub fn run(script_path: &std::path::Path) -> Result<()> {
         None => eprintln!("{pos:?} | {s}"),
     });
     register_doc_api(&mut engine);
+    let mut scope = Scope::new();
+    scope.push_constant(
+        "ARGS",
+        args.iter().cloned().map(Dynamic::from).collect::<Array>(),
+    );
     let _: Dynamic = engine
-        .eval(&source)
+        .eval_with_scope(&mut scope, &source)
         .map_err(|error| anyhow::anyhow!("{error}"))
         .with_context(|| format!("run {}", script_path.display()))?;
     Ok(())

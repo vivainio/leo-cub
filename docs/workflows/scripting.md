@@ -191,6 +191,24 @@ callers decide what an absent key should default to.
 the current directory. Leave `@variables` (or the `repo` child) absent and
 `gh` falls back to its own default.
 
+`@variables` suits settings that belong to one outline. For a value that
+changes per invocation instead -- which outline to open, a one-off flag --
+pass it on the command line and read it from `ARGS`, an array of the
+strings after the script path:
+
+```sh
+cub run rename.rhai notes.leo "A/B/C" "new headline"
+```
+
+```rhai
+let doc = open(ARGS[0]);
+doc.set_headline(doc.gnx(ARGS[1]), ARGS[2]);
+doc.save();
+```
+
+`ARGS` is `[]` when no extra arguments were given, so a script that only
+sometimes needs one can check `ARGS.len()` first.
+
 ## Assertions, output, and errors
 
 ```rhai

@@ -34,6 +34,11 @@ struct Cli {
     #[cfg(feature = "tui")]
     #[arg(long, requires = "file")]
     no_derived: bool,
+    /// Extra arguments passed to a script run via the shorthand, available
+    /// to it as the ARGS array. Ignored when `file` is a `.leo` outline.
+    #[cfg(feature = "tui")]
+    #[arg(trailing_var_arg = true)]
+    script_args: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, ValueEnum)]
@@ -121,6 +126,12 @@ used by TUI actions:
   assert_eq(node.h, "C");
   doc.save();
 
+Extra arguments after the script are available to it as the ARGS array of
+strings:
+
+  cub run rename.rhai notes.leo "A/B/C" "new headline"
+  // rename.rhai: let doc = open(ARGS[0]); doc.set_headline(doc.gnx(ARGS[1]), ARGS[2]);
+
 See the scripting guide and Rhai API reference for actions, traversal,
 searching, operation batches, subprocesses, and filesystem access. A parsing
 error, thrown API error, or failed assertion produces a non-zero exit status."#
@@ -128,6 +139,9 @@ error, thrown API error, or failed assertion produces a non-zero exit status."#
     Run {
         /// Rhai script to execute.
         script: PathBuf,
+        /// Extra arguments, available to the script as the ARGS array.
+        #[arg(trailing_var_arg = true)]
+        args: Vec<String>,
     },
     Inspect {
         file: PathBuf,
@@ -301,7 +315,10 @@ fn main() -> Result<()> {
     let command = match (cli.command, cli.file) {
         (Some(command), None) => command,
         (None, Some(file)) if file.extension().and_then(|ext| ext.to_str()) == Some("rhai") => {
-            Command::Run { script: file }
+            Command::Run {
+                script: file,
+                args: cli.script_args,
+            }
         }
         (None, Some(file)) => Command::Tui {
             file,
@@ -369,7 +386,7 @@ fn main() -> Result<()> {
         #[cfg(feature = "tui")]
         Command::Tui { file, no_derived } => tui::run(file, !no_derived)?,
         #[cfg(feature = "rhai")]
-        Command::Run { script } => rhai_run::run(&script)?,
+        Command::Run { script, args } => rhai_run::run(&script, &args)?,
         Command::Inspect {
             file,
             external,
