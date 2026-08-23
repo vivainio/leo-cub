@@ -181,7 +181,7 @@ cloning only makes sense for a node that already has an identity. `"parent"`
 most one, omit both to clone to the outline root, and `"parent-headline"`
 creates any missing segments of the path the same way `cub add` does.
 
-A [rhai script](scripting.md#cloning-and-removing-a-node) can reach for
+A [rhai script](scripting.md#doc-only-operations) can reach for
 `doc.clone_node(gnx, parent_gnx)` instead of building this JSON by hand;
 unlike this JSON form it takes the parent as a gnx rather than a headline
 path, so resolve `"parent-headline"`-style paths with `doc.gnx`/`doc.add`

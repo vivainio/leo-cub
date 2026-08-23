@@ -478,10 +478,15 @@ impl Doc {
         Ok(gnx.to_owned())
     }
 
-    /// Removes `gnx`'s defining occurrence and its whole subtree from the
-    /// outline. If `gnx` is cloned elsewhere, those other occurrences are
-    /// left in place -- the next one in outline order becomes the new
-    /// defining occurrence. Fails if `gnx` isn't a node in the outline.
+    /// Removes `gnx`'s defining (first-in-outline) occurrence and its whole
+    /// subtree from the outline. If `gnx` is cloned elsewhere, those other
+    /// occurrences are left in place -- the next one in outline order
+    /// becomes the new defining occurrence. Fails if `gnx` isn't a node in
+    /// the outline. A bare gnx can't name a specific clone occurrence --
+    /// reach for [`Node::remove`] instead when a script holds a
+    /// position-anchored handle (`p`, `doc.node_at(...)`, `.children()`,
+    /// ...) and means "remove the one I'm looking at", not "remove
+    /// whichever occurrence happens to be first".
     fn remove(&mut self, gnx: &str) -> RhaiResult<()> {
         let batch = OperationBatch {
             operations: vec![Operation::ReplaceTree {
@@ -757,6 +762,28 @@ impl Node {
         self.doc.file_path(&self.gnx)
     }
 
+    /// Removes this handle's exact occurrence and its subtree, leaving every
+    /// other clone of the same node untouched -- including its defining
+    /// occurrence, if this isn't it. Needs a known `position` (built by
+    /// walking the tree -- `p`, `.parent()`, `.children()`, `.subtree()`,
+    /// `doc.node_at(...)`) to know which occurrence that is; a handle made
+    /// from a bare gnx (`doc.node(gnx)`, `find_h`/`find_b`) falls back to
+    /// [`Doc::remove`]'s defining-occurrence behavior, the same fallback
+    /// `.parent()`/`.path()` use when `position` isn't known.
+    fn remove(&mut self) -> RhaiResult<()> {
+        let Some(position) = self.position.clone() else {
+            return self.doc.remove(&self.gnx);
+        };
+        let batch = OperationBatch {
+            operations: vec![Operation::Remove { position }],
+            ..Default::default()
+        };
+        let mut inner = self.doc.inner.borrow_mut();
+        inner.document.outline.apply(&batch).map_err(rhai_err)?;
+        inner.touched = true;
+        Ok(())
+    }
+
     fn describe(&mut self) -> String {
         format!("Node({})", self.gnx)
     }
@@ -824,6 +851,7 @@ fn register_doc_api(engine: &mut Engine) {
     engine.register_get("position", Node::get_position);
     engine.register_fn("path", Node::path);
     engine.register_fn("file_path", Node::file_path);
+    engine.register_fn("remove", Node::remove);
     engine.register_fn("to_string", Node::describe);
 
     engine.register_fn("assert", |cond: bool| -> RhaiResult<()> {
