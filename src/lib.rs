@@ -2,6 +2,7 @@
 
 mod auto;
 mod clean;
+mod derive_load;
 mod derived;
 mod import;
 mod inspect;
@@ -14,6 +15,10 @@ mod xml;
 
 pub use auto::{AutoError, AutoFile};
 pub use clean::propagate_clean_changes;
+pub use derive_load::{
+    DerivedJob, LoadReport, SourceLocation, derived_filename, external_filename, external_format,
+    load_derived_files, load_derived_jobs, path_directive,
+};
 pub use derived::{DerivedFile, SentinelError};
 pub use import::{ImportError, ImportItem, ImportMode, ImportOptions, ImportReport, import_files};
 pub use inspect::{

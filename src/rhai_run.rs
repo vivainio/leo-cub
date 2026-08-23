@@ -11,12 +11,22 @@
 //!   `doc` is bound to the outline already open in the editor, and `target`
 //!   is predefined as the gnx of the node the action was invoked on.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::process::Command;
-use std::{cell::RefCell, fs, path::PathBuf, rc::Rc};
+use std::{
+    cell::RefCell,
+    fs,
+    path::{Path, PathBuf},
+    rc::Rc,
+};
 
 use anyhow::{Context, Result};
-use leo::{LeoDocument, NodeId, Operation, OperationBatch, Position, PositionId};
+use leo::{
+    LeoDocument, NodeId, Operation, OperationBatch, OriginalExternalState, Position, PositionId,
+    WritableExternalFile, comment_delimiters, external_filename, external_format,
+    load_derived_files, prepare_external_updates, referenced_nodes, restore_external_state,
+    write_external_updates,
+};
 use regex::Regex;
 #[cfg(feature = "tui")]
 use rhai::Scope;
@@ -44,6 +54,19 @@ struct Inner {
     /// layout/highlight caches) when a bound script actually changed
     /// something, rather than on every run.
     touched: bool,
+    /// `@file`/`@thin`/`@file-thin`/`@f`/`@clean` nodes `open` loaded (or a
+    /// script's `set_headline` turned into one -- see [`Doc::set_headline`]),
+    /// keyed by root node id. Mirrors the TUI App's own field of the same
+    /// name and drives `save`'s write-back the same way `tui::save` does:
+    /// a node here whose live subtree has diverged from `original` gets
+    /// rendered and written to `path` on save. Always empty for a `bind`ed
+    /// (`@action`) `Doc` -- the TUI already tracks and writes those itself.
+    writable_external: HashMap<NodeId, WritableExternalFile>,
+    /// The on-disk shape (children/bodies/nodes) `writable_external` and
+    /// `@auto` nodes had before their content was merged in, so `save` can
+    /// restore it into the `.leo` XML being written -- derived/writable
+    /// content lives in its own file, never baked into the `.leo` file.
+    original_external: OriginalExternalState,
 }
 
 type RhaiResult<T> = Result<T, Box<EvalAltResult>>;
@@ -171,12 +194,19 @@ fn find_node_mut<'a>(document: &'a mut LeoDocument, gnx: &str) -> RhaiResult<&'a
 }
 
 impl Doc {
-    fn new(document: LeoDocument, path: PathBuf) -> Doc {
+    fn new(
+        document: LeoDocument,
+        path: PathBuf,
+        writable_external: HashMap<NodeId, WritableExternalFile>,
+        original_external: OriginalExternalState,
+    ) -> Doc {
         Doc {
             inner: Rc::new(RefCell::new(Inner {
                 document,
                 path,
                 touched: false,
+                writable_external,
+                original_external,
             })),
         }
     }
@@ -184,10 +214,19 @@ impl Doc {
     /// Binds an already-open document instead of reading one from disk --
     /// used to hand an `@action` script the outline the TUI already has in
     /// memory, so it sees in-progress edits and its mutations flow straight
-    /// back into the editor instead of round-tripping through disk.
+    /// back into the editor instead of round-tripping through disk. The TUI
+    /// already ran its own derived-file load on `document` and owns
+    /// write-back for it via the App's own `writable_external`, so this
+    /// `Doc` starts with none of its own -- a bound script's `save`/
+    /// `save_as` only serializes the `.leo` XML, same as before.
     #[cfg(feature = "tui")]
     pub(crate) fn bind(document: LeoDocument, path: PathBuf) -> Doc {
-        Doc::new(document, path)
+        Doc::new(
+            document,
+            path,
+            HashMap::new(),
+            OriginalExternalState::default(),
+        )
     }
 
     #[cfg(feature = "tui")]
@@ -206,9 +245,28 @@ impl Doc {
         }
     }
 
+    /// Opens `path` the same way the TUI does: `@auto`/`@file`/`@thin`/
+    /// `@file-thin`/`@f`/`@clean` nodes get their external content parsed
+    /// and merged in immediately (see `leo::load_derived_files`), not left
+    /// as bare, unexpanded headline-only nodes. `@file`/`@thin`/`@f`/
+    /// `@clean` also get write-back tracking, so a later `save` renders and
+    /// writes any that have diverged -- e.g. after `set_headline` promotes
+    /// an `@auto` node to `@f`, `save` writes real sentinels to its file,
+    /// exactly like renaming and saving in the TUI does.
     fn open(path: &str) -> RhaiResult<Doc> {
-        let document = LeoDocument::open(path).map_err(rhai_err)?;
-        Ok(Doc::new(document, PathBuf::from(path)))
+        let mut document = LeoDocument::open(path).map_err(rhai_err)?;
+        let report = load_derived_files(&mut document.outline, Path::new(path));
+        let original_external = OriginalExternalState {
+            children: report.original_children,
+            bodies: report.original_bodies,
+            nodes: report.original_nodes,
+        };
+        Ok(Doc::new(
+            document,
+            PathBuf::from(path),
+            report.writable_external,
+            original_external,
+        ))
     }
 
     /// Ensures a slash-separated headline path exists (creating any missing
@@ -416,10 +474,43 @@ impl Doc {
         Ok(find_node(&inner.document, gnx)?.headline.clone())
     }
 
+    /// Sets `gnx`'s headline. When the new headline is itself an external
+    /// directive (`@file`/`@thin`/`@file-thin`/`@f`/`@clean`), this also
+    /// starts (or updates) write-back tracking for it -- the same thing the
+    /// TUI's interactive headline rename does -- so a later `save` renders
+    /// and writes it. That's what promotes an `@auto <path>` node (already
+    /// carrying real content from `open`'s derived-file load) in place into
+    /// a real `@f <path>` file: rename, then save. Unlike the TUI's
+    /// version, this doesn't resolve ancestor `@path` directives -- the
+    /// path is always relative to the open `.leo` file's own directory.
     fn set_headline(&mut self, gnx: &str, text: &str) -> RhaiResult<()> {
         let mut inner = self.inner.borrow_mut();
         find_node_mut(&mut inner.document, gnx)?.headline = text.to_owned();
         inner.touched = true;
+        if let Some(filename) = external_filename(text) {
+            let base = inner
+                .path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from("."));
+            let path = base.join(filename);
+            let (start_delimiter, end_delimiter) = comment_delimiters(&path);
+            inner
+                .writable_external
+                .entry(NodeId(gnx.to_owned()))
+                .and_modify(|file| {
+                    file.path = path.clone();
+                    file.start_delimiter = start_delimiter.to_owned();
+                    file.end_delimiter = end_delimiter.to_owned();
+                })
+                .or_insert(WritableExternalFile {
+                    path,
+                    start_delimiter: start_delimiter.to_owned(),
+                    end_delimiter: end_delimiter.to_owned(),
+                    original: leo::Outline::default(),
+                    format: external_format(text),
+                });
+        }
         Ok(())
     }
 
@@ -533,14 +624,47 @@ impl Doc {
     }
 
     fn save(&mut self) -> RhaiResult<()> {
-        let inner = self.inner.borrow();
-        inner.document.save(&inner.path).map_err(rhai_err)
+        let path = self.inner.borrow().path.clone();
+        self.save_to(&path)
     }
 
     fn save_as(&mut self, path: &str) -> RhaiResult<()> {
+        self.save_to(Path::new(path))?;
+        self.inner.borrow_mut().path = PathBuf::from(path);
+        Ok(())
+    }
+
+    /// Writes any diverged `writable_external` file (see `set_headline`)
+    /// out with its own sentinels first, then serializes `document` to
+    /// `.leo` XML at `path` -- with derived/writable content restored to
+    /// its on-disk (pre-merge) shape first, so it doesn't get baked into
+    /// the `.leo` file itself. Mirrors `tui::save` exactly, so a script's
+    /// `open` -> `set_headline` -> `save` produces the same on-disk result
+    /// the same steps in the TUI would.
+    fn save_to(&mut self, path: &Path) -> RhaiResult<()> {
         let mut inner = self.inner.borrow_mut();
-        inner.document.save(path).map_err(rhai_err)?;
-        inner.path = PathBuf::from(path);
+        let external_updates =
+            prepare_external_updates(&inner.document.outline, &inner.writable_external)
+                .map_err(rhai_err)?;
+        let mut persisted = inner.document.clone();
+        restore_external_state(
+            &mut persisted.outline,
+            &inner.original_external.children,
+            &inner.original_external.bodies,
+            &inner.original_external.nodes,
+        );
+        let referenced = referenced_nodes(&persisted.outline.roots);
+        persisted
+            .outline
+            .nodes
+            .retain(|id, _| referenced.contains(id));
+        write_external_updates(&external_updates).map_err(rhai_err)?;
+        persisted.save(path).map_err(rhai_err)?;
+        for update in external_updates {
+            if let Some(file) = inner.writable_external.get_mut(&update.root) {
+                file.original = update.snapshot;
+            }
+        }
         Ok(())
     }
 

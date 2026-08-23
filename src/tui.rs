@@ -20,10 +20,11 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use leo::{
-    AutoFile, DerivedFile, ExternalFormat, LeoDocument, Node, NodeId, OriginalExternalState,
-    Outline, Position, PositionId, RelativeFile, WritableExternalFile, comment_delimiters,
-    external_snapshot, format_for_directive, prepare_external_updates, referenced_nodes,
-    restore_external_state, search_outline, write_external_updates,
+    DerivedJob, LeoDocument, NodeId, OriginalExternalState, Outline, Position, PositionId,
+    SourceLocation, WritableExternalFile, comment_delimiters, derived_filename, external_filename,
+    external_format, load_derived_files, load_derived_jobs, path_directive,
+    prepare_external_updates, referenced_nodes, restore_external_state, search_outline,
+    write_external_updates,
 };
 use ratatui::{
     Terminal,
@@ -3900,237 +3901,6 @@ fn is_rst_headline(headline: &str) -> bool {
         .is_some_and(|rest| rest.is_empty() || rest.starts_with(char::is_whitespace))
 }
 
-#[derive(Default)]
-struct LoadReport {
-    loaded: usize,
-    errors: Vec<String>,
-    locations: HashMap<PositionId, SourceLocation>,
-    node_locations: HashMap<NodeId, SourceLocation>,
-    derived_nodes: HashSet<NodeId>,
-    writable_external: HashMap<NodeId, WritableExternalFile>,
-    original_children: HashMap<NodeId, Vec<Position>>,
-    original_bodies: HashMap<NodeId, String>,
-    original_nodes: HashMap<NodeId, Node>,
-}
-
-struct DerivedJob {
-    position: PositionId,
-    path: PathBuf,
-    auto: bool,
-    directive: String,
-    root: NodeId,
-}
-
-#[derive(Clone)]
-struct SourceLocation {
-    path: PathBuf,
-    line: usize,
-}
-
-fn load_derived_files(outline: &mut Outline, outline_path: &Path) -> LoadReport {
-    let jobs = derived_jobs(outline, outline_path);
-    load_derived_jobs(outline, jobs)
-}
-
-/// Runs a specific set of derived-file jobs against `outline`, rather than
-/// every derived node in it. Used to fetch content for a handful of
-/// freshly-created nodes (e.g. from `command_import_run`) without re-merging
-/// -- and so silently discarding unsaved edits to -- every other derived node
-/// in the document, which a full `load_derived_files` pass would do.
-fn load_derived_jobs(outline: &mut Outline, jobs: Vec<DerivedJob>) -> LoadReport {
-    let mut report = LoadReport::default();
-    for job in jobs {
-        let label = job.path.display().to_string();
-        if !job.auto && !job.path.exists() {
-            report.writable_external.insert(
-                job.root.clone(),
-                WritableExternalFile {
-                    path: job.path.clone(),
-                    start_delimiter: comment_delimiters(&job.path).0.to_owned(),
-                    end_delimiter: comment_delimiters(&job.path).1.to_owned(),
-                    original: Outline::default(),
-                    format: format_for_directive(&job.directive),
-                },
-            );
-            report.loaded += 1;
-            continue;
-        }
-        let result = fs::read_to_string(&job.path)
-            .map_err(|error| error.to_string())
-            .and_then(|source| {
-                let root_node = outline
-                    .position(&job.position)
-                    .map(|position| position.node.clone())
-                    .ok_or_else(|| "derived root position disappeared".to_owned())?;
-                let original_children = outline
-                    .position(&job.position)
-                    .map(|position| position.children.clone())
-                    .unwrap_or_default();
-                let original_body = outline.nodes[&root_node].body.clone();
-                // Captured before merge_into prunes outline.nodes down to
-                // what the freshly generated tree references: these ids
-                // otherwise vanish from outline.nodes even though
-                // original_children (restored just before serializing)
-                // still points at them.
-                let original_nodes: HashMap<NodeId, Node> = referenced_nodes(&original_children)
-                    .into_iter()
-                    .filter_map(|id| outline.nodes.get(&id).cloned().map(|node| (id, node)))
-                    .collect();
-                if job.auto {
-                    let auto = AutoFile::parse_with_directive(
-                        &job.path,
-                        job.root.clone(),
-                        &source,
-                        Some(&job.directive),
-                    )
-                    .map_err(|error| error.to_string())?;
-                    if !auto.merge_into(outline, &job.position) {
-                        return Err("auto root position disappeared".to_owned());
-                    }
-                    report
-                        .node_locations
-                        .entry(auto.root.clone())
-                        .or_insert(SourceLocation {
-                            path: job.path.clone(),
-                            line: 1,
-                        });
-                    for (id, line) in &auto.locations {
-                        report
-                            .node_locations
-                            .entry(id.clone())
-                            .or_insert(SourceLocation {
-                                path: job.path.clone(),
-                                line: *line,
-                            });
-                    }
-                    report.derived_nodes.extend(
-                        auto.outline
-                            .nodes
-                            .keys()
-                            .filter(|id| **id != auto.root)
-                            .cloned(),
-                    );
-                } else if job.directive == "@f" {
-                    let derived =
-                        RelativeFile::parse(&source).map_err(|error| error.to_string())?;
-                    derived
-                        .merge_into(outline, &job.position)
-                        .map_err(|error| error.to_string())?;
-                    let original = external_snapshot(outline, &derived.root)
-                        .map(|(_, snapshot)| snapshot)
-                        .ok_or_else(|| "merged external root disappeared".to_owned())?;
-                    report.writable_external.insert(
-                        derived.root.clone(),
-                        WritableExternalFile {
-                            path: job.path.clone(),
-                            start_delimiter: derived.start_delimiter.clone(),
-                            end_delimiter: derived.end_delimiter.clone(),
-                            original,
-                            format: ExternalFormat::Relative,
-                        },
-                    );
-                    for (derived_position, line) in &derived.locations {
-                        let suffix = derived_position
-                            .0
-                            .strip_prefix("0")
-                            .unwrap_or(&derived_position.0);
-                        let position = PositionId(format!("{}{}", job.position.0, suffix));
-                        report.locations.insert(
-                            position,
-                            SourceLocation {
-                                path: job.path.clone(),
-                                line: *line,
-                            },
-                        );
-                        if let Some(position) = derived.outline.position(derived_position) {
-                            report
-                                .node_locations
-                                .entry(position.node.clone())
-                                .or_insert(SourceLocation {
-                                    path: job.path.clone(),
-                                    line: *line,
-                                });
-                        }
-                    }
-                    report.derived_nodes.extend(
-                        derived
-                            .outline
-                            .nodes
-                            .keys()
-                            .filter(|id| **id != derived.root)
-                            .cloned(),
-                    );
-                } else {
-                    let derived = DerivedFile::parse(&source).map_err(|error| error.to_string())?;
-                    derived
-                        .merge_into(outline, &job.position)
-                        .map_err(|error| error.to_string())?;
-                    let original = external_snapshot(outline, &derived.root)
-                        .map(|(_, snapshot)| snapshot)
-                        .ok_or_else(|| "merged external root disappeared".to_owned())?;
-                    report.writable_external.insert(
-                        derived.root.clone(),
-                        WritableExternalFile {
-                            path: job.path.clone(),
-                            start_delimiter: derived.start_delimiter.clone(),
-                            end_delimiter: derived.end_delimiter.clone(),
-                            original,
-                            format: ExternalFormat::Thin,
-                        },
-                    );
-                    for (derived_position, line) in &derived.locations {
-                        let suffix = derived_position
-                            .0
-                            .strip_prefix("0")
-                            .unwrap_or(&derived_position.0);
-                        let position = PositionId(format!("{}{}", job.position.0, suffix));
-                        report.locations.insert(
-                            position,
-                            SourceLocation {
-                                path: job.path.clone(),
-                                line: *line,
-                            },
-                        );
-                        if let Some(position) = derived.outline.position(derived_position) {
-                            report
-                                .node_locations
-                                .entry(position.node.clone())
-                                .or_insert(SourceLocation {
-                                    path: job.path.clone(),
-                                    line: *line,
-                                });
-                        }
-                    }
-                    report.derived_nodes.extend(
-                        derived
-                            .outline
-                            .nodes
-                            .keys()
-                            .filter(|id| **id != derived.root)
-                            .cloned(),
-                    );
-                }
-                report
-                    .original_children
-                    .entry(root_node)
-                    .or_insert(original_children);
-                report
-                    .original_bodies
-                    .entry(job.root.clone())
-                    .or_insert(original_body);
-                for (id, node) in original_nodes {
-                    report.original_nodes.entry(id).or_insert(node);
-                }
-                Ok(())
-            });
-        match result {
-            Ok(()) => report.loaded += 1,
-            Err(error) => report.errors.push(format!("{label}: {error}")),
-        }
-    }
-    report
-}
-
 fn open_selected(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) {
     let Some(row) = app.rows().get(app.selected).cloned() else {
         return;
@@ -4386,106 +4156,9 @@ fn run_editor(location: &SourceLocation) -> Result<()> {
     Ok(())
 }
 
-fn derived_jobs(outline: &Outline, outline_path: &Path) -> Vec<DerivedJob> {
-    fn visit(
-        outline: &Outline,
-        positions: &[Position],
-        parent_id: &str,
-        base: &Path,
-        inherited_paths: &[String],
-        jobs: &mut Vec<DerivedJob>,
-    ) {
-        for (index, position) in positions.iter().enumerate() {
-            let position_id = if parent_id.is_empty() {
-                index.to_string()
-            } else {
-                format!("{parent_id}/{index}")
-            };
-            let node = &outline.nodes[&position.node];
-            let mut paths = inherited_paths.to_vec();
-            if let Some(path) =
-                path_directive(&node.headline).or_else(|| path_directive(&node.body))
-            {
-                paths.push(path);
-            }
-            if let Some((auto, directive, filename)) = derived_filename(&node.headline) {
-                let mut path = base.to_path_buf();
-                for component in inherited_paths {
-                    path.push(component);
-                }
-                path.push(filename);
-                jobs.push(DerivedJob {
-                    position: PositionId(position_id.clone()),
-                    path,
-                    auto,
-                    directive: directive.to_owned(),
-                    root: position.node.clone(),
-                });
-            }
-            visit(
-                outline,
-                &position.children,
-                &position_id,
-                base,
-                &paths,
-                jobs,
-            );
-        }
-    }
-    let base = outline_path.parent().unwrap_or_else(|| Path::new("."));
-    let mut jobs = Vec::new();
-    visit(outline, &outline.roots, "", base, &[], &mut jobs);
-    jobs
-}
-
-fn derived_filename(headline: &str) -> Option<(bool, &str, &str)> {
-    let (directive, filename) = headline.trim().split_once(char::is_whitespace)?;
-    matches!(
-        directive,
-        "@file" | "@thin" | "@file-thin" | "@f" | "@auto" | "@auto-md" | "@auto-markdown"
-    )
-    .then(|| {
-        (
-            directive.starts_with("@auto"),
-            directive,
-            strip_path_cruft(filename),
-        )
-    })
-    .filter(|(_, _, filename)| !filename.is_empty())
-}
-
-/// Which sentinel writer/parser a directive's derived file uses. `@f` is the
-/// only directive using the cub-1-thin relative-depth, optional-gnx grammar
-/// (a leo-cub extension inspired by leo-editor issue #4928, not an official
-/// Leo version tag); every other thin/file directive still uses the 5-thin
-/// grammar in `derived.rs`.
-fn external_format(headline: &str) -> ExternalFormat {
-    match headline.trim().split_once(char::is_whitespace) {
-        Some((directive, _)) => format_for_directive(directive),
-        None => ExternalFormat::Thin,
-    }
-}
-
 #[cfg(test)]
 fn thin_filename(headline: &str) -> Option<&str> {
     derived_filename(headline).and_then(|(auto, _, filename)| (!auto).then_some(filename))
-}
-
-fn external_filename(headline: &str) -> Option<&str> {
-    let (directive, filename) = headline.trim().split_once(char::is_whitespace)?;
-    matches!(
-        directive,
-        "@file"
-            | "@thin"
-            | "@file-thin"
-            | "@f"
-            | "@clean"
-            | "@auto"
-            | "@auto-md"
-            | "@auto-markdown"
-    )
-    .then(|| strip_path_cruft(filename))
-    .filter(|filename| !filename.is_empty())
 }
 
 fn dynamic_source_location(app: &App, row: &Row) -> Option<SourceLocation> {
@@ -4511,27 +4184,6 @@ fn dynamic_source_location(app: &App, row: &Row) -> Option<SourceLocation> {
     }
     path.push(filename);
     Some(SourceLocation { path, line: 1 })
-}
-
-fn path_directive(text: &str) -> Option<String> {
-    text.lines().find_map(|line| {
-        line.strip_prefix("@path")
-            .and_then(|rest| rest.starts_with(char::is_whitespace).then_some(rest))
-            .map(strip_path_cruft)
-            .filter(|path| !path.is_empty())
-            .map(str::to_owned)
-    })
-}
-
-fn strip_path_cruft(path: &str) -> &str {
-    let path = path.trim();
-    if path.len() > 2 {
-        let pair = (path.as_bytes()[0], path.as_bytes()[path.len() - 1]);
-        if matches!(pair, (b'<', b'>') | (b'"', b'"') | (b'\'', b'\'')) {
-            return path[1..path.len() - 1].trim();
-        }
-    }
-    path
 }
 
 fn clone_count(outline: &Outline, id: &NodeId) -> usize {
@@ -4738,6 +4390,7 @@ fn apply_step_headless(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use leo::{DerivedFile, ExternalFormat, RelativeFile, external_snapshot};
 
     #[test]
     fn extension_for_language_maps_directive_names_to_editor_extensions() {
@@ -5691,6 +5344,71 @@ fn private_helper(doc, target) {
         assert_eq!(file.path, PathBuf::from("test.md"));
         assert_eq!(file.start_delimiter, "#");
         assert_eq!(file.end_delimiter, "");
+    }
+
+    #[test]
+    fn renaming_a_loaded_auto_root_to_at_f_and_saving_promotes_it_to_real_sentinel_segments() {
+        // The workflow: open an outline with an `@auto script.rhai` node (its
+        // functions get parsed in as real, live outline nodes), rename just
+        // the root headline to `@f script.rhai`, and save. No dedicated
+        // "convert" command exists -- renaming picks up `app.writable_external`
+        // tracking (see `handle_headline_input`) with `original:
+        // Outline::default()`, so `save`'s `prepare_external_updates` sees the
+        // already-materialized `@auto`-parsed children as new/diverged content
+        // and writes them out as sentinels, promoting the plain script in
+        // place into a real, individually-editable `@f` file.
+        let directory = env::temp_dir().join(format!(
+            "leo-cub-tui-auto-to-f-{}-{}",
+            std::process::id(),
+            fresh_node_id().0
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            directory.join("script.rhai"),
+            "fn greet(name) {\n    \"hi \" + name\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.join("outline.leo"),
+            r#"<leo_file><vnodes><v t="r"><vh>@auto script.rhai</vh></v></vnodes><tnodes><t tx="r"></t></tnodes></leo_file>"#,
+        )
+        .unwrap();
+
+        let mut app = build_app(directory.join("outline.leo"), true).unwrap();
+        app.selected = 0;
+        edit_headline(&mut app);
+        app.input.as_mut().unwrap().value = "@f script.rhai".into();
+        handle_headline_input(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        save(&mut app);
+
+        assert!(app.status.starts_with("saved"), "{}", app.status);
+        let rewritten = fs::read_to_string(directory.join("script.rhai")).unwrap();
+        assert!(
+            rewritten.starts_with("//@+leo-ver=cub-1-thin\n"),
+            "{rewritten}"
+        );
+        assert!(
+            rewritten.contains("fn greet(name) {"),
+            "the auto-parsed function body should survive the promotion: {rewritten}"
+        );
+
+        let reparsed = RelativeFile::parse(&rewritten).unwrap();
+        assert_eq!(reparsed.outline.roots[0].children.len(), 1);
+        assert_eq!(
+            reparsed.outline.nodes[&reparsed.outline.roots[0].children[0].node].headline,
+            "fn greet"
+        );
+
+        // The promotion round-trips: reopening the outline re-parses
+        // script.rhai as `@f` (not `@auto`) and reconstructs the same node.
+        let reopened = build_app(directory.join("outline.leo"), true).unwrap();
+        assert_eq!(
+            reopened.document.outline.nodes[&NodeId::from("r")].headline,
+            "@f script.rhai"
+        );
+        assert_eq!(reopened.document.outline.roots[0].children.len(), 1);
+
+        fs::remove_dir_all(&directory).unwrap();
     }
 
     #[test]

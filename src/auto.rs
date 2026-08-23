@@ -33,6 +33,13 @@ enum Flavor {
     Markdown,
     Python,
     Rust,
+    /// Rhai has no Tree-sitter grammar of its own, but its `fn` declarations
+    /// parse cleanly under Rust's grammar (Rhai is a syntactic subset for
+    /// that one construct), so this flavor reuses [`tree_sitter_rust`] and
+    /// [`block_identity`] restricts recognition to `function_item` only --
+    /// Rhai has no structs/traits/impls/mods for the other Rust kinds to
+    /// (mis)match against.
+    Rhai,
     Static(&'static StaticLanguage),
 }
 
@@ -715,11 +722,22 @@ fn root_preamble_end(flavor: Flavor, source: &str, blocks: &[Block]) -> usize {
     if matches!(flavor, Flavor::Python) {
         return first.syntax_start;
     }
+    // Rhai has no `use` statement -- `import ... as ...;` and top-level
+    // `const` declarations (see e.g. scripts/github.rhai's `COMMANDS`) play
+    // the same "preamble, not a block" role instead.
+    let import_prefixes: &[&str] = if matches!(flavor, Flavor::Rhai) {
+        &["import ", "const "]
+    } else {
+        &["use "]
+    };
     let mut found_use = false;
     let mut end = 0;
     for (index, line) in source.lines().take(first.syntax_start).enumerate() {
         let line = line.trim();
-        if line.starts_with("use ") {
+        if import_prefixes
+            .iter()
+            .any(|prefix| line.starts_with(prefix))
+        {
             found_use = true;
             end = index + 1;
         } else if line.is_empty() || line.starts_with("//") || line.starts_with("/*") {
@@ -921,6 +939,7 @@ fn language_for(path: &Path) -> Result<(Flavor, Language, &'static str), AutoErr
         )),
         "md" | "rmd" => Ok((Flavor::Markdown, tree_sitter_md::LANGUAGE.into(), "md")),
         "rs" => Ok((Flavor::Rust, tree_sitter_rust::LANGUAGE.into(), "rust")),
+        "rhai" => Ok((Flavor::Rhai, tree_sitter_rust::LANGUAGE.into(), "rhai")),
         "cs" => Ok((
             Flavor::Static(&C_SHARP),
             tree_sitter_c_sharp::LANGUAGE.into(),
@@ -1011,9 +1030,10 @@ fn block_identity<'a>(
         (Flavor::Rust, "impl_item") => "impl",
         (Flavor::Rust, "mod_item") => "mod",
         (Flavor::Rust, "macro_definition") => "macro",
+        (Flavor::Rhai, "function_item") => "fn",
         _ => return None,
     };
-    if matches!(flavor, Flavor::Rust) && !leo_rust_block(actual, source) {
+    if matches!(flavor, Flavor::Rust | Flavor::Rhai) && !leo_rust_block(actual, source) {
         return None;
     }
     let name = if actual.kind() == "impl_item" {
@@ -1028,9 +1048,9 @@ fn block_identity<'a>(
     Some((kind.to_owned(), name, node))
 }
 
-/// Leo's Rust importer recognizes only declarations whose opening-brace line
-/// ends in `{`. In particular, it deliberately does not split semicolon items
-/// or one-line `{}` bodies.
+/// Leo's Rust importer (and, via [`Flavor::Rhai`], Rhai's) recognizes only
+/// declarations whose opening-brace line ends in `{`. In particular, it
+/// deliberately does not split semicolon items or one-line `{}` bodies.
 fn leo_rust_block(node: TsNode<'_>, source: &str) -> bool {
     let Some(body) = node.child_by_field_name("body") else {
         return false;
@@ -1457,6 +1477,22 @@ mod tests {
         assert_eq!(
             auto.outline.nodes[&root.children[1].node].headline,
             "function: top"
+        );
+    }
+
+    #[test]
+    fn expands_rhai_functions_and_folds_const_declarations_into_the_preamble() {
+        let source = "// header comment\nconst COMMANDS = [\"a\"];\n\n/// docs\nfn a(doc, target) {\n    doc.sh(\"x\");\n}\n\nfn helper(s) {\n    s\n}\n";
+        let auto = AutoFile::parse(Path::new("x.rhai"), NodeId::from("root"), source).unwrap();
+        let root = &auto.outline.roots[0];
+        assert_eq!(auto.outline.nodes[&root.children[0].node].headline, "fn a");
+        assert_eq!(
+            auto.outline.nodes[&root.children[1].node].headline,
+            "fn helper"
+        );
+        assert_eq!(
+            auto.outline.nodes[&root.node].body,
+            "// header comment\nconst COMMANDS = [\"a\"];\n\n/// docs\n@others\n@language rhai\n@tabwidth -4\n"
         );
     }
 

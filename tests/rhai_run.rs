@@ -428,6 +428,77 @@ fn cub_run_node_remove_targets_the_exact_occurrence_not_the_defining_one() {
 }
 
 #[test]
+fn cub_run_promotes_an_auto_node_to_at_f_by_renaming_and_saving() {
+    // `open` now runs the same derived-file load the TUI does: an `@auto`
+    // node's functions are already real, live outline nodes by the time the
+    // script sees them (not bare, unexpanded headline-only nodes the way a
+    // plain `LeoDocument::open` would leave them). Renaming the root to
+    // `@f <path>` and saving should render those already-merged nodes out
+    // as real cub-1-thin sentinels -- promoting the plain script file in
+    // place -- exactly like doing the same rename+save in the TUI does.
+    let dir = temp_path("rhai_run_promote_dir");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("script.rhai"),
+        "fn greet(name) {\n    \"hi \" + name\n}\n",
+    )
+    .unwrap();
+    let leo_path = dir.join("outline.leo");
+    fs::write(
+        &leo_path,
+        r#"<leo_file><vnodes><v t="r"><vh>@auto script.rhai</vh></v></vnodes><tnodes><t tx="r"></t></tnodes></leo_file>"#,
+    )
+    .unwrap();
+
+    let script_path = dir.join("promote.rhai");
+    let escaped_path = leo_path.display().to_string().replace('\\', "\\\\");
+    fs::write(
+        &script_path,
+        format!(
+            r#"
+            let doc = open("{escaped_path}");
+            assert(doc.count() > 1, "the @auto file's functions should already be merged in by open()");
+            doc.set_headline("r", "@f script.rhai");
+            doc.save();
+            print("promoted");
+            "#
+        ),
+    )
+    .unwrap();
+
+    let output = run_cub(&["run", script_path.to_str().unwrap()]);
+    assert!(
+        output.status.success(),
+        "cub run failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("promoted"));
+
+    let rewritten = fs::read_to_string(dir.join("script.rhai")).unwrap();
+    assert!(
+        rewritten.starts_with("//@+leo-ver=cub-1-thin\n"),
+        "{rewritten}"
+    );
+    assert!(rewritten.contains("fn greet(name) {"), "{rewritten}");
+
+    let reparsed = leo::RelativeFile::parse(&rewritten).unwrap();
+    assert_eq!(reparsed.outline.roots[0].children.len(), 1);
+
+    // The .leo file itself stays a lightweight `@f` pointer -- the real
+    // content lives in script.rhai, not baked into the outline XML.
+    let saved = LeoDocument::open(&leo_path).unwrap();
+    assert_eq!(
+        saved.outline.nodes[&leo::NodeId::from("r")].headline,
+        "@f script.rhai"
+    );
+    assert!(saved.outline.roots[0].children.is_empty());
+
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
 fn cub_run_exits_nonzero_and_reports_the_failed_assertion() {
     let script_path = temp_path("rhai_run_failure.rhai");
     fs::write(&script_path, "assert_eq(1, 2);").unwrap();

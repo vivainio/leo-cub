@@ -307,7 +307,7 @@ pub fn comment_delimiters(path: &Path) -> (&'static str, &'static str) {
         "py" | "pyw" | "sh" | "bash" | "zsh" | "fish" | "rb" | "pl" | "pm" | "r" | "toml"
         | "yaml" | "yml" => ("#", ""),
         "rs" | "c" | "h" | "cc" | "cpp" | "cxx" | "hpp" | "java" | "js" | "jsx" | "ts" | "tsx"
-        | "go" | "swift" | "kt" | "kts" | "cs" => ("//", ""),
+        | "go" | "swift" | "kt" | "kts" | "cs" | "rhai" => ("//", ""),
         "html" | "htm" | "xml" | "xhtml" | "svg" => ("<!--", "-->"),
         "css" | "scss" | "less" => ("/*", "*/"),
         "sql" | "lua" => ("--", ""),
@@ -997,6 +997,13 @@ mod tests {
 </t></tnodes></leo_file>"#,
         );
         LeoDocument::parse(source).unwrap()
+    }
+
+    #[test]
+    fn rhai_uses_double_slash_comments_not_the_hash_fallback() {
+        // Rhai has no `#` line comment -- only `//` and `/* */` -- so a `@f`
+        // rhai file sentineled with `#` would be invalid Rhai on write-back.
+        assert_eq!(comment_delimiters(Path::new("demo.rhai")), ("//", ""));
     }
 
     #[test]
