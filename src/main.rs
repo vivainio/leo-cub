@@ -108,24 +108,21 @@ enum Command {
         #[arg(long)]
         no_derived: bool,
     },
-    /// Run a Rhai test script against an outline.
+    /// Run a Rhai script.
     #[cfg(feature = "rhai")]
     #[command(
-        after_help = r#"The script drives an outline through a small API instead of
-pressing keys, so it works as a scriptable replacement for a jsonl/TUI-driven
-integration test:
+        after_help = r#"The script drives an outline through the same Doc and Node API
+used by TUI actions:
 
-  let doc = open("notes.leo");     // load an outline
-  let gnx = doc.add("A/B/C");      // ensure a headline path exists
-  doc.set_body(gnx, "hello");
-  assert_eq(doc.headline(gnx), "C");
-  doc.save();                      // write back to notes.leo
+  let doc = open("notes.leo");
+  let node = doc.ensure("A/B/C");
+  node.b = "hello";
+  assert_eq(node.h, "C");
+  doc.save();
 
-Other Doc methods: gnx(path), headline(gnx), set_headline(gnx, text),
-body(gnx), render(), validate(), apply(json) (a "cub apply"-style operation
-batch, returns the report as JSON), count(), save_as(path). `assert(cond)`,
-`assert(cond, msg)`, and `assert_eq(a, b)` abort the script with a non-zero
-exit on failure; `print`/`debug` go straight to stdout/stderr."#
+See the scripting guide and Rhai API reference for actions, traversal,
+searching, operation batches, subprocesses, and filesystem access. A parsing
+error, thrown API error, or failed assertion produces a non-zero exit status."#
     )]
     Run {
         /// Rhai script to execute.

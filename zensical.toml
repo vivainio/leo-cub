@@ -23,6 +23,7 @@ nav = [
   { "Reference" = [
     { "Concepts" = "reference/concepts.md" },
     { "Command reference" = "reference/commands.md" },
+    { "Rhai API" = "reference/rhai-api.md" },
   ] },
   { "Workflows" = [
     { "Automation and AI tools" = "workflows/automation.md" },
