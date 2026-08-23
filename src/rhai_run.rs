@@ -16,7 +16,7 @@ use std::process::Command;
 use std::{cell::RefCell, fs, path::PathBuf, rc::Rc};
 
 use anyhow::{Context, Result};
-use leo::{LeoDocument, NodeId, Operation, OperationBatch};
+use leo::{LeoDocument, NodeId, Operation, OperationBatch, Position, PositionId};
 use regex::Regex;
 #[cfg(feature = "tui")]
 use rhai::Scope;
@@ -136,6 +136,23 @@ fn run_shell(
     Ok(result)
 }
 
+/// `root`'s subtree, depth-first and in outline order (`root` itself
+/// first), paired with each occurrence's own `PositionId` -- the
+/// exact-occurrence counterpart to `Outline::subtree_ids`, which only
+/// knows node ids and can't tell two clones of the same node apart.
+/// `own_position` is the index path `root` itself sits at.
+fn subtree_with_positions(root: &Position, own_position: &str) -> Vec<(NodeId, PositionId)> {
+    fn visit(position: &Position, path: String, out: &mut Vec<(NodeId, PositionId)>) {
+        out.push((position.node.clone(), PositionId(path.clone())));
+        for (i, child) in position.children.iter().enumerate() {
+            visit(child, format!("{path}/{i}"), out);
+        }
+    }
+    let mut out = Vec::new();
+    visit(root, own_position.to_owned(), &mut out);
+    out
+}
+
 fn find_node<'a>(document: &'a LeoDocument, gnx: &str) -> RhaiResult<&'a leo::Node> {
     document
         .outline
@@ -209,6 +226,7 @@ impl Doc {
         Ok(Node {
             doc: self.clone(),
             gnx,
+            position: None,
         })
     }
 
@@ -322,6 +340,30 @@ impl Doc {
         Ok(Node {
             doc: self.clone(),
             gnx: gnx.to_owned(),
+            position: None,
+        })
+    }
+
+    /// Wraps the exact tree occurrence `position` (an index path like
+    /// `"0/2/1"`, as returned by `p.position` or `doc.all_positions()`) as
+    /// a `Node` -- like `doc.node(gnx)`, but anchored to *this* occurrence
+    /// rather than falling back to the first one, so it stays correct for
+    /// a node cloned to more than one place. Fails if `position` doesn't
+    /// resolve to anything in the outline.
+    fn node_at(&mut self, position: &str) -> RhaiResult<Node> {
+        let position = PositionId(position.to_owned());
+        let gnx = self
+            .inner
+            .borrow()
+            .document
+            .outline
+            .position(&position)
+            .map(|p| p.node.0.clone())
+            .ok_or_else(|| rhai_err(format!("position not found: {}", position.0)))?;
+        Ok(Node {
+            doc: self.clone(),
+            gnx,
+            position: Some(position),
         })
     }
 
@@ -347,6 +389,7 @@ impl Doc {
                     Dynamic::from(Node {
                         doc: self.clone(),
                         gnx,
+                        position: None,
                     })
                 })
             })
@@ -526,10 +569,24 @@ impl Doc {
 /// and write through the same `Doc` the handle was made from, so `n.h =
 /// "x"` and `doc.headline(gnx)` see the same data, and `n.children()` hands
 /// back further `Node`s rather than bare gnx strings.
+///
+/// `gnx` stays the handle's identity -- it's what `.h`/`.b`/`.gnx` read and
+/// write, and it's what stays valid if the outline changes around it, same
+/// as always. `position`, when known, is *additional*: a snapshot of which
+/// exact tree occurrence this handle came from, so a node cloned to more
+/// than one place can still be told apart from its other clones. It's
+/// `None` for a handle made from a bare gnx (`doc.node(gnx)`, `find_h`,
+/// …), where only the node id is known and position-sensitive operations
+/// (`.path()`, `.parent()`, …) fall back to the first occurrence, same as
+/// `doc.path(gnx)` today. `.parent()`/`.children()`/`.subtree()` carry a
+/// known `position` forward to the `Node`s they return, so once a script
+/// has one positioned handle, everything derived from it stays anchored to
+/// the right occurrence too.
 #[derive(Clone)]
 pub(crate) struct Node {
     doc: Doc,
     gnx: String,
+    position: Option<PositionId>,
 }
 
 impl Node {
@@ -553,19 +610,76 @@ impl Node {
         self.doc.set_body(&self.gnx, &text)
     }
 
+    /// The exact tree occurrence this handle is anchored to, as an index
+    /// path (`"0/2/1"`), or `""` if this handle only knows a bare gnx --
+    /// see the type doc for what that means for `.path()`/`.parent()`/etc.
+    /// A snapshot from when the handle was made, not re-validated against
+    /// later tree edits -- like `gnx`, but unlike `gnx` it isn't kept
+    /// correct if the outline changes underneath it, so treat it as a hint
+    /// rather than something to hold onto across mutations.
+    fn get_position(&mut self) -> String {
+        self.position.as_ref().map_or_else(String::new, |p| p.0.clone())
+    }
+
     /// The parent `Node`, or a `Node` wrapping `""` if this one is a root
     /// (matching `Doc::parent`'s contract) -- further property or
     /// traversal access on that empty-gnx `Node` then fails the same way
-    /// it would for any nonexistent gnx.
+    /// it would for any nonexistent gnx. When this handle knows its exact
+    /// `position`, the parent is read off that occurrence directly instead
+    /// of `Doc::parent`'s first-occurrence search, so it's still correct
+    /// for a node cloned to more than one place.
     fn parent(&mut self) -> RhaiResult<Node> {
+        if let Some(position) = &self.position {
+            let inner = self.doc.inner.borrow();
+            let outline = &inner.document.outline;
+            return Ok(match outline.parent_position(position) {
+                Some(parent_position) => {
+                    let gnx = outline
+                        .position(&parent_position)
+                        .map(|p| p.node.0.clone())
+                        .unwrap_or_default();
+                    Node {
+                        doc: self.doc.clone(),
+                        gnx,
+                        position: Some(parent_position),
+                    }
+                }
+                None => Node {
+                    doc: self.doc.clone(),
+                    gnx: String::new(),
+                    position: None,
+                },
+            });
+        }
         let parent_gnx = self.doc.parent(&self.gnx)?;
         Ok(Node {
             doc: self.doc.clone(),
             gnx: parent_gnx,
+            position: None,
         })
     }
 
     fn children(&mut self) -> RhaiResult<Array> {
+        if let Some(position) = &self.position {
+            let inner = self.doc.inner.borrow();
+            let children = inner
+                .document
+                .outline
+                .position(position)
+                .ok_or_else(|| rhai_err(format!("position not found: {}", position.0)))?
+                .children
+                .iter()
+                .enumerate()
+                .map(|(i, child)| {
+                    Dynamic::from(Node {
+                        doc: self.doc.clone(),
+                        gnx: child.node.0.clone(),
+                        position: Some(PositionId(format!("{}/{i}", position.0))),
+                    })
+                })
+                .collect();
+            return Ok(children);
+        }
         Ok(self
             .doc
             .children_ids(&self.gnx)?
@@ -574,6 +688,7 @@ impl Node {
                 Dynamic::from(Node {
                     doc: self.doc.clone(),
                     gnx: id.0,
+                    position: None,
                 })
             })
             .collect())
@@ -583,6 +698,26 @@ impl Node {
     /// order (this node itself first) -- the `Node`-returning equivalent
     /// of `doc.subtree(gnx)`.
     fn subtree(&mut self) -> RhaiResult<Array> {
+        if let Some(position) = &self.position {
+            let inner = self.doc.inner.borrow();
+            let root = inner
+                .document
+                .outline
+                .position(position)
+                .ok_or_else(|| rhai_err(format!("position not found: {}", position.0)))?;
+            let items = subtree_with_positions(root, &position.0);
+            drop(inner);
+            return Ok(items
+                .into_iter()
+                .map(|(id, position)| {
+                    Dynamic::from(Node {
+                        doc: self.doc.clone(),
+                        gnx: id.0,
+                        position: Some(position),
+                    })
+                })
+                .collect());
+        }
         Ok(self
             .doc
             .subtree_ids(&self.gnx)?
@@ -591,13 +726,27 @@ impl Node {
                 Dynamic::from(Node {
                     doc: self.doc.clone(),
                     gnx: id.0,
+                    position: None,
                 })
             })
             .collect())
     }
 
+    /// The slash-separated headline path down to this occurrence. Uses the
+    /// exact `position` when known, so it names *this* clone rather than
+    /// whichever occurrence of `gnx` happens to be first in outline order.
     fn path(&mut self) -> RhaiResult<String> {
-        self.doc.path(&self.gnx)
+        match &self.position {
+            Some(position) => self
+                .doc
+                .inner
+                .borrow()
+                .document
+                .outline
+                .headline_path_at(position)
+                .ok_or_else(|| rhai_err(format!("position not found: {}", position.0))),
+            None => self.doc.path(&self.gnx),
+        }
     }
 
     fn file_path(&mut self) -> RhaiResult<String> {
@@ -641,6 +790,7 @@ fn register_doc_api(engine: &mut Engine) {
     engine.register_fn("path", Doc::path);
     engine.register_fn("file_path", Doc::file_path);
     engine.register_fn("node", Doc::node);
+    engine.register_fn("node_at", Doc::node_at);
     engine.register_fn("find_h", Doc::find_h);
     engine.register_fn("find_b", Doc::find_b);
     engine.register_fn("headline", Doc::headline);
@@ -667,6 +817,7 @@ fn register_doc_api(engine: &mut Engine) {
     engine.register_fn("children", Node::children);
     engine.register_fn("subtree", Node::subtree);
     engine.register_get("gnx", Node::gnx);
+    engine.register_get("position", Node::get_position);
     engine.register_fn("path", Node::path);
     engine.register_fn("file_path", Node::file_path);
     engine.register_fn("to_string", Node::describe);
@@ -732,15 +883,15 @@ pub(crate) struct BoundOutcome {
 
 /// Runs `source` as a Rhai script with `doc` predefined and bound to
 /// `document` (rather than a script calling `open()` itself), and `target`
-/// predefined as `target_gnx` -- the gnx of the node the action was invoked
-/// on. This is what makes `@action` rhai bodies see the same `Doc` API
-/// `cub run` scripts get, instead of the print-only sandbox they used to be
-/// limited to.
+/// predefined as the gnx of `target_position` -- the exact occurrence the
+/// action was invoked on. This is what makes `@action` rhai bodies see the
+/// same `Doc` API `cub run` scripts get, instead of the print-only sandbox
+/// they used to be limited to.
 #[cfg(feature = "tui")]
 pub(crate) fn run_bound(
     document: LeoDocument,
     path: PathBuf,
-    target_gnx: &str,
+    target_position: &PositionId,
     source: &str,
 ) -> BoundOutcome {
     let output = Rc::new(RefCell::new(String::new()));
@@ -769,15 +920,19 @@ pub(crate) fn run_bound(
     let original = document.clone();
 
     let mut doc = Doc::bind(document, path.clone());
-    // `p` is the same handle `doc.node(target)` would hand back -- predefined
-    // so scripts (and REPL snippets) can write `p.h`/`p.b` instead of
-    // `doc.node(target)` every time. Absent only if `target_gnx` somehow
-    // doesn't resolve, which `run_bound`'s callers don't currently allow.
-    let node = doc.node(target_gnx).ok();
+    // `p` is the same handle `doc.node_at(target)` would hand back --
+    // predefined so scripts (and REPL snippets) can write `p.h`/`p.b`
+    // instead of resolving it every time, and anchored to the exact
+    // occurrence the caller had selected (not just its gnx), so `p.path()`/
+    // `p.parent()` stay correct even if that node is cloned elsewhere.
+    // Absent only if `target_position` somehow doesn't resolve, which
+    // `run_bound`'s callers don't currently allow.
+    let node = doc.node_at(&target_position.0).ok();
+    let target_gnx = node.as_ref().map_or_else(String::new, |n| n.gnx.clone());
 
     let mut scope = Scope::new();
     scope.push("doc", doc);
-    scope.push_constant("target", target_gnx.to_owned());
+    scope.push_constant("target", target_gnx);
     if let Some(node) = node {
         scope.push("p", node);
     }
@@ -871,14 +1026,14 @@ pub(crate) fn discover_commands(script_path: &std::path::Path) -> Vec<ImportedCo
 /// `fn` can't see the caller's scope the way a whole evaluated script body
 /// can, `target` has to be passed as a real argument here rather than
 /// predefined in `scope` the way `run_bound` does it. Fails (rather than
-/// calling `fn_name` at all) if `target_gnx` no longer resolves to a node
-/// in `document`.
+/// calling `fn_name` at all) if `target_position` no longer resolves to a
+/// node in `document`.
 #[cfg(feature = "tui")]
 pub(crate) fn run_command(
     document: LeoDocument,
     path: PathBuf,
     script_path: &std::path::Path,
-    target_gnx: &str,
+    target_position: &PositionId,
     fn_name: &str,
 ) -> BoundOutcome {
     let source = match fs::read_to_string(script_path) {
@@ -941,7 +1096,7 @@ pub(crate) fn run_command(
     }
 
     let mut doc = Doc::bind(document, path);
-    let target = match doc.node(target_gnx) {
+    let target = match doc.node_at(&target_position.0) {
         Ok(node) => node,
         Err(error) => {
             return BoundOutcome {

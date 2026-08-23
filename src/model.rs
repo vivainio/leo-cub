@@ -122,6 +122,16 @@ impl Outline {
         Some(p)
     }
 
+    /// The `PositionId` of `position`'s parent, or `None` if `position` is
+    /// a root position (or malformed). Cheap string surgery -- doesn't walk
+    /// the tree or check that `position` actually resolves to anything.
+    pub fn parent_position(&self, position: &PositionId) -> Option<PositionId> {
+        position
+            .0
+            .rsplit_once('/')
+            .map(|(parent, _)| PositionId(parent.to_owned()))
+    }
+
     pub(crate) fn children_mut(
         &mut self,
         parent: Option<&PositionId>,
@@ -138,7 +148,7 @@ impl Outline {
     }
 }
 
-fn parse_path(id: &PositionId) -> Option<Vec<usize>> {
+pub(crate) fn parse_path(id: &PositionId) -> Option<Vec<usize>> {
     if id.0.is_empty() {
         return None;
     }

@@ -299,6 +299,75 @@ fn cub_run_clones_and_removes_nodes_directly_without_apply() {
 }
 
 #[test]
+fn cub_run_disambiguates_clone_occurrences_by_position() {
+    let leo_path = temp_path("rhai_run_position.leo");
+    let _ = fs::remove_file(&leo_path);
+    LeoDocument::new("Root").save_new(&leo_path).unwrap();
+
+    let script_path = temp_path("rhai_run_position.rhai");
+    let escaped_path = leo_path.display().to_string().replace('\\', "\\\\");
+    fs::write(
+        &script_path,
+        format!(
+            r#"
+            let doc = open("{escaped_path}");
+            let shared_gnx = doc.ensure("Root/Shared").gnx;
+            let team_b = doc.ensure("Root/Team B").gnx;
+            doc.clone_node(shared_gnx, team_b);
+
+            // A bare gnx handle only ever knows the first occurrence.
+            let bare = doc.node(shared_gnx);
+            assert_eq(bare.position, "");
+            assert_eq(bare.path(), "Root/Shared");
+            assert_eq(bare.parent().h, "Root");
+
+            // `doc.node_at` anchors to the exact occurrence named by an
+            // index path, so the same gnx can be told apart by position.
+            let root = doc.node_at("0");
+            let first = root.children()[0];
+            let second_root_child = root.children()[1];
+            let cloned = second_root_child.children()[0];
+
+            assert_eq(first.gnx, shared_gnx);
+            assert_eq(cloned.gnx, shared_gnx);
+            assert(first.position != cloned.position, "clone occurrences must have distinct positions");
+
+            assert_eq(first.path(), "Root/Shared");
+            assert_eq(cloned.path(), "Root/Team B/Shared");
+            assert_eq(cloned.parent().h, "Team B");
+            assert_eq(cloned.parent().gnx, team_b);
+
+            // A position-anchored subtree carries positions through too.
+            let sub = second_root_child.subtree();
+            assert_eq(sub.len(), 2);
+            assert_eq(sub[1].position, cloned.position);
+
+            // An unresolvable position fails cleanly rather than silently
+            // falling back to something else.
+            try {{
+                doc.node_at("99/99");
+                assert(false, "expected node_at to fail");
+            }} catch (e) {{
+                assert(e.to_string().contains("position not found"));
+            }}
+
+            print("ok");
+            "#
+        ),
+    )
+    .unwrap();
+
+    let output = run_cub(&["run", script_path.to_str().unwrap()]);
+    assert!(
+        output.status.success(),
+        "cub run failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("ok"));
+}
+
+#[test]
 fn cub_run_exits_nonzero_and_reports_the_failed_assertion() {
     let script_path = temp_path("rhai_run_failure.rhai");
     fs::write(&script_path, "assert_eq(1, 2);").unwrap();

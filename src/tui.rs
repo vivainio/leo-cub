@@ -1206,9 +1206,8 @@ fn run_repl_snippet(app: &mut App, snippet: &str) {
         push_log(app, "no node selected");
         return;
     };
-    let gnx = row.node.0.clone();
     let document = std::mem::replace(&mut app.document, LeoDocument::empty());
-    let outcome = crate::rhai_run::run_bound(document, app.path.clone(), &gnx, snippet);
+    let outcome = crate::rhai_run::run_bound(document, app.path.clone(), &row.position, snippet);
     app.document = outcome.document;
     if outcome.touched {
         mark_outline_touched(app);
@@ -1921,14 +1920,14 @@ fn run_action(app: &mut App, position: &PositionId, target: &PositionId) {
         .into_iter()
         .find(|row| &row.position == target)
         .unwrap_or_else(|| row.clone());
-    let gnx = target_row.node.0.clone();
     // The `@language` directive isn't itself valid rhai, so it must be
     // stripped before the body reaches the engine.
     let body = strip_language_directive(&node.body);
 
     app.status = format!("running '{name}' with rhai...");
     let document = std::mem::replace(&mut app.document, LeoDocument::empty());
-    let outcome = crate::rhai_run::run_bound(document, app.path.clone(), &gnx, &body);
+    let outcome =
+        crate::rhai_run::run_bound(document, app.path.clone(), &target_row.position, &body);
     app.document = outcome.document;
     if outcome.touched {
         mark_outline_touched(app);
@@ -1972,12 +1971,16 @@ fn run_command(app: &mut App, script: &Path, fn_name: &str) {
         return;
     };
     let node = row.node.clone();
-    let target = node.0.clone();
 
     app.status = format!("running '{fn_name}' with rhai...");
     let document = std::mem::replace(&mut app.document, LeoDocument::empty());
-    let outcome =
-        crate::rhai_run::run_command(document, app.path.clone(), script, &target, fn_name);
+    let outcome = crate::rhai_run::run_command(
+        document,
+        app.path.clone(),
+        script,
+        &row.position,
+        fn_name,
+    );
     app.document = outcome.document;
     if outcome.touched {
         mark_outline_touched(app);
@@ -5389,6 +5392,62 @@ fn private_helper(doc, target) {
         assert_eq!(
             app.document.outline.nodes[&NodeId::from("c")].headline,
             "C renamed"
+        );
+    }
+
+    #[test]
+    fn repl_snippet_via_p_sees_the_selected_clone_occurrence_not_the_first_one() {
+        // A -> [Shared, C -> [Shared (clone)]] -- "shared" occurs twice.
+        let mut app = App::new(
+            LeoDocument::parse(
+                r#"<leo_file><vnodes><v t="a"><vh>A</vh><v t="shared"><vh>Shared</vh></v><v t="c"><vh>C</vh><v t="shared"></v></v></v></vnodes><tnodes><t tx="a"></t><t tx="shared"></t><t tx="c"></t></tnodes></leo_file>"#,
+            )
+            .unwrap(),
+            PathBuf::from("test.leo"),
+            String::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashSet::new(),
+            HashMap::new(),
+            OriginalExternalState::default(),
+            false,
+        );
+        // Reveal the clone under C (collapsed by default) and select it --
+        // row "0/1/0", the *second* occurrence of "shared".
+        app.expanded.insert(PositionId("0/1".into()));
+        app.selected = 3;
+        assert_eq!(
+            app.selected_row().map(|row| row.position),
+            Some(PositionId("0/1/0".into()))
+        );
+
+        app.log_view = true;
+        app.log_repl = Some(ReplInput::new(""));
+        for character in "print(p.path());".chars() {
+            handle_key(
+                &mut app,
+                KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+                None,
+            );
+        }
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            None,
+        );
+
+        // Anchored to the occurrence actually selected -- not the first
+        // occurrence of "shared" ("A/Shared"), which a gnx-only lookup
+        // would have returned.
+        assert!(
+            app.logs.iter().any(|line| line.contains("A/C/Shared")),
+            "expected p.path() to name the selected clone occurrence: {:?}",
+            app.logs
+        );
+        assert!(
+            !app.logs.iter().any(|line| line.trim_end() == "A/Shared"),
+            "should not have fallen back to the first occurrence: {:?}",
+            app.logs
         );
     }
 
