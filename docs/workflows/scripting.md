@@ -23,7 +23,7 @@ notes.leo` opening the TUI, dispatched by the file's `.rhai` extension.
 
 Create `notes.rhai`:
 
-```rhai
+```rust
 let doc = open("notes.leo");
 
 let task = doc.ensure("Project/Tasks/Write docs");
@@ -55,7 +55,7 @@ CI.
 
 A `Node` is the usual way to read, edit, and traverse an outline:
 
-```rhai
+```rust
 let doc = open("notes.leo");
 let tasks = doc.ensure("Project/Tasks");
 
@@ -98,7 +98,7 @@ An `@action` node is a command stored directly in an outline:
 1. Create a node with the headline `@action mark done`.
 2. Put this Rhai code in its body:
 
-    ```rhai
+    ```rust
     p.h = p.h + " ✓";
     p.b = p.b + "\nDone.";
     print("marked " + p.h);
@@ -125,7 +125,7 @@ in the body pane until the selection moves.
 For commands you want to edit as normal source files or reuse across outlines,
 put the Rhai code in a file. For example, `scripts/tasks.rhai` could contain:
 
-```rhai
+```rust
 const COMMANDS = ["mark_done", "list_todos"];
 
 fn mark_done(doc, target) {
@@ -169,7 +169,7 @@ child per setting: the child's headline is the name, its body is the value.
 A script reads it with `doc.ensure()` and `children()`, same as any other
 lookup:
 
-```rhai
+```rust
 fn get_variables(doc) {
     let vars = #{};
     for child in doc.ensure("@variables").children() {
@@ -200,7 +200,7 @@ strings after the script path:
 cub run rename.rhai notes.leo "A/B/C" "new headline"
 ```
 
-```rhai
+```rust
 let doc = open(ARGS[0]);
 doc.set_headline(doc.gnx(ARGS[1]), ARGS[2]);
 doc.save();
@@ -211,7 +211,7 @@ sometimes needs one can check `ARGS.len()` first.
 
 ## Assertions, output, and errors
 
-```rhai
+```rust
 assert(doc.count() > 0, "outline should not be empty");
 assert_eq(doc.validate().len, 0);
 print("check passed");
@@ -230,7 +230,7 @@ action, the error is displayed in the TUI.
 
 Use `doc.sh()` when a command should run relative to the open outline:
 
-```rhai
+```rust
 let result = doc.sh("git rev-parse --short HEAD");
 assert(result.code == 0, "git failed: " + result.stderr);
 let hash = result.stdout;
@@ -247,7 +247,7 @@ the API reference. The global `sh(command)` form instead uses
 
 For direct filesystem access, Rhai's file functions are available too:
 
-```rhai
+```rust
 let log = doc.dir() + "/script.log";
 let file = open_file(log, "a");
 file.write("script ran\n");
@@ -261,7 +261,7 @@ available path and file operations.
 Direct `Node` edits are clearest for most scripts. Use `doc.apply()` when you
 already have tree-shaped JSON or need several operations to be transactional:
 
-```rhai
+```rust
 let doc = open("notes.leo");
 let report = doc.apply(`{
   "operations": [
