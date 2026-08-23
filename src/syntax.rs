@@ -349,7 +349,14 @@ fn markdown_scope_style(scopes: &str) -> Option<Style> {
 /// needing every grammar -- vendored or not -- to special-case Leo's
 /// syntax.
 fn leo_directive_spans(line: &str) -> Option<Vec<Span<'static>>> {
-    const DIRECTIVES: &[&str] = &["@language", "@tabwidth", "@others", "@nonl", "@first", "@last"];
+    const DIRECTIVES: &[&str] = &[
+        "@language",
+        "@tabwidth",
+        "@others",
+        "@nonl",
+        "@first",
+        "@last",
+    ];
     let trimmed = line.trim_end_matches(['\n', '\r']);
     let content = trimmed.trim_start();
     let leading = trimmed.len() - content.len();

@@ -323,11 +323,13 @@ impl Doc {
     fn file_path(&mut self, gnx: &str) -> RhaiResult<String> {
         let inner = self.inner.borrow();
         find_node(&inner.document, gnx)?;
-        Ok(
-            leo::external_file_path(&inner.document.outline, &inner.path, &NodeId(gnx.to_owned()))
-                .map(|path| path.to_string_lossy().into_owned())
-                .unwrap_or_default(),
+        Ok(leo::external_file_path(
+            &inner.document.outline,
+            &inner.path,
+            &NodeId(gnx.to_owned()),
         )
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_default())
     }
 
     /// Wraps `gnx` as a `Node` bound to this `Doc` -- lets a script hold a
@@ -618,7 +620,9 @@ impl Node {
     /// correct if the outline changes underneath it, so treat it as a hint
     /// rather than something to hold onto across mutations.
     fn get_position(&mut self) -> String {
-        self.position.as_ref().map_or_else(String::new, |p| p.0.clone())
+        self.position
+            .as_ref()
+            .map_or_else(String::new, |p| p.0.clone())
     }
 
     /// The parent `Node`, or a `Node` wrapping `""` if this one is a root
