@@ -21,9 +21,9 @@ use crossterm::{
 };
 use leo::{
     AutoFile, DerivedFile, ExternalFormat, LeoDocument, Node, NodeId, OriginalExternalState,
-    Outline, Position, PositionId, RelativeFile, WritableExternalFile,
-    comment_delimiters, external_snapshot, format_for_directive, prepare_external_updates,
-    referenced_nodes, restore_external_state, search_outline, write_external_updates,
+    Outline, Position, PositionId, RelativeFile, WritableExternalFile, comment_delimiters,
+    external_snapshot, format_for_directive, prepare_external_updates, referenced_nodes,
+    restore_external_state, search_outline, write_external_updates,
 };
 use ratatui::{
     Terminal,
@@ -1974,13 +1974,8 @@ fn run_command(app: &mut App, script: &Path, fn_name: &str) {
 
     app.status = format!("running '{fn_name}' with rhai...");
     let document = std::mem::replace(&mut app.document, LeoDocument::empty());
-    let outcome = crate::rhai_run::run_command(
-        document,
-        app.path.clone(),
-        script,
-        &row.position,
-        fn_name,
-    );
+    let outcome =
+        crate::rhai_run::run_command(document, app.path.clone(), script, &row.position, fn_name);
     app.document = outcome.document;
     if outcome.touched {
         mark_outline_touched(app);
