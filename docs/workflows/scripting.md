@@ -79,10 +79,12 @@ all-gnx `Doc` API (below) exists underneath it for structural operations
 | Signature | Does |
 | --- | --- |
 | `doc.node(gnx: string) -> Node` | Wraps an existing `gnx` as a `Node`. Fails if `gnx` isn't a node in the outline. |
+| `doc.node_at(position: string) -> Node` | Wraps the exact tree occurrence `position` names (an index path like `"0/2/1"`, as returned by `node.position` or seen in the TUI) as a `Node`, anchored to *that* occurrence rather than falling back to the first one. Fails if `position` doesn't resolve to anything in the outline. |
 | `doc.ensure(path: string) -> Node` | Ensures a slash-separated headline path exists (creating missing segments, reusing existing ones — same rules as `cub add`), and returns the leaf as a `Node`. |
 | `node.h: string` (get/set) | The node's headline. |
 | `node.b: string` (get/set) | The node's body. |
 | `node.gnx: string` (read-only) | The plain gnx string this `Node` wraps — for passing to a `Doc` method that doesn't have a `Node` form, like `doc.clone_node`. |
+| `node.position: string` (read-only) | The exact tree occurrence this handle is anchored to, as an index path (`"0/2/1"`), or `""` if this handle only knows a bare gnx — see below. |
 | `node.parent() -> Node` | The parent `Node` (wraps `""` if this node is a root, same as `doc.parent`). |
 | `node.children() -> array` | This node's children, in outline order, as `Node`s. |
 | `node.subtree() -> array` | This node and everything under it, depth-first (itself first), as `Node`s — the deeper counterpart to `.children()`. |
@@ -108,9 +110,28 @@ doc.save();
 
 A `Node` is just a gnx plus a handle back onto the `Doc` it came from —
 `tasks.h = "..."` and the low-level `doc.headline(gnx)` read and write the
-exact same data, so the two styles mix freely in one script. A node matched
-or visited more than once because of a clone occurrence still yields one
-`Node` (its first occurrence), the same rule `doc.children`/`.parent` use.
+exact same data, so the two styles mix freely in one script. `gnx` is the
+identity that `.h`/`.b` read and write, and it stays valid however the
+outline changes around it. A `Node` made from a bare gnx (`doc.node(gnx)`,
+`doc.find_h`/`doc.find_b`, …) can't tell one clone occurrence from
+another, so a node matched or visited more than once because it's cloned
+still yields one `Node` — its first occurrence, the same rule
+`doc.children`/`.parent` use.
+
+A `Node` built by walking the tree instead — `.parent()`, `.children()`,
+`.subtree()`, or `doc.node_at(position)` — carries the exact occurrence it
+came from along with it (`node.position`), and every further `Node` it
+hands back stays anchored to that occurrence too. That makes `.path()`/
+`.parent()` correct for a specific clone rather than always resolving to
+the first one:
+
+```rhai
+let team_a_tasks = doc.node_at("0/1"); // whichever occurrence lives here
+let clone_of_tasks = doc.node("Tasks"); // "Tasks" occurs in several teams
+
+print(team_a_tasks.path());   // names *this* team's Tasks
+print(clone_of_tasks.path()); // names whichever team's Tasks came first
+```
 
 `doc.find_h`/`doc.find_b` return `Node`s too, so a search result chains
 straight into `.h`/`.b`/`.children()` without an extra `doc.node()` call:
@@ -368,7 +389,7 @@ predefined — no `open()` call needed:
 | --- | --- |
 | `doc` | A `Doc` already bound to the outline this editor session has open — the same object the TUI itself is showing, not a fresh read from disk. Every method above works on it, and mutations are visible in the editor as soon as the action finishes. |
 | `target` | The gnx of the node the user had selected when they invoked the action — **the current position**, not the `@action` node itself, which may live anywhere in the tree. Use it directly with the low-level `doc.headline`/`doc.body`/`doc.set_headline`/`doc.set_body`, or reach for `p` below instead of wrapping it yourself. |
-| `p` | `doc.node(target)` — the current position as a `Node` handle, predefined so a body can write `p.h`/`p.b` straight away instead of calling `doc.node(target)` itself first. Exactly the same object `doc.node(target)` would hand back; the two are interchangeable. |
+| `p` | `doc.node_at(...)` for the exact occurrence selected — a `Node` handle predefined so a body can write `p.h`/`p.b` straight away instead of resolving it first. Unlike `doc.node(target)`, `p` is anchored to the specific occurrence the user had selected, so `p.path()`/`p.parent()` stay correct even if `target` is cloned to more than one place in the tree; `p.gnx == target` either way. |
 
 ```rhai
 p.h = p.h + " ✓";
@@ -427,7 +448,8 @@ the selection moves, and a mutation (`doc.ensure`, `node.h =`, `doc.apply`,
 
 The one contract a `COMMANDS` function must meet: it takes **exactly
 `(doc, target)`**, where `target` is a **`Node`** for whatever was
-selected when the command was run — the current position — with
+selected when the command was run — anchored to that exact occurrence
+(`target.position`), not just its gnx — with
 `.h`/`.b`/`.gnx`/`.parent()`/`.children()` available straight away, no
 `doc.node(...)` call needed first. (An `@action` body gets a `target`
 *string* plus a separately predefined `p` `Node` because both are cheap to
@@ -487,7 +509,7 @@ onto it loosely:
 | Leo | cub | Difference |
 | --- | --- | --- |
 | `c` | `doc` | `c` is a live, mutable handle onto Leo's entire running commander (undo stack, GUI frame, all subsystems). `doc` is just the outline plus save/apply/validate — no undo stack, no GUI. |
-| `p` | `doc.node(target)` | Leo's `p` is a stateful **position** object: it can walk the tree (`p.next()`, `p.parent()`, `p.children()`) and becomes invalid if the outline changes under it. `doc.node(gnx)` returns a `Node` handle with the same shape of API, keyed by stable gnx instead of a position that can go stale. `target` itself is the plain gnx **string**, for scripts that don't need a handle. |
+| `p` | `doc.node(target)` / `doc.node_at(position)` | Leo's `p` is a stateful **position** object: it can walk the tree (`p.next()`, `p.parent()`, `p.children()`) and becomes invalid if the outline changes under it. A cub `Node`'s identity is still its gnx, not a position — `.h`/`.b`/`.gnx` stay valid however the outline changes around it, unlike Leo's `p`. A `Node` built by walking the tree also carries the exact occurrence it came from (`node.position`), so `.path()`/`.parent()` can still tell two clones apart — a snapshot for disambiguation, not a live cursor that goes stale. `target` itself is the plain gnx **string**, for scripts that don't need a handle. |
 | `p.h` / `p.b` | `node.h` / `node.b` | Same property syntax; cub's is backed by gnx identity rather than a live tree position, so it stays valid even if the outline changes around it. The low-level `doc.headline(gnx)`/`doc.body(gnx)` read and write the same data for a one-off call. |
 | `v.gnx` | `node.gnx`, or the gnx string itself | Every node handle in cub's API already *is*, or wraps, its gnx — there's no separate node/vnode object to unwrap it from. |
 | `g.es(...)` | `print(...)` | Both write to a log a human is expected to read; cub's is plain Rhai `print`, not a Leo-specific function. |

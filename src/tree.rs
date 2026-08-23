@@ -4,7 +4,8 @@ use serde::Serialize;
 use thiserror::Error;
 
 use crate::import::IdGenerator;
-use crate::{Node, NodeId, Outline, Position};
+use crate::model::parse_path;
+use crate::{Node, NodeId, Outline, Position, PositionId};
 
 #[derive(Clone, Debug, Serialize)]
 pub struct AddPathsReport {
@@ -160,6 +161,39 @@ impl Outline {
                 .collect::<Vec<_>>()
                 .join("/"),
         )
+    }
+
+    /// The slash-separated headline path down to the exact occurrence
+    /// `position` names, escaped the same way [`Outline::headline_path_of`]
+    /// is -- the exact-occurrence counterpart to `headline_path_of`, which
+    /// can only resolve a node id's *first* occurrence, indistinguishable
+    /// from any of its other clones. `None` if `position` doesn't resolve
+    /// to anything in the outline.
+    pub fn headline_path_at(&self, position: &PositionId) -> Option<String> {
+        let chain = self.ancestor_chain_at(position)?;
+        Some(
+            chain
+                .iter()
+                .map(|id| escape_headline_path_component(&self.nodes[id].headline))
+                .collect::<Vec<_>>()
+                .join("/"),
+        )
+    }
+
+    /// The chain of gnxs from a root down to `position` (inclusive), read
+    /// directly off `position`'s indices -- the exact-occurrence
+    /// counterpart to [`Outline::ancestor_chain`]. `None` if `position`
+    /// doesn't resolve to anything in the outline.
+    fn ancestor_chain_at(&self, position: &PositionId) -> Option<Vec<NodeId>> {
+        let indices = parse_path(position)?;
+        let mut chain = Vec::new();
+        let mut p = self.roots.get(*indices.first()?)?;
+        chain.push(p.node.clone());
+        for index in &indices[1..] {
+            p = p.children.get(*index)?;
+            chain.push(p.node.clone());
+        }
+        Some(chain)
     }
 
     /// The chain of gnxs from a root down to `node` (inclusive), via the
@@ -358,6 +392,50 @@ mod tests {
         let path = outline.headline_path_of(&escaped).unwrap();
         assert_eq!(outline.resolve_headline_path(&path).unwrap(), escaped);
         assert_eq!(outline.headline_path_of(&NodeId::from("missing")), None);
+    }
+
+    #[test]
+    fn headline_path_at_and_parent_position_resolve_the_exact_clone_occurrence() {
+        let mut outline = Outline::default();
+        outline
+            .add_headline_paths(&["A/Shared".into(), "A/C".into()])
+            .unwrap();
+        let shared = outline.resolve_headline_path("A/Shared").unwrap();
+
+        // Clone `shared` as a child of `c`, so it occurs at both "0/0"
+        // (its original spot) and "0/1/0".
+        outline.roots[0].children[1].children.push(Position {
+            node: shared.clone(),
+            children: vec![],
+        });
+
+        assert_eq!(
+            outline
+                .headline_path_at(&PositionId("0/0".into()))
+                .as_deref(),
+            Some("A/Shared")
+        );
+        // Told apart by position alone -- same node id, different path.
+        assert_eq!(
+            outline
+                .headline_path_at(&PositionId("0/1/0".into()))
+                .as_deref(),
+            Some("A/C/Shared")
+        );
+        assert_eq!(outline.headline_path_at(&PositionId("9/9".into())), None);
+
+        assert_eq!(
+            outline.parent_position(&PositionId("0/1/0".into())),
+            Some(PositionId("0/1".into()))
+        );
+        assert_eq!(outline.parent_position(&PositionId("0".into())), None);
+
+        // `headline_path_of`'s first-occurrence search can't tell the two
+        // occurrences apart -- it always resolves to the first one.
+        assert_eq!(
+            outline.headline_path_of(&shared).as_deref(),
+            Some("A/Shared")
+        );
     }
 
     #[test]
