@@ -26,6 +26,7 @@ quick-xml = "0.41"
 ratatui = { version = "0.30.0", optional = true, features = ["unstable-rendered-line-info"] }
 regex = "1.13"
 rhai = { version = "1", optional = true }
+rhai-fs = { version = "0.1.5", optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 streaming-iterator = "0.1"
@@ -46,5 +47,5 @@ default = ["tui", "syntax"]
 tui = ["dep:ratatui", "dep:crossterm", "rhai"]
 # Embedded Rhai scripting: `@action` bodies (tui feature) and the
 # standalone `cub run` test-script command.
-rhai = ["dep:rhai"]
+rhai = ["dep:rhai", "dep:rhai-fs"]
 syntax = ["dep:syntect"]

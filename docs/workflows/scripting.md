@@ -394,6 +394,44 @@ let r2 = sh("cat notes.txt", #{ cwd: "quickstart-files" });
 (throwing, like the rest of the `Doc` API) if `sh` itself can't be
 launched.
 
+## Filesystem access
+
+For reading and writing files directly — no subprocess needed — every
+script also has the [rhai-fs](https://rhai.rs/book/lib/rhai-fs.html)
+package, registered as global functions alongside the `Doc` API:
+
+| Signature | Does |
+| --- | --- |
+| `doc.dir() -> string` | The directory holding this `Doc`'s `.leo` file (`"."` if none). Paths below are plain strings resolved against `cub`'s own working directory, not the open `.leo` file's — pair with `+` on this to build one next to it instead, e.g. `doc.dir() + "/notes.txt"`. |
+| `path(p: string) -> Path` | Wraps `p` for the properties and `+`/`+=`/`push` operators below. |
+| `p.exists`, `p.is_dir`, `p.is_file`, `p.is_absolute`, `p.is_relative`, `p.is_symlink -> bool` | Property reads on a `Path`. |
+| `p.canonicalize() -> Path` | Resolves `.`/`..`/symlinks to an absolute path. |
+| `cwd() -> Path` | `cub`'s current working directory. |
+| `create_dir(p: string)` | Creates `p` and any missing parents, like `mkdir -p`. |
+| `remove_dir(p: string)` | Removes an empty directory. |
+| `open_dir(p: string) -> array` | Lists `p`'s entries as `Path`s. |
+| `remove_file(p: string)` | Deletes a file. |
+| `open_file(p: string) -> File`, `open_file(p: string, mode: string) -> File` | Opens `p` for read+write, creating it if needed. `mode` picks an explicit access/creation mode: `"r"`, `"r+"`, `"w"`, `"wx"`, `"w+"`, `"a"`, `"ax"`, `"a+"`, `"ax+"` (an `x` suffix requires the file not already exist). |
+| `f.read_string() -> string`, `f.read_string(len: int) -> string` | Reads the rest of the file (or up to `len` bytes) as UTF-8 from the current position. |
+| `f.write(s: string)` | Writes `s` at the current position. |
+| `f.seek(pos: int) -> int`, `f.position() -> int` | Moves, and reads back, the file cursor. |
+| `f.bytes() -> int` | The file's length in bytes. |
+| `f.read_blob() -> blob`, `blob.write_to_file(f)` | The BLOB-oriented equivalents of `read_string`/`write`, for binary data. |
+
+```rhai
+let doc = open("outline.leo");
+
+// A path next to the open .leo file, not cub's own working directory
+let log = doc.dir() + "/notes.txt";
+
+let f = open_file(log, "a");
+f.write("logged from a script\n");
+
+for entry in open_dir(doc.dir()) {
+    print(entry.to_string());
+}
+```
+
 ## `@action` bodies
 
 An `@action` node's headline marks it as runnable from the action palette

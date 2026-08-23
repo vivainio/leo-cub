@@ -20,6 +20,7 @@ use leo::{LeoDocument, NodeId, Operation, OperationBatch, Position, PositionId};
 use regex::Regex;
 #[cfg(feature = "tui")]
 use rhai::Scope;
+use rhai::packages::Package;
 use rhai::{Array, Dynamic, Engine, EvalAltResult};
 
 /// The outline handle a script gets back from `open(path)` (or, for a bound
@@ -569,6 +570,16 @@ impl Doc {
             .filter(|parent| !parent.as_os_str().is_empty())
             .map(std::path::Path::to_path_buf)
     }
+
+    /// `dir()` as a script-facing string, `"."` standing in for `None` --
+    /// the pairing rhai-fs functions need to build a path next to the open
+    /// `.leo` file the same way `sh`'s default `cwd` already does (e.g.
+    /// `open_file(doc.dir() + "/notes.txt")`).
+    fn dir_string(&mut self) -> String {
+        self.dir()
+            .map(|dir| dir.display().to_string())
+            .unwrap_or_else(|| ".".to_string())
+    }
 }
 
 /// A `Doc` node bound to one `gnx`, returned by `doc.node(gnx)`. Property
@@ -839,7 +850,15 @@ fn register_doc_api(engine: &mut Engine) {
     engine.register_fn("save_as", Doc::save_as);
     engine.register_fn("sh", Doc::sh);
     engine.register_fn("sh", Doc::sh_with_opts);
+    engine.register_fn("dir", Doc::dir_string);
     engine.register_fn("parse_json", parse_json);
+
+    // rhai-fs: open_file/read_string/write/read_dir/create_dir/... on plain
+    // path strings, global rather than `Doc`-scoped since a script may need
+    // to touch files outside the outline entirely. Paths are resolved
+    // against `cub`'s own working directory, same as any other Rust path --
+    // use `doc.dir()` to build one next to the open `.leo` file instead.
+    rhai_fs::FilesystemPackage::new().register_into_engine(engine);
 
     engine.register_type_with_name::<Node>("Node");
     engine.register_get_set("h", Node::get_h, Node::set_h);
