@@ -12,10 +12,22 @@
   <v t="cub.1787246563.998877665"><vh>Insert child at selection demo</vh>
     <v t="demo.1787246563.998877665.1"><vh>@action new child</vh></v>
   </v>
+  <v t="cub.1787507388.876784675.1"><vh>@variables</vh>
+    <v t="cub.1787507388.876784675.2"><vh>repo</vh></v>
+  </v>
 </vnodes>
 <tnodes>
-  <t tx="demo.1787246563.226321852.1">let prs = parse_json(doc.sh(&quot;gh pr list --json number,title,author,state,url&quot;).stdout);
-let issues = parse_json(doc.sh(&quot;gh issue list --json number,title,author,state,url&quot;).stdout);
+  <t tx="cub.1787507388.876784675.2">leo-editor/leo-editor</t>
+  <t tx="demo.1787246563.226321852.1">let vars = #{};
+for child in doc.ensure(&quot;@variables&quot;).children() {
+    let value = child.b;
+    value.trim();
+    vars[child.h] = value;
+}
+let repo_flag = if vars.contains(&quot;repo&quot;) &amp;&amp; vars.repo != &quot;&quot; { &quot; --repo '&quot; + vars.repo + &quot;'&quot; } else { &quot;&quot; };
+
+let prs = parse_json(doc.sh(&quot;gh pr list --json number,title,author,state,url&quot; + repo_flag).stdout);
+let issues = parse_json(doc.sh(&quot;gh issue list --json number,title,author,state,url&quot; + repo_flag).stdout);
 
 for pr in prs {
     let n = doc.ensure(&quot;Imports/PRs/#&quot; + pr.number + &quot;: &quot; + pr.title);
@@ -25,7 +37,7 @@ for issue in issues {
     let n = doc.ensure(&quot;Imports/Issues/#&quot; + issue.number + &quot;: &quot; + issue.title);
     n.b = issue.state + &quot; · &quot; + issue.author.login + &quot; · &quot; + issue.url;
 }
-print(&quot;imported &quot; + prs.len() + &quot; PR(s) and &quot; + issues.len() + &quot; issue(s)&quot;);
+print(&quot;imported &quot; + prs.len() + &quot; PR(s) and &quot; + issues.len() + &quot; issue(s) from &quot; + (if vars.contains(&quot;repo&quot;) &amp;&amp; vars.repo != &quot;&quot; { vars.repo } else { &quot;the current repo&quot; }));
 </t>
   <t tx="demo.1787246563.998877665.1">let t = doc.node(target);
 let batch = #{

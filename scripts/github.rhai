@@ -8,46 +8,79 @@
 // remote and an authenticated `gh` (`gh auth status`).
 //
 // COMMANDS names the functions meant to be exposed as runnable commands --
-// everything else here (shq, and the functions needing more than
-// `doc`/`target`) is a library helper, callable from other scripts or the
-// REPL but not listed for direct invocation. Every listed function takes
-// exactly `(doc, target)` -- `target` is a `Node` for whatever was
-// selected when the command was run (the current position), with
-// `.h`/`.b`/`.gnx`/etc. straight away, no `doc.node(...)` needed first.
-// None of the three below happen to need it, but the palette always
-// passes it, so the parameter has to be there regardless.
+// everything else here (shq, get_variables, gh_repo_flag, and the
+// functions needing more than `doc`/`target`) is a library helper,
+// callable from other scripts or the REPL but not listed for direct
+// invocation. Every listed function takes exactly `(doc, target)` --
+// `target` is a `Node` for whatever was selected when the command was run
+// (the current position), with `.h`/`.b`/`.gnx`/etc. straight away, no
+// `doc.node(...)` needed first. None of the three below happen to need
+// it, but the palette always passes it, so the parameter has to be there
+// regardless.
 const COMMANDS = ["gh_pr_list", "gh_issue_list", "import_prs_and_issues"];
 
 /// Wraps `s` in single quotes for safe interpolation into a `sh -c`
 /// string, escaping any embedded single quotes. Use this any time a
 /// value that isn't a trusted literal (a title, a body, ...) is built
-/// into a `gh` command line.
+/// into a `gh` command line. Rhai's `replace()` mutates in place and
+/// returns `()` -- see the API reference's gotchas section -- so it runs
+/// as a statement on `escaped`, not chained as an expression.
 fn shq(s) {
-    "'" + s.to_string().replace("'", "'\\''") + "'"
+    let escaped = s.to_string();
+    escaped.replace("'", "'\\''");
+    "'" + escaped + "'"
+}
+
+/// Reads the `@variables` node's children into a map, keyed by headline
+/// with each body (trimmed) as the value -- e.g. a child headlined `repo`
+/// with body `leo-editor/leo-editor` becomes `get_variables(doc).repo`. Missing
+/// `@variables` or an empty body just means the map is missing that key;
+/// callers decide what "unset" means for them.
+fn get_variables(doc) {
+    let vars = #{};
+    for child in doc.ensure("@variables").children() {
+        let value = child.b;
+        value.trim();
+        vars[child.h] = value;
+    }
+    vars
+}
+
+/// The `gh --repo` flag to append to a command, driven by the `repo`
+/// `@variables` entry (e.g. `leo-editor/leo-editor`). Empty when unset, so
+/// `gh` falls back to its default: the remote of the directory `doc.sh()`
+/// runs in.
+fn gh_repo_flag(doc) {
+    let vars = get_variables(doc);
+    if vars.contains("repo") && vars.repo != "" {
+        " --repo " + shq(vars.repo)
+    } else {
+        ""
+    }
 }
 
 fn gh_pr_list(doc, target) {
-    parse_json(doc.sh("gh pr list --json number,title,author,state,url").stdout)
+    parse_json(doc.sh("gh pr list --json number,title,author,state,url" + gh_repo_flag(doc)).stdout)
 }
 
 fn gh_issue_list(doc, target) {
-    parse_json(doc.sh("gh issue list --json number,title,author,state,url").stdout)
+    parse_json(doc.sh("gh issue list --json number,title,author,state,url" + gh_repo_flag(doc)).stdout)
 }
 
 fn gh_pr_view(doc, number) {
-    parse_json(doc.sh("gh pr view " + number.to_string() + " --json number,title,author,state,url,body").stdout)
+    parse_json(doc.sh("gh pr view " + number.to_string() + " --json number,title,author,state,url,body" + gh_repo_flag(doc)).stdout)
 }
 
 fn gh_issue_view(doc, number) {
-    parse_json(doc.sh("gh issue view " + number.to_string() + " --json number,title,author,state,url,body").stdout)
+    parse_json(doc.sh("gh issue view " + number.to_string() + " --json number,title,author,state,url,body" + gh_repo_flag(doc)).stdout)
 }
 
 fn gh_pr_create(doc, title, body) {
-    doc.sh("gh pr create --title " + shq(title) + " --body " + shq(body))
+    doc.sh("gh pr create --title " + shq(title) + " --body " + shq(body) + gh_repo_flag(doc))
 }
 
 fn gh_issue_create(doc, title, body) {
-    doc.sh("gh issue create --title " + shq(title) + " --body " + shq(body))
+    doc.sh("gh issue create --title " + shq(title) + " --body " + shq(body) + gh_repo_flag(doc))
 }
 
 /// Imports open PRs and issues into `Imports/PRs` and `Imports/Issues`,

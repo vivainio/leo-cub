@@ -64,7 +64,9 @@ for child in tasks.children() {
 }
 
 for todo in doc.find_h("^TODO") {
-    todo.h = todo.h.replace("TODO", "DONE");
+    let h = todo.h;
+    h.replace("TODO", "DONE");
+    todo.h = h;
 }
 
 doc.save();
@@ -148,6 +150,44 @@ Other functions may use any signature, but do not appear in the palette.
 The repository's [`scripts/github.rhai`](https://github.com/vivainio/leo-cub/blob/main/scripts/github.rhai)
 is a larger example with both palette commands and private helper functions.
 
+## Configure a script with an `@variables` tree
+
+`@variables` isn't a directive `cub` treats specially -- it's a plain
+headline convention for settings a script should read instead of
+hard-coding. Put one node headlined `@variables` in the outline, with one
+child per setting: the child's headline is the name, its body is the value.
+
+```text
+@variables
+  repo
+    leo-editor/leo-editor
+```
+
+A script reads it with `doc.ensure()` and `children()`, same as any other
+lookup:
+
+```rhai
+fn get_variables(doc) {
+    let vars = #{};
+    for child in doc.ensure("@variables").children() {
+        let value = child.b;
+        value.trim();
+        vars[child.h] = value;
+    }
+    vars
+}
+```
+
+`doc.ensure("@variables")` returns an empty node (no children) when the tree
+is missing, so `get_variables()` just yields `#{}` rather than throwing --
+callers decide what an absent key should default to.
+
+`scripts/github.rhai` uses exactly this pattern for a `repo` variable: when
+`@variables/repo` is set to `owner/name`, every `gh` command it runs adds
+` --repo owner/name`, targeting that repository instead of the one implied by
+the current directory. Leave `@variables` (or the `repo` child) absent and
+`gh` falls back to its own default.
+
 ## Assertions, output, and errors
 
 ```rhai
@@ -171,12 +211,17 @@ Use `doc.sh()` when a command should run relative to the open outline:
 
 ```rhai
 let result = doc.sh("git rev-parse --short HEAD");
-assert_eq(result.code, 0, "git failed: " + result.stderr);
-print(result.stdout.trim());
+assert(result.code == 0, "git failed: " + result.stderr);
+let hash = result.stdout;
+hash.trim();
+print(hash);
 ```
 
 The result contains `stdout`, `stderr`, and `code`. A non-zero command does not
-throw, so check `code` yourself. The global `sh(command)` form instead uses
+throw, so check `code` yourself. Rhai's `trim()` mutates its target in place and
+returns nothing, so it needs a variable to act on -- `result.stdout.trim()`
+discards the trimmed copy; see [gotchas](../reference/rhai-api.md#gotchas) in
+the API reference. The global `sh(command)` form instead uses
 `cub`'s current working directory and also accepts `#{ cwd: "path" }` options.
 
 For direct filesystem access, Rhai's file functions are available too:

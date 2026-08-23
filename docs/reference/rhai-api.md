@@ -165,3 +165,22 @@ An `@action` body receives:
 An `@import` command must have the signature `fn name(doc, target)`, where
 `target` is a positioned `Node`. Only functions named in the top-level
 `COMMANDS` array appear in the action palette.
+
+## Gotchas
+
+Rhai's string case/whitespace/substitution methods -- `trim()`,
+`trim_start()`, `trim_end()`, `to_upper()`, `to_lower()`, `replace()`, and
+similar -- mutate their target in place and return nothing. Chaining one onto
+a temporary throws the result away:
+
+```rhai
+print(result.stdout.trim());   // prints nothing; the trimmed copy is discarded
+```
+
+Call it as a statement on a variable instead, then use that variable:
+
+```rhai
+let hash = result.stdout;
+hash.trim();
+print(hash);                   // prints the trimmed value
+```
