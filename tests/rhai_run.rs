@@ -498,6 +498,26 @@ fn cub_run_promotes_an_auto_node_to_at_f_by_renaming_and_saving() {
     fs::remove_dir_all(&dir).unwrap();
 }
 
+// The bare `cub foo.rhai` shorthand (no `run` subcommand) is dispatched
+// from the same positional argument the TUI shorthand (`cub foo.leo`) uses,
+// which only exists when the `tui` feature is compiled in (see `Cli::file`
+// in src/main.rs) -- so this needs `tui`, unlike every other test here.
+#[test]
+#[cfg(feature = "tui")]
+fn cub_dispatches_a_bare_rhai_file_as_run_without_the_subcommand() {
+    let script_path = temp_path("rhai_shorthand.rhai");
+    fs::write(&script_path, "print(\"ran via shorthand\");").unwrap();
+
+    let output = run_cub(&[script_path.to_str().unwrap()]);
+    assert!(
+        output.status.success(),
+        "cub <script.rhai> failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("ran via shorthand"));
+}
+
 #[test]
 fn cub_run_exits_nonzero_and_reports_the_failed_assertion() {
     let script_path = temp_path("rhai_run_failure.rhai");
