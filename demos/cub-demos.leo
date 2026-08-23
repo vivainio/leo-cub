@@ -10,11 +10,13 @@
   <v t="cub.1786725356.346248974.2"><vh>@auto demo.js</vh></v>
   <v t="cub.1786725356.346248974.3"><vh>@auto demo.ts</vh></v>
   <v t="cub.1786725356.346248974.4"><vh>@auto demo.go</vh></v>
+  <v t="cub.1786725356.346248974.5"><vh>@f ../scripts/github.rhai</vh></v>
 </vnodes>
 <tnodes>
   <t tx="cub.1786725356.346248974.1"></t>
   <t tx="cub.1786725356.346248974.2"></t>
   <t tx="cub.1786725356.346248974.3"></t>
   <t tx="cub.1786725356.346248974.4"></t>
+  <t tx="cub.1786725356.346248974.5"></t>
 </tnodes>
 </leo_file>

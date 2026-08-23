@@ -40,8 +40,8 @@ and exposes transactional operations intended for scripts and AI tools.
 - Resolve ancestor `@path` directives in the TUI.
 - Browse outlines with a small Ratatui interface.
 - Highlight node bodies with Syntect, using `@language`, `@rst` ancestors, or
-  source extensions, including bundled reStructuredText and Nushell syntax
-  support.
+  source extensions, including bundled reStructuredText, Nushell, and Rhai
+  syntax support.
 - Open a derived node's full source file at its sentinel line using `$VISUAL` or
   `$EDITOR`.
 
@@ -222,7 +222,7 @@ slash-separated headline path. Paths with duplicate matching siblings are
 rejected as ambiguous.
 
 `import` creates Leo external-file nodes in `auto`, `edit`, or `clean` mode.
-Markdown, Python, Rust, C#, Go, JavaScript/JSX, TypeScript/TSX, and XSLT `@auto` files
+Markdown, Python, Rust, Rhai, C#, Go, JavaScript/JSX, TypeScript/TSX, and XSLT `@auto` files
 are expanded transiently with Tree-sitter when they are loaded by `inspect` or
 the TUI; the generated tree is not stored in the `.leo` file. Unsupported
 source types remain available as a plain root node. Markdown also supports

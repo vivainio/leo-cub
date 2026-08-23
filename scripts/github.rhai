@@ -1,3 +1,5 @@
+//@+leo-ver=cub-1-thin
+//@0 [cub.1786725356.346248974.5] @f ../scripts/github.rhai
 // GitHub CLI (`gh`) wrappers for cub's rhai Doc API.
 //
 // An outline node with headline `@import scripts/github.rhai` (path
@@ -25,12 +27,15 @@ const COMMANDS = ["gh_pr_list", "gh_issue_list", "import_prs_and_issues"];
 /// into a `gh` command line. Rhai's `replace()` mutates in place and
 /// returns `()` -- see the API reference's gotchas section -- so it runs
 /// as a statement on `escaped`, not chained as an expression.
+//@+others
+//@> fn shq
 fn shq(s) {
     let escaped = s.to_string();
     escaped.replace("'", "'\\''");
     "'" + escaped + "'"
 }
 
+//@ fn get_variables
 /// Reads the `@variables` node's children into a map, keyed by headline
 /// with each body (trimmed) as the value -- e.g. a child headlined `repo`
 /// with body `leo-editor/leo-editor` becomes `get_variables(doc).repo`. Missing
@@ -46,6 +51,7 @@ fn get_variables(doc) {
     vars
 }
 
+//@ fn gh_repo_flag
 /// The `gh --repo` flag to append to a command, driven by the `repo`
 /// `@variables` entry (e.g. `leo-editor/leo-editor`). Empty when unset, so
 /// `gh` falls back to its default: the remote of the directory `doc.sh()`
@@ -59,30 +65,37 @@ fn gh_repo_flag(doc) {
     }
 }
 
+//@ fn gh_pr_list
 fn gh_pr_list(doc, target) {
     parse_json(doc.sh("gh pr list --json number,title,author,state,url" + gh_repo_flag(doc)).stdout)
 }
 
+//@ fn gh_issue_list
 fn gh_issue_list(doc, target) {
     parse_json(doc.sh("gh issue list --json number,title,author,state,url" + gh_repo_flag(doc)).stdout)
 }
 
+//@ fn gh_pr_view
 fn gh_pr_view(doc, number) {
     parse_json(doc.sh("gh pr view " + number.to_string() + " --json number,title,author,state,url,body" + gh_repo_flag(doc)).stdout)
 }
 
+//@ fn gh_issue_view
 fn gh_issue_view(doc, number) {
     parse_json(doc.sh("gh issue view " + number.to_string() + " --json number,title,author,state,url,body" + gh_repo_flag(doc)).stdout)
 }
 
+//@ fn gh_pr_create
 fn gh_pr_create(doc, title, body) {
     doc.sh("gh pr create --title " + shq(title) + " --body " + shq(body) + gh_repo_flag(doc))
 }
 
+//@ fn gh_issue_create
 fn gh_issue_create(doc, title, body) {
     doc.sh("gh issue create --title " + shq(title) + " --body " + shq(body) + gh_repo_flag(doc))
 }
 
+//@ fn import_prs_and_issues
 /// Imports open PRs and issues into `Imports/PRs` and `Imports/Issues`,
 /// one node per item -- the same shape as the `@action Import PRs and
 /// issues` demo in demos/scripting.leo, factored out so other scripts can
@@ -103,3 +116,7 @@ fn import_prs_and_issues(doc, target) {
     }
     print("imported " + prs.len() + " PR(s) and " + issues.len() + " issue(s)");
 }
+//@-others
+//@@language rhai
+//@@tabwidth -4
+//@-leo

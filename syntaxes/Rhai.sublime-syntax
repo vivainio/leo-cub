@@ -1,0 +1,120 @@
+%YAML 1.2
+---
+# Hand-written for leo-cub: Rhai (https://rhai.rs) has no widely vendored
+# sublime-syntax grammar to pull in, so this one is authored directly
+# against the Rhai language reference rather than adapted from an upstream
+# file (contrast syntaxes/Nushell.sublime-syntax and reStructuredText.sublime-syntax,
+# which are vendored). Scope names follow the same conventions as Sublime's
+# bundled Rust grammar so the base16-ocean.dark theme colors it sensibly.
+name: Rhai
+scope: source.rhai
+version: 1
+
+file_extensions:
+  - rhai
+
+contexts:
+  main:
+    - include: comments
+    - include: strings
+    - include: numbers
+    - include: function-def
+    - include: keywords
+    - include: constants
+    - include: operators
+
+  comments:
+    - match: /\*\*(?!/)
+      scope: punctuation.definition.comment.rhai
+      push:
+        - meta_scope: comment.block.documentation.rhai
+        - match: \*/
+          scope: punctuation.definition.comment.rhai
+          pop: true
+    - match: /\*
+      scope: punctuation.definition.comment.rhai
+      push:
+        - meta_scope: comment.block.rhai
+        - match: \*/
+          scope: punctuation.definition.comment.rhai
+          pop: true
+    - match: //[!/].*$
+      scope: comment.line.documentation.rhai
+    - match: //.*$
+      scope: comment.line.double-slash.rhai
+
+  strings:
+    - match: '"'
+      scope: punctuation.definition.string.begin.rhai
+      push:
+        - meta_scope: string.quoted.double.rhai
+        - match: \\.
+          scope: constant.character.escape.rhai
+        - match: '"'
+          scope: punctuation.definition.string.end.rhai
+          pop: true
+    - match: "`"
+      scope: punctuation.definition.string.begin.rhai
+      push:
+        - meta_scope: string.interpolated.rhai
+        - match: \\.
+          scope: constant.character.escape.rhai
+        - match: \$\{
+          scope: punctuation.section.interpolation.begin.rhai
+          push:
+            - match: \}
+              scope: punctuation.section.interpolation.end.rhai
+              pop: true
+            - include: main
+        - match: "`"
+          scope: punctuation.definition.string.end.rhai
+          pop: true
+    - match: "'(\\\\.|[^'\\\\])'"
+      scope: string.quoted.single.rhai
+
+  numbers:
+    - match: \b0x[0-9a-fA-F_]+\b
+      scope: constant.numeric.hex.rhai
+    - match: \b0o[0-7_]+\b
+      scope: constant.numeric.octal.rhai
+    - match: \b0b[01_]+\b
+      scope: constant.numeric.binary.rhai
+    - match: \b[0-9][0-9_]*\.[0-9][0-9_]*([eE][+-]?[0-9]+)?\b
+      scope: constant.numeric.float.rhai
+    - match: \b[0-9][0-9_]*[eE][+-]?[0-9]+\b
+      scope: constant.numeric.float.rhai
+    - match: \b[0-9][0-9_]*\b
+      scope: constant.numeric.integer.rhai
+
+  function-def:
+    - match: \b(private\s+)?(fn)\s+([A-Za-z_]\w*)
+      captures:
+        1: storage.modifier.rhai
+        2: storage.type.function.rhai
+        3: entity.name.function.rhai
+
+  keywords:
+    - match: \b(let|const|for|in|if|else|while|loop|do|until|break|continue|return|switch|throw|try|catch|import|export|as|private|global|is_def_var|is_def_fn)\b
+      scope: keyword.control.rhai
+    - match: \b(true|false)\b
+      scope: constant.language.boolean.rhai
+    - match: \b(this)\b
+      scope: variable.language.this.rhai
+    - match: \b(fn)\b
+      scope: storage.type.function.rhai
+    - match: \b(Fn|call|curry|type_of|print|debug|eval)\b
+      scope: support.function.builtin.rhai
+
+  constants:
+    - match: '#\{'
+      scope: punctuation.section.mapping.begin.rhai
+    - match: \b[A-Z][A-Z0-9_]*\b
+      scope: constant.other.rhai
+
+  operators:
+    - match: '\.\.=?|\?\.|\?\[|=>|\|>|<<=?|>>=?|[-+*/%]=|\*\*=?|&&|\|\||[=!<>]=|[-+*/%<>=!&|^~]'
+      scope: keyword.operator.rhai
+    - match: '[\(\)\[\]\{\}]'
+      scope: punctuation.section.rhai
+    - match: '[,;:]'
+      scope: punctuation.separator.rhai

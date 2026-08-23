@@ -34,6 +34,14 @@ impl SyntaxHighlighter {
             )
             .expect("bundled Nushell syntax must be valid"),
         );
+        syntaxes.add(
+            SyntaxDefinition::load_from_str(
+                include_str!("../syntaxes/Rhai.sublime-syntax"),
+                true,
+                Some("Rhai"),
+            )
+            .expect("bundled Rhai syntax must be valid"),
+        );
         Self {
             syntaxes: syntaxes.build(),
             themes: ThemeSet::load_defaults(),
@@ -432,6 +440,31 @@ mod tests {
     }
 
     #[test]
+    fn rhai_source_gets_real_highlighting_not_a_single_plain_span() {
+        let highlighter = SyntaxHighlighter::new();
+        let text = highlighter.highlight_with_language(
+            "fn shq(s) {\n    // comment\n    let escaped = s.to_string();\n    \"'\" + escaped + \"'\"\n}\n",
+            Some(Path::new("x.rhai")),
+            None,
+        );
+        assert!(
+            text.lines[0].spans.len() > 1,
+            "a line with `fn` and an identifier should carry more than one span"
+        );
+        let fn_span = text.lines[0]
+            .spans
+            .iter()
+            .find(|span| span.content.as_ref() == "fn")
+            .expect("`fn` keyword should be its own span");
+        let comment_span = text.lines[1]
+            .spans
+            .iter()
+            .find(|span| span.content.as_ref().contains("comment"))
+            .expect("comment text should be its own span");
+        assert_ne!(fn_span.style.fg, comment_span.style.fg);
+    }
+
+    #[test]
     fn plain_syntax_highlighting_colors_fenced_code_but_keeps_markup_visible() {
         let text = SyntaxHighlighter::new().highlight_with_language(
             "Some **bold** text.\n\n```rust\nlet x = 1;\n```\n",
@@ -481,6 +514,7 @@ mod tests {
             ("x.tsx", "typescript"),
             ("x.xslt", "xslt"),
             ("x.nu", "nushell"),
+            ("x.rhai", "rhai"),
         ] {
             let syntax = highlighter.syntax_for("", Some(Path::new(path)), Some(language));
             assert_ne!(syntax.name, "Plain Text", "{path} / {language}");
