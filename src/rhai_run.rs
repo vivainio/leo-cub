@@ -477,23 +477,33 @@ impl Doc {
     /// TUI's interactive headline rename does -- so a later `save` renders
     /// and writes it. That's what promotes an `@auto <path>` node (already
     /// carrying real content from `open`'s derived-file load) in place into
-    /// a real `@f <path>` file: rename, then save. Unlike the TUI's
-    /// version, this doesn't resolve ancestor `@path` directives -- the
-    /// path is always relative to the open `.leo` file's own directory.
+    /// a real `@f <path>` file: rename, then save. The path resolves every
+    /// ancestor `@path` directive the same way `file_path`/
+    /// `external_file_path` do, so a node several `@path` levels deep from
+    /// the open `.leo` file lands where it actually belongs instead of next
+    /// to the `.leo` file itself. `external_file_path` only recognizes the
+    /// writable directives it covers (not the `@auto` family, which
+    /// `external_filename` here also matches, for the promote-in-place case
+    /// above) -- for anything it doesn't resolve, fall back to the flat
+    /// `.leo`-directory-relative path this always used before.
     fn set_headline(&mut self, gnx: &str, text: &str) -> RhaiResult<()> {
         let mut inner = self.inner.borrow_mut();
         find_node_mut(&mut inner.document, gnx)?.headline = text.to_owned();
         inner.touched = true;
         if let Some(filename) = external_filename(text) {
-            let base = inner
-                .path
-                .parent()
-                .map(Path::to_path_buf)
-                .unwrap_or_else(|| PathBuf::from("."));
-            let path = base.join(filename);
+            let node_id = NodeId(gnx.to_owned());
+            let path = leo::external_file_path(&inner.document.outline, &inner.path, &node_id)
+                .unwrap_or_else(|| {
+                    let base = inner
+                        .path
+                        .parent()
+                        .map(Path::to_path_buf)
+                        .unwrap_or_else(|| PathBuf::from("."));
+                    base.join(filename)
+                });
             track_external_rename(
                 &mut inner.writable_external,
-                NodeId(gnx.to_owned()),
+                node_id,
                 path,
                 external_format(text),
             );
