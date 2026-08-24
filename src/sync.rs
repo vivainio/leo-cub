@@ -870,11 +870,16 @@ fn render_position_relative(
     let mut expanded = false;
     for line in node.body.split_inclusive('\n') {
         let trimmed = line.trim_start();
-        if trimmed.trim_end() == "@others" {
+        if let Some(others_tail) = directive_tail(trimmed.trim_end(), "@others") {
             expanded = true;
             let leading = &line[..line.len() - trimmed.len()];
             let child_indent = format!("{indent}{leading}");
-            result.push_str(&format!("{indent}{leading}{start}@+others{end}\n"));
+            let suffix = if others_tail.is_empty() {
+                String::new()
+            } else {
+                format!(" {others_tail}")
+            };
+            result.push_str(&format!("{indent}{leading}{start}@+others{suffix}{end}\n"));
             for child in position
                 .children
                 .iter()
@@ -894,11 +899,16 @@ fn render_position_relative(
                 );
             }
             result.push_str(&format!("{indent}{leading}{start}@-others{end}\n"));
-        } else if trimmed.trim_end() == "@all" {
+        } else if let Some(all_tail) = directive_tail(trimmed.trim_end(), "@all") {
             expanded = true;
             let leading = &line[..line.len() - trimmed.len()];
             let child_indent = format!("{indent}{leading}");
-            result.push_str(&format!("{child_indent}{start}@+all{end}\n"));
+            let suffix = if all_tail.is_empty() {
+                String::new()
+            } else {
+                format!(" {all_tail}")
+            };
+            result.push_str(&format!("{child_indent}{start}@+all{suffix}{end}\n"));
             for child in &position.children {
                 render_position_relative(
                     outline,
@@ -1075,11 +1085,16 @@ fn render_position(
     let mut expanded = false;
     for line in node.body.split_inclusive('\n') {
         let trimmed = line.trim_start();
-        if trimmed.trim_end() == "@others" {
+        if let Some(others_tail) = directive_tail(trimmed.trim_end(), "@others") {
             expanded = true;
             let leading = &line[..line.len() - trimmed.len()];
             let child_indent = format!("{indent}{leading}");
-            result.push_str(&format!("{indent}{leading}{start}@+others{end}\n"));
+            let suffix = if others_tail.is_empty() {
+                String::new()
+            } else {
+                format!(" {others_tail}")
+            };
+            result.push_str(&format!("{indent}{leading}{start}@+others{suffix}{end}\n"));
             for child in position
                 .children
                 .iter()
@@ -1097,11 +1112,16 @@ fn render_position(
                 );
             }
             result.push_str(&format!("{indent}{leading}{start}@-others{end}\n"));
-        } else if trimmed.trim_end() == "@all" {
+        } else if let Some(all_tail) = directive_tail(trimmed.trim_end(), "@all") {
             expanded = true;
             let leading = &line[..line.len() - trimmed.len()];
             let child_indent = format!("{indent}{leading}");
-            result.push_str(&format!("{child_indent}{start}@+all{end}\n"));
+            let suffix = if all_tail.is_empty() {
+                String::new()
+            } else {
+                format!(" {all_tail}")
+            };
+            result.push_str(&format!("{child_indent}{start}@+all{suffix}{end}\n"));
             for child in &position.children {
                 render_position(
                     outline,
@@ -1297,6 +1317,22 @@ fn needs_at_escaping(after_at: &str) -> bool {
     is_cub_node_marker_collision(after_at) || is_leo_directive_word(after_at)
 }
 
+/// Whether `line` (a body line, trimmed of leading/trailing whitespace) is
+/// an `@others`/`@all` directive -- optionally followed by trailing text,
+/// e.g. `@others # helper functions` -- and if so, that trailing text
+/// (`""` if there is none). Real Leo's own `others_pat`/`all_pat`
+/// (`leoAtFile.py`) match `@(+|-)others\b(.*)` / `@(+|-)all\b(.*)`, a `\b`
+/// word boundary rather than requiring the line to be exactly `@others`/
+/// `@all` -- and `putAtOthersLine` echoes that trailing text back into the
+/// `@+others`/`@+all` open sentinel it writes. Without this, a line like
+/// `@others # helper functions` falls through to the generic `@`-escaping
+/// path instead of expanding, silently promoting its children out to
+/// top-level siblings instead of nesting them where the body asked.
+fn directive_tail<'a>(line: &'a str, keyword: &str) -> Option<&'a str> {
+    let rest = line.strip_prefix(keyword)?;
+    (rest.is_empty() || rest.starts_with(char::is_whitespace)).then(|| rest.trim())
+}
+
 /// Renders a node's body while already inside an ancestor's `@all`
 /// expansion. Real Leo's `putAtAllBody` (`leoAtFile.py`) writes body text
 /// completely unconditionally there, with zero directive scanning -- `@all`
@@ -1429,6 +1465,55 @@ mod tests {
                 "blank line was padded with indentation: {line:?}\nfull output:\n{rendered}"
             );
         }
+        let reparsed = DerivedFile::parse(&rendered).unwrap();
+        assert_eq!(reparsed.outline, parsed.outline);
+    }
+
+    #[test]
+    fn render_thin_expands_an_others_line_with_trailing_text() {
+        // Real Leo's `others_pat` (`leoAtFile.py`) matches `@others` with a
+        // `\b` word boundary, not an exact-line match, so `@others #
+        // helper functions` -- a common way to annotate an `@others` line
+        // -- is still a real expansion point, and `putAtOthersLine` echoes
+        // the trailing text back into the `@+others` sentinel it writes.
+        // Requiring an exact `"@others"` match here used to miss that,
+        // falling through to `@`-escaping and silently promoting the
+        // nested function out to a top-level sibling instead of keeping it
+        // nested -- exactly what leo-editor's own
+        // leo/commands/checkerCommands.py (`find_long_lines`'s nested
+        // `get_root`/`in_nopylint`) does.
+        let source = concat!(
+            "#@+leo-ver=5-thin\n",
+            "#@+node:r: * @file test.py\n",
+            "def outer():\n",
+            "    #@+others # helper functions\n",
+            "    #@+node:c: ** function: helper\n",
+            "    def helper():\n",
+            "        return 1\n",
+            "    #@-others\n",
+            "    return helper()\n",
+            "#@-leo\n",
+        );
+        let parsed = DerivedFile::parse(source).unwrap();
+        assert_eq!(
+            parsed.outline.nodes[&NodeId::from("r")].body,
+            "def outer():\n    @others # helper functions\n    return helper()\n"
+        );
+
+        let rendered = render_thin(&parsed.outline, &PositionId("0".into()), "#", "").unwrap();
+        assert!(
+            rendered.contains("    def helper():\n        return 1\n"),
+            "expected helper() to stay nested (indented) under outer():\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("@@others"),
+            "the tail-bearing @others line must expand, not fall through to @@-escaping:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("@+others # helper functions"),
+            "expected the trailing text echoed back into the open sentinel:\n{rendered}"
+        );
+
         let reparsed = DerivedFile::parse(&rendered).unwrap();
         assert_eq!(reparsed.outline, parsed.outline);
     }
