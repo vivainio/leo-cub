@@ -498,6 +498,56 @@ fn cub_run_promotes_an_auto_node_to_at_f_by_renaming_and_saving() {
     fs::remove_dir_all(&dir).unwrap();
 }
 
+#[test]
+fn cub_run_renaming_an_already_writable_thin_node_to_at_f_switches_its_sentinel_format() {
+    // Unlike the plain-`@auto` promotion above, a `@thin` node is already
+    // tracked as writable at `open()` time. The rename must still swap its
+    // `ExternalFormat` from `Thin` (5-thin sentinels) to `Relative`
+    // (cub-1-thin) -- `track_external_rename`'s `and_modify` branch used to
+    // only refresh the path/delimiters and leave the old format in place,
+    // so the file kept 5-thin sentinels under a headline that said `@f`.
+    let dir = temp_path("rhai_run_rename_thin_to_f_dir");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let leo_path = dir.join("outline.leo");
+    fs::write(
+        &leo_path,
+        r#"<leo_file><vnodes><v t="r"><vh>@thin bar.py</vh></v></vnodes><tnodes><t tx="r">print("bye")
+</t></tnodes></leo_file>"#,
+    )
+    .unwrap();
+
+    let script_path = dir.join("rename.rhai");
+    let escaped_path = leo_path.display().to_string().replace('\\', "\\\\");
+    fs::write(
+        &script_path,
+        format!(
+            r#"
+            let doc = open("{escaped_path}");
+            doc.set_headline("r", "@f bar.py");
+            doc.save();
+            "#
+        ),
+    )
+    .unwrap();
+
+    let output = run_cub(&["run", script_path.to_str().unwrap()]);
+    assert!(
+        output.status.success(),
+        "cub run failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let rewritten = fs::read_to_string(dir.join("bar.py")).unwrap();
+    assert!(
+        rewritten.starts_with("#@+leo-ver=cub-1-thin\n"),
+        "expected cub-1-thin sentinels after renaming to @f, got:\n{rewritten}"
+    );
+
+    fs::remove_dir_all(&dir).unwrap();
+}
+
 // The bare `cub foo.rhai` shorthand (no `run` subcommand) is dispatched
 // from the same positional argument the TUI shorthand (`cub foo.leo`) uses,
 // which only exists when the `tui` feature is compiled in (see `Cli::file`
