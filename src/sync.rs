@@ -956,14 +956,23 @@ fn render_position_relative(
                 );
             }
             result.push_str(&format!("{child_indent}{start}@-{section}{end}\n"));
-        } else if trimmed.starts_with("@first ") {
+        } else if line.starts_with("@first ") {
+            // Real Leo's `directiveKind4` (leoAtFile.py) only recognizes a
+            // directive word -- including `@first`/`@last` -- when the `@`
+            // is the line's very first character; every directive *except*
+            // `@others`/`@all` requires column zero (those two alone skip
+            // leading whitespace explicitly). So this checks the raw
+            // `line`, not the whitespace-trimmed `trimmed` used above for
+            // `@others`/`@all`: an *indented* `@first ...`/`@last ...` (a
+            // docstring's usage example, say) isn't a directive at all and
+            // must fall through to the plain-text `else` branch below,
+            // unescaped -- unlike here, real Leo's own `@first`/`@last`
+            // handling drops whatever follows the directive word, so this
+            // form must stay column-0-only to avoid losing that text.
             result.push_str(&format!("{indent}{start}@@first{end}\n"));
-        } else if trimmed.starts_with("@last ") {
+        } else if line.starts_with("@last ") {
             result.push_str(&format!("{indent}{start}@@last{end}\n"));
-        } else if trimmed
-            .strip_prefix('@')
-            .is_some_and(is_leo_directive_word)
-        {
+        } else if line.strip_prefix('@').is_some_and(is_leo_directive_word) {
             // A bare `@`-prefixed body line (no comment prefix yet -- that
             // only gets added below) can never be mistaken for a real
             // sentinel on a later parse regardless of what follows the
@@ -976,7 +985,11 @@ fn render_position_relative(
             // sentinel shape. So the only real reason to escape here is a
             // genuine Leo directive name (`is_leo_directive_word`); no
             // separate `@0`/`@>`/`@<`-shaped collision check is needed.
-            let directive = trimmed.strip_prefix('@').expect("checked above");
+            // And per the `@first`/`@last` comment above, this too must
+            // check the raw (untrimmed) `line`, not `trimmed`: real Leo
+            // doesn't treat an indented `@language`/`@path`/etc. line as a
+            // directive either.
+            let directive = line.strip_prefix('@').expect("checked above");
             result.push_str(&format!(
                 "{indent}{start}@@{}{end}\n",
                 directive.trim_end_matches(['\r', '\n'])
@@ -1181,19 +1194,23 @@ fn render_position(
                 );
             }
             result.push_str(&format!("{child_indent}{start}@-{section}{end}\n"));
-        } else if trimmed.starts_with("@first ") {
+        } else if line.starts_with("@first ") {
+            // See render_position_relative's matching branch: real Leo's
+            // `directiveKind4` requires column zero for every directive
+            // except `@others`/`@all`, so this (and the branches below)
+            // check the raw `line`, not the whitespace-trimmed `trimmed`
+            // used above for `@others`/`@all` -- an indented `@first ...`
+            // is plain text, not a directive, and must fall through to the
+            // unescaped `else` branch instead of losing its tail text.
             result.push_str(&format!("{indent}{start}@@first{end}\n"));
-        } else if trimmed.starts_with("@last ") {
+        } else if line.starts_with("@last ") {
             result.push_str(&format!("{indent}{start}@@last{end}\n"));
-        } else if trimmed
-            .strip_prefix('@')
-            .is_some_and(is_leo_directive_word)
-        {
+        } else if line.strip_prefix('@').is_some_and(is_leo_directive_word) {
             // See render_position_relative's matching branch: only a real
             // Leo directive name needs escaping here, not every `@`-led
             // line -- a bare `@`/`@data whatever` goes out unescaped,
             // matching `at.directiveKind4`.
-            let directive = trimmed.strip_prefix('@').expect("checked above");
+            let directive = line.strip_prefix('@').expect("checked above");
             result.push_str(&format!(
                 "{indent}{start}@@{}{end}\n",
                 directive.trim_end_matches(['\r', '\n'])
@@ -1600,6 +1617,40 @@ mod tests {
         assert!(
             rendered.contains("more\n"),
             "a non-section child past a lone section reference must not be dropped:\n{rendered}"
+        );
+
+        let reparsed = DerivedFile::parse(&rendered).unwrap();
+        assert_eq!(reparsed.outline, parsed.outline);
+    }
+
+    #[test]
+    fn render_thin_does_not_treat_an_indented_at_first_line_as_the_at_first_directive() {
+        // Real Leo's `directiveKind4` (leoAtFile.py) requires the `@` to be
+        // the line's very first character for every directive except
+        // `@others`/`@all` -- an indented `@first ...` (a docstring's
+        // usage example, say) is plain text, not the file-envelope
+        // `@first` directive, and must render verbatim. The `@first`/
+        // `@last` branches discard whatever follows the directive word
+        // (matching real Leo's own `at.putDirective`, which does the same
+        // for a *genuine* mid-body `@first`/`@last`), so mistaking an
+        // indented line for one of these loses its text outright. Matches
+        // a real docstring in leo-editor's own `helpCommands.py`.
+        let source = concat!(
+            "#@+leo-ver=5-thin\n",
+            "#@+node:r: * @file test.py\n",
+            "#@+others\n",
+            "#@+node:c: ** child\n",
+            "        @first #! /usr/bin/env python\n",
+            "#@-others\n",
+            "#@-leo\n",
+        );
+        let parsed = DerivedFile::parse(source).unwrap();
+        let rendered = render_thin(&parsed.outline, &PositionId("0".into()), "#", "").unwrap();
+
+        assert!(
+            rendered.contains("        @first #! /usr/bin/env python\n"),
+            "an indented, non-column-0 @first line is plain text, not the \
+             @first directive, and must render verbatim:\n{rendered}"
         );
 
         let reparsed = DerivedFile::parse(&rendered).unwrap();
