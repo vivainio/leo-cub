@@ -954,8 +954,20 @@ fn render_position_relative(
             result.push_str(&format!("{indent}{start}@@last{end}\n"));
         } else if trimmed
             .strip_prefix('@')
-            .is_some_and(needs_at_escaping)
+            .is_some_and(is_leo_directive_word)
         {
+            // A bare `@`-prefixed body line (no comment prefix yet -- that
+            // only gets added below) can never be mistaken for a real
+            // sentinel on a later parse regardless of what follows the
+            // `@`: every node-marker/sentinel pattern this crate parses
+            // requires the comment prefix *before* the `@` (`#@+node:...`,
+            // `#@0 ...`, ...), which a plain body line doesn't have until
+            // the (unescaped) `else` branch below adds it back -- and
+            // `is_sentinel_like` there already guards against a line that
+            // coincidentally starts with the full comment-prefixed
+            // sentinel shape. So the only real reason to escape here is a
+            // genuine Leo directive name (`is_leo_directive_word`); no
+            // separate `@0`/`@>`/`@<`-shaped collision check is needed.
             let directive = trimmed.strip_prefix('@').expect("checked above");
             result.push_str(&format!(
                 "{indent}{start}@@{}{end}\n",
@@ -1163,8 +1175,12 @@ fn render_position(
             result.push_str(&format!("{indent}{start}@@last{end}\n"));
         } else if trimmed
             .strip_prefix('@')
-            .is_some_and(needs_at_escaping)
+            .is_some_and(is_leo_directive_word)
         {
+            // See render_position_relative's matching branch: only a real
+            // Leo directive name needs escaping here, not every `@`-led
+            // line -- a bare `@`/`@data whatever` goes out unescaped,
+            // matching `at.directiveKind4`.
             let directive = trimmed.strip_prefix('@').expect("checked above");
             result.push_str(&format!(
                 "{indent}{start}@@{}{end}\n",
@@ -1217,7 +1233,7 @@ fn is_sentinel_like(line: &str, start: &str, end: &str) -> bool {
 }
 
 /// Leo's own recognized directive names (`g.globalDirectiveList` in
-/// `leoGlobals.py`), used by `needs_at_escaping` to tell an actual
+/// `leoGlobals.py`), used by `is_leo_directive_word` to tell an actual
 /// directive (`@language python`) from body text that merely starts with
 /// `@` (a Python decorator, an `@`-prefixed docstring line, ...).
 const GLOBAL_DIRECTIVES: &[&str] = &[
@@ -1303,18 +1319,6 @@ fn is_leo_directive_word(after_at: &str) -> bool {
         return false;
     }
     GLOBAL_DIRECTIVES.contains(&word)
-}
-
-/// Whether a body line's leading `@` needs `@@`-escaping in a derived
-/// file: either it would collide with cub's own node-marker syntax, or it
-/// names a real Leo directive that needs a comment prefix to stay valid
-/// source in the target language (`@language rhai` as bare text isn't
-/// valid Rhai). Anything else starting with `@` -- a decorator, an
-/// `@`-prefixed docstring, ... -- is safe to emit completely unescaped, the
-/// same as any other body line; see `render_position`/
-/// `render_position_relative`'s callers.
-fn needs_at_escaping(after_at: &str) -> bool {
-    is_cub_node_marker_collision(after_at) || is_leo_directive_word(after_at)
 }
 
 /// Whether `line` (a body line, trimmed of leading/trailing whitespace) is
@@ -1766,6 +1770,72 @@ mod tests {
             reparsed.outline.nodes[&NodeId::from("r")].body,
             doc.outline.nodes[&NodeId::from("r")].body
         );
+    }
+
+    #[test]
+    fn render_does_not_escape_bare_at_lines_that_are_not_real_directives() {
+        // Both render_position (5-thin) and render_position_relative (@f)
+        // used to also escape any body line `is_cub_node_marker_collision`
+        // flagged -- an empty tail, or a bare `0`/`<N`/`>N` token after the
+        // `@`, matching cub-1-thin's *own* `@0`/`@>`/`@<` marker grammar.
+        // But a body line doesn't get the comment prefix until the
+        // (unescaped) `else` branch adds it back, and every sentinel/node-
+        // marker pattern this crate parses (5-thin *and* cub-1-thin)
+        // requires that comment prefix *before* the `@` -- `#@+node:...`,
+        // `#@0 ...` -- never a bare, unprefixed `@`. So a plain `@0 ...`
+        // body line can't be mistaken for a marker on a later parse
+        // regardless of format, and `is_sentinel_like` already guards the
+        // one case that could -- a line that already starts with the full
+        // comment-prefixed sentinel shape. Escaping should only fire for
+        // an actual Leo directive name (`is_leo_directive_word`). Found
+        // via a real cub/leo-editor round-trip: leo/commands/
+        // checkerCommands.py has a docstring line that's literally a bare
+        // `@` (documenting headline prefixes Leo's dubious-node checker
+        // ignores), and real Leo writes it out completely unescaped.
+        let source = concat!(
+            r#"<leo_file><vnodes><v t="r"><vh>@file test.py</vh></v></vnodes>"#,
+            r#"<tnodes><t tx="r">"#,
+            "@\n",
+            "@0 not a real directive\n",
+            "@language python\n",
+            "</t></tnodes></leo_file>",
+        );
+        let doc = LeoDocument::parse(source).unwrap();
+
+        for (rendered, reparsed_body) in [
+            {
+                let rendered =
+                    render_thin(&doc.outline, &PositionId("0".into()), "#", "").unwrap();
+                let reparsed_body = DerivedFile::parse(&rendered).unwrap().outline.nodes
+                    [&NodeId::from("r")]
+                    .body
+                    .clone();
+                (rendered, reparsed_body)
+            },
+            {
+                let rendered =
+                    render_relative(&doc.outline, &PositionId("0".into()), "#", "").unwrap();
+                let reparsed_body = RelativeFile::parse(&rendered).unwrap().outline.nodes
+                    [&NodeId::from("r")]
+                    .body
+                    .clone();
+                (rendered, reparsed_body)
+            },
+        ] {
+            assert!(
+                rendered.contains("\n@\n"),
+                "a bare `@` can't collide with any format's marker grammar:\n{rendered}"
+            );
+            assert!(
+                rendered.contains("\n@0 not a real directive\n"),
+                "`@0 ...` isn't a directive or a real marker without the comment prefix:\n{rendered}"
+            );
+            assert!(
+                rendered.contains("@@language python\n"),
+                "a real directive still needs escaping to stay valid Python:\n{rendered}"
+            );
+            assert_eq!(reparsed_body, doc.outline.nodes[&NodeId::from("r")].body);
+        }
     }
 
     #[test]
