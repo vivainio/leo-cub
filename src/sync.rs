@@ -900,7 +900,11 @@ fn render_position_relative(
                 directive.trim_end_matches(['\r', '\n'])
             ));
         } else {
-            let rendered = format!("{indent}{line}");
+            let rendered = if line == "\n" || line.is_empty() {
+                line.to_string()
+            } else {
+                format!("{indent}{line}")
+            };
             if is_sentinel_like(&rendered, start, end) {
                 result.push_str(&format!("{indent}{start}@verbatim{end}\n"));
             }
@@ -1095,7 +1099,11 @@ fn render_position(
                 directive.trim_end_matches(['\r', '\n'])
             ));
         } else {
-            let rendered = format!("{indent}{line}");
+            let rendered = if line == "\n" || line.is_empty() {
+                line.to_string()
+            } else {
+                format!("{indent}{line}")
+            };
             if is_sentinel_like(&rendered, start, end) {
                 result.push_str(&format!("{indent}{start}@verbatim{end}\n"));
             }
@@ -1260,7 +1268,11 @@ fn render_body_under_all(node: &Node, indent: &str, start: &str, end: &str, resu
                 directive.trim_end_matches(['\r', '\n'])
             ));
         } else {
-            let rendered = format!("{indent}{line}");
+            let rendered = if line == "\n" || line.is_empty() {
+                line.to_string()
+            } else {
+                format!("{indent}{line}")
+            };
             if is_sentinel_like(&rendered, start, end) {
                 result.push_str(&format!("{indent}{start}@verbatim{end}\n"));
             }
@@ -1335,6 +1347,38 @@ mod tests {
         assert_eq!(reparsed.outline, parsed.outline);
         assert!(rendered.starts_with("#!/usr/bin/env python\n#@+leo-ver=5-thin\n"));
         assert!(rendered.ends_with("#@-leo\n# trailing\n"));
+    }
+
+    #[test]
+    fn render_thin_does_not_pad_blank_lines_inside_indented_others() {
+        // A blank line inside a body that renders under an indented
+        // `@others` (e.g. a method body) must stay a bare `\n` -- not gain
+        // the surrounding indent as trailing whitespace. See at.putCodeLine
+        // in canonical Leo's leoAtFile.py: "Don't put any whitespace in
+        // otherwise blank lines."
+        let source = concat!(
+            "#@+leo-ver=5-thin\n",
+            "#@+node:r: * @file test.py\n",
+            "class C:\n",
+            "    #@+others\n",
+            "#@+node:c: ** method\n",
+            "    def method(self):\n",
+            "\n",
+            "        return 1\n",
+            "    #@-others\n",
+            "#@-leo\n",
+        );
+        let parsed = DerivedFile::parse(source).unwrap();
+        let rendered = render_thin(&parsed.outline, &PositionId("0".into()), "#", "").unwrap();
+
+        for line in rendered.lines() {
+            assert!(
+                line.is_empty() || !line.trim().is_empty(),
+                "blank line was padded with indentation: {line:?}\nfull output:\n{rendered}"
+            );
+        }
+        let reparsed = DerivedFile::parse(&rendered).unwrap();
+        assert_eq!(reparsed.outline, parsed.outline);
     }
 
     #[test]
