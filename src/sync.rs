@@ -925,7 +925,15 @@ fn render_position_relative(
             }
             result.push_str(&format!("{child_indent}{start}@-all{end}\n"));
         } else if let Some(section) = section_reference(trimmed.trim_end()) {
-            expanded = true;
+            // Deliberately does *not* set `expanded`: unlike `@others`/
+            // `@all`, a bare section reference accounts for only the one
+            // named child, not the rest -- real Leo's writer reaches any
+            // further, non-section-shaped children of this same node via
+            // a thread-order walk seeded by an *ancestor's* `@others`
+            // (`at.putAtOthersLine`'s `moveToThreadNext` when a node's own
+            // `putBody` reports no `@others`), not via anything in this
+            // node's own body. The trailing implicit-children loop below
+            // is what stands in for that walk here, and must still run.
             let leading = &line[..line.len() - trimmed.len()];
             let child_indent = format!("{indent}{leading}");
             result.push_str(&format!("{child_indent}{start}@+{section}{end}\n"));
@@ -1148,7 +1156,11 @@ fn render_position(
             }
             result.push_str(&format!("{child_indent}{start}@-all{end}\n"));
         } else if let Some(section) = section_reference(trimmed.trim_end()) {
-            expanded = true;
+            // See the matching comment in `render_position_relative`:
+            // deliberately doesn't set `expanded` -- a bare section
+            // reference accounts for only its one named child, so the
+            // trailing implicit-children loop must still run to reach any
+            // further, non-section-shaped children of this node.
             let leading = &line[..line.len() - trimmed.len()];
             let child_indent = format!("{indent}{leading}");
             result.push_str(&format!("{child_indent}{start}@+{section}{end}\n"));
@@ -1547,6 +1559,47 @@ mod tests {
         assert!(
             rendered.contains("inner\n"),
             "section content must not be dropped:\n{rendered}"
+        );
+
+        let reparsed = DerivedFile::parse(&rendered).unwrap();
+        assert_eq!(reparsed.outline, parsed.outline);
+    }
+
+    #[test]
+    fn render_thin_walks_children_past_a_lone_section_reference_with_no_others() {
+        // A node's body can hold *only* a section reference (no
+        // `@others`/`@all`) and still have further, non-section children
+        // beyond the one the reference names -- real Leo's writer still
+        // reaches those via a thread-order walk seeded by an *ancestor's*
+        // `@others` (`at.putAtOthersLine`'s `moveToThreadNext`, taken
+        // whenever a node's own `putBody` reports no `@others`), not
+        // anything in this node's own body. A lone section reference must
+        // not be treated as "fully accounts for all children" the way
+        // `@others`/`@all` do -- only they can license skipping the
+        // trailing implicit-children walk. Matches leoGlobals.py's real
+        // `g.Urls & UNLs`, whose body is only `<<About clickable
+        // links>>`, but which also parents 15 more nodes (g.computeFileUrl
+        // and onward) that must still round-trip.
+        let source = concat!(
+            "#@+leo-ver=5-thin\n",
+            "#@+node:r: * @file test.py\n",
+            "#@+others\n",
+            "#@+node:container: ** container\n",
+            "#@+<<sect>>\n",
+            "#@+node:s: *3* <<sect>>\n",
+            "inner\n",
+            "#@-<<sect>>\n",
+            "#@+node:extra: *3* extra\n",
+            "more\n",
+            "#@-others\n",
+            "#@-leo\n",
+        );
+        let parsed = DerivedFile::parse(source).unwrap();
+        let rendered = render_thin(&parsed.outline, &PositionId("0".into()), "#", "").unwrap();
+
+        assert!(
+            rendered.contains("more\n"),
+            "a non-section child past a lone section reference must not be dropped:\n{rendered}"
         );
 
         let reparsed = DerivedFile::parse(&rendered).unwrap();
