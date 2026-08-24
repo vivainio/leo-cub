@@ -549,6 +549,65 @@ fn cub_run_renaming_an_already_writable_thin_node_to_at_f_switches_its_sentinel_
 }
 
 #[test]
+fn cub_run_set_headline_resolves_an_ancestor_at_path_directive() {
+    // `set_headline` used to place a renamed external node's file flat
+    // under the open `.leo` file's own directory (`base.join(filename)`),
+    // ignoring every ancestor `@path` -- unlike `file_path`/
+    // `external_file_path`, which already walked them correctly. A node
+    // several `@path` levels deep (exactly the shape leo-editor's own
+    // leo/scripts/scripts.leo -> "Windows-only scripts" (@path win) ->
+    // "@file elevate.py" has) would land next to the .leo file instead of
+    // in its real directory on the very next rename+save.
+    let dir = temp_path("rhai_run_set_headline_at_path_dir");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    fs::create_dir_all(dir.join("win")).unwrap();
+    let leo_path = dir.join("outline.leo");
+    fs::write(
+        &leo_path,
+        concat!(
+            r#"<leo_file><vnodes><v t="w"><vh>Windows-only scripts</vh>"#,
+            r#"<v t="e"><vh>elevate</vh></v></v></vnodes>"#,
+            r#"<tnodes><t tx="w">@path win</t><t tx="e">print("hi")</t></tnodes></leo_file>"#,
+        ),
+    )
+    .unwrap();
+
+    let script_path = dir.join("rename.rhai");
+    let escaped_path = leo_path.display().to_string().replace('\\', "\\\\");
+    fs::write(
+        &script_path,
+        format!(
+            r#"
+            let doc = open("{escaped_path}");
+            doc.set_headline("e", "@f elevate.py");
+            doc.save();
+            "#
+        ),
+    )
+    .unwrap();
+
+    let output = run_cub(&["run", script_path.to_str().unwrap()]);
+    assert!(
+        output.status.success(),
+        "cub run failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(
+        !dir.join("elevate.py").exists(),
+        "must not write the renamed file flat next to the .leo file, ignoring the @path win ancestor"
+    );
+    let written = fs::read_to_string(dir.join("win").join("elevate.py")).unwrap_or_else(|error| {
+        panic!("expected dir/win/elevate.py (the @path win ancestor's directory): {error}")
+    });
+    assert!(written.contains("print(\"hi\")"));
+
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
 fn cub_run_sh_defaults_to_cubs_cwd_and_honors_an_explicit_cwd_option() {
     // The global `sh(cmd)` needs no open `Doc` -- unlike `Doc::sh`, which
     // this replaced, it runs relative to `cub`'s own working directory
