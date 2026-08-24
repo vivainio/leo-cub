@@ -12,7 +12,7 @@ use std::{
 
 use crate::{
     AutoFile, DerivedFile, ExternalFormat, Node, NodeId, Outline, Position, PositionId,
-    RelativeFile, WritableExternalFile, comment_delimiters, external_snapshot,
+    RelativeFile, WritableExternalFile, comment_delimiters, external_snapshot_at,
     format_for_directive, referenced_nodes,
 };
 
@@ -145,7 +145,7 @@ pub fn load_derived_jobs(outline: &mut Outline, jobs: Vec<DerivedJob>) -> LoadRe
                     derived
                         .merge_into(outline, &job.position)
                         .map_err(|error| error.to_string())?;
-                    let original = external_snapshot(outline, &derived.root)
+                    let original = external_snapshot_at(outline, &job.position)
                         .map(|(_, snapshot)| snapshot)
                         .ok_or_else(|| "merged external root disappeared".to_owned())?;
                     report.writable_external.insert(
@@ -194,7 +194,7 @@ pub fn load_derived_jobs(outline: &mut Outline, jobs: Vec<DerivedJob>) -> LoadRe
                     derived
                         .merge_into(outline, &job.position)
                         .map_err(|error| error.to_string())?;
-                    let original = external_snapshot(outline, &derived.root)
+                    let original = external_snapshot_at(outline, &job.position)
                         .map(|(_, snapshot)| snapshot)
                         .ok_or_else(|| "merged external root disappeared".to_owned())?;
                     report.writable_external.insert(

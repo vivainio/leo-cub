@@ -460,37 +460,88 @@ pub struct ExternalUpdate {
     pub snapshot: Outline,
 }
 
+/// Every position's id and node, indexed by node id for O(1) lookup --
+/// built with a single walk of `outline.roots` so a caller checking many
+/// roots (see `prepare_external_updates`) doesn't re-walk the whole tree
+/// once per root. Borrows rather than clones each position during the
+/// walk -- `Position` clones its whole child subtree, so eagerly cloning
+/// every node visited (instead of just the ones a caller actually asks
+/// for) would trade the old O(roots x tree size) search for an equally
+/// bad O(tree size) of wasted deep clones. A node found at more than one
+/// position (a clone) keeps only the first occurrence, matching the old
+/// recursive-search behavior this replaced.
+fn position_index(outline: &Outline) -> HashMap<NodeId, (PositionId, &Position)> {
+    fn visit<'a>(
+        positions: &'a [Position],
+        parent: &str,
+        index: &mut HashMap<NodeId, (PositionId, &'a Position)>,
+    ) {
+        for (i, position) in positions.iter().enumerate() {
+            let id = if parent.is_empty() {
+                i.to_string()
+            } else {
+                format!("{parent}/{i}")
+            };
+            index
+                .entry(position.node.clone())
+                .or_insert_with(|| (PositionId(id.clone()), position));
+            visit(&position.children, &id, index);
+        }
+    }
+    let mut index = HashMap::new();
+    visit(&outline.roots, "", &mut index);
+    index
+}
+
 /// A read-only snapshot of the subtree rooted at `root`'s current position,
 /// used both to detect whether a writable external file has diverged from
 /// what was last read/written, and to restore that subtree's disk-only
 /// structure before serializing the `.leo` file.
 pub fn external_snapshot(outline: &Outline, root: &NodeId) -> Option<(PositionId, Outline)> {
-    fn find(positions: &[Position], parent: &str, root: &NodeId) -> Option<(PositionId, Position)> {
-        for (index, position) in positions.iter().enumerate() {
-            let id = if parent.is_empty() {
-                index.to_string()
-            } else {
-                format!("{parent}/{index}")
-            };
-            if &position.node == root {
-                return Some((PositionId(id), position.clone()));
-            }
-            if let Some(found) = find(&position.children, &id, root) {
-                return Some(found);
-            }
-        }
-        None
-    }
-    let (position, tree) = find(&outline.roots, "", root)?;
-    let ids = referenced_nodes(std::slice::from_ref(&tree));
+    snapshot_at(outline, &position_index(outline), root)
+}
+
+/// Same as [`external_snapshot`], but for a caller that already knows the
+/// exact `PositionId` (e.g. having just merged a derived file in at that
+/// position) -- an O(depth) direct lookup via [`Outline::position`] instead
+/// of an O(tree size) search by node id. Loading a document's derived files
+/// calls this once per external node, so using [`external_snapshot`]'s
+/// by-id search there would cost O(external nodes x tree size) all over
+/// again for the same reason `prepare_external_updates` used to.
+pub fn external_snapshot_at(
+    outline: &Outline,
+    position_id: &PositionId,
+) -> Option<(PositionId, Outline)> {
+    let tree = outline.position(position_id)?;
+    let ids = referenced_nodes(std::slice::from_ref(tree));
     let nodes = ids
         .into_iter()
         .filter_map(|id| outline.nodes.get(&id).cloned().map(|node| (id, node)))
         .collect();
     Some((
-        position,
+        position_id.clone(),
         Outline {
-            roots: vec![tree],
+            roots: vec![tree.clone()],
+            nodes,
+        },
+    ))
+}
+
+fn snapshot_at(
+    outline: &Outline,
+    index: &HashMap<NodeId, (PositionId, &Position)>,
+    root: &NodeId,
+) -> Option<(PositionId, Outline)> {
+    let (position, tree) = index.get(root)?;
+    let ids = referenced_nodes(std::slice::from_ref(tree));
+    let nodes = ids
+        .into_iter()
+        .filter_map(|id| outline.nodes.get(&id).cloned().map(|node| (id, node)))
+        .collect();
+    Some((
+        position.clone(),
+        Outline {
+            roots: vec![(*tree).clone()],
             nodes,
         },
     ))
@@ -505,8 +556,9 @@ pub fn prepare_external_updates(
     writable: &HashMap<NodeId, WritableExternalFile>,
 ) -> Result<Vec<ExternalUpdate>, SyncError> {
     let mut updates = Vec::new();
+    let index = position_index(outline);
     for (root, file) in writable {
-        let Some((position, snapshot)) = external_snapshot(outline, root) else {
+        let Some((position, snapshot)) = snapshot_at(outline, &index, root) else {
             continue;
         };
         if snapshot == file.original {
@@ -1753,5 +1805,94 @@ mod tests {
         );
         assert!(document.outline.nodes.contains_key(&old_child));
         assert!(document.to_xml().is_ok());
+    }
+
+    #[test]
+    fn external_snapshot_at_matches_external_snapshot_for_a_nested_node() {
+        // `external_snapshot_at` (an O(depth) lookup by known PositionId,
+        // used when a caller -- like load_derived_jobs -- already knows
+        // exactly where a node landed) must agree with `external_snapshot`
+        // (an O(tree size) lookup by NodeId) for the same node, including
+        // one nested a few levels deep rather than a root.
+        let source = concat!(
+            r#"<leo_file><vnodes><v t="r"><vh>root</vh>"#,
+            r#"<v t="mid"><vh>mid</vh>"#,
+            r#"<v t="leaf"><vh>@f leaf.py</vh>"#,
+            r#"<v t="grandchild"><vh>grandchild</vh></v>"#,
+            r#"</v></v></v></vnodes>"#,
+            r#"<tnodes><t tx="r"></t><t tx="mid"></t><t tx="leaf"></t>"#,
+            r#"<t tx="grandchild">body</t></tnodes></leo_file>"#,
+        );
+        let doc = LeoDocument::parse(source).unwrap();
+        let leaf = NodeId::from("leaf");
+        let leaf_position = PositionId("0/0/0".into());
+
+        let by_id = external_snapshot(&doc.outline, &leaf).unwrap();
+        let by_position = external_snapshot_at(&doc.outline, &leaf_position).unwrap();
+
+        assert_eq!(by_id.0, leaf_position);
+        assert_eq!(by_id, by_position);
+        assert_eq!(by_id.1.roots[0].node, leaf);
+        assert_eq!(
+            by_id.1.roots[0].children[0].node,
+            NodeId::from("grandchild")
+        );
+    }
+
+    #[test]
+    fn prepare_external_updates_finds_every_writable_root_via_one_shared_index() {
+        // Regression test for the O(externals x tree size) `find()` this
+        // module used to do once per writable root in `prepare_external_updates`
+        // (and, before `external_snapshot_at` existed, once per root in
+        // `load_derived_jobs` too): with several sibling `@f` roots, every
+        // one of them must still be found and rendered when its body
+        // diverges from `file.original`, not just the first one located.
+        let source = concat!(
+            r#"<leo_file><vnodes>"#,
+            r#"<v t="a"><vh>@f a.py</vh></v>"#,
+            r#"<v t="b"><vh>@f b.py</vh></v>"#,
+            r#"<v t="c"><vh>@f c.py</vh></v>"#,
+            r#"</vnodes>"#,
+            r#"<tnodes><t tx="a">alpha</t><t tx="b">beta</t><t tx="c">gamma</t></tnodes>"#,
+            r#"</leo_file>"#,
+        );
+        let doc = LeoDocument::parse(source).unwrap();
+        let writable = HashMap::from([
+            (
+                NodeId::from("a"),
+                WritableExternalFile {
+                    path: PathBuf::from("a.py"),
+                    start_delimiter: "#".into(),
+                    end_delimiter: "".into(),
+                    original: Outline::default(),
+                    format: ExternalFormat::Relative,
+                },
+            ),
+            (
+                NodeId::from("b"),
+                WritableExternalFile {
+                    path: PathBuf::from("b.py"),
+                    start_delimiter: "#".into(),
+                    end_delimiter: "".into(),
+                    original: Outline::default(),
+                    format: ExternalFormat::Relative,
+                },
+            ),
+            (
+                NodeId::from("c"),
+                WritableExternalFile {
+                    path: PathBuf::from("c.py"),
+                    start_delimiter: "#".into(),
+                    end_delimiter: "".into(),
+                    original: Outline::default(),
+                    format: ExternalFormat::Relative,
+                },
+            ),
+        ]);
+
+        let updates = prepare_external_updates(&doc.outline, &writable).unwrap();
+        let mut roots: Vec<_> = updates.iter().map(|update| update.root.0.clone()).collect();
+        roots.sort();
+        assert_eq!(roots, vec!["a", "b", "c"]);
     }
 }
