@@ -932,7 +932,7 @@ fn render_position_relative(
             if let Some(child) = position
                 .children
                 .iter()
-                .find(|child| outline.nodes[&child.node].headline.trim() == section)
+                .find(|child| headline_matches_section_reference(&outline.nodes[&child.node].headline, section))
             {
                 render_position_relative(
                     outline,
@@ -1155,7 +1155,7 @@ fn render_position(
             if let Some(child) = position
                 .children
                 .iter()
-                .find(|child| outline.nodes[&child.node].headline.trim() == section)
+                .find(|child| headline_matches_section_reference(&outline.nodes[&child.node].headline, section))
             {
                 render_position(
                     outline,
@@ -1223,8 +1223,35 @@ fn section_reference(line: &str) -> Option<&str> {
     (line.starts_with("<<") && line.ends_with(">>")).then_some(line)
 }
 
+/// A headline denotes a section-definition node if it starts with `<<` and
+/// closes with `>>` -- Leo allows (and the corpus uses) a trailing
+/// disambiguating `" (filename.py)"` suffix after that close, e.g.
+/// `<< define regexes >> (leoGlobals.py)`, so this checks for the `>>`
+/// anywhere rather than requiring the headline to literally end with it
+/// (unlike `section_reference`, which matches a body *reference* line that
+/// carries no such suffix).
 fn is_section_node(outline: &Outline, position: &Position) -> bool {
-    section_reference(outline.nodes[&position.node].headline.trim()).is_some()
+    let headline = outline.nodes[&position.node].headline.trim();
+    headline.starts_with("<<") && headline.contains(">>")
+}
+
+/// Mirrors `VNode.matchHeadline` in canonical Leo's `leoNodes.py`: a
+/// section reference (`<<name>>`, found verbatim in a body line) matches a
+/// candidate child's headline case- and whitespace-insensitively, and as a
+/// *prefix* -- so the headline may carry trailing text after the reference
+/// (most commonly the `" (filename)"` disambiguator Leo appends when two
+/// same-named sections exist in different files).
+fn headline_matches_section_reference(headline: &str, reference: &str) -> bool {
+    fn normalize(s: &str) -> String {
+        s.chars()
+            .filter(|c| *c != ' ' && *c != '\t')
+            .flat_map(char::to_lowercase)
+            .collect()
+    }
+    let headline = normalize(headline);
+    let headline = headline.trim_start_matches('.');
+    let reference = normalize(reference);
+    headline.starts_with(&reference)
 }
 
 fn is_sentinel_like(line: &str, start: &str, end: &str) -> bool {
@@ -1439,6 +1466,91 @@ mod tests {
         assert_eq!(reparsed.outline, parsed.outline);
         assert!(rendered.starts_with("#!/usr/bin/env python\n#@+leo-ver=5-thin\n"));
         assert!(rendered.ends_with("#@-leo\n# trailing\n"));
+    }
+
+    #[test]
+    fn render_thin_resolves_section_reference_with_filename_disambiguator_suffix() {
+        // Leo disambiguates same-named sections across files by appending
+        // " (filename)" to the *defining* node's headline while the body
+        // reference stays bare (`<<sect>>`); `VNode.matchHeadline` strips
+        // that suffix when matching a reference to its defining node.
+        // Without the same tolerance the reference resolves to nothing
+        // (renders empty) *and* the shape check that's supposed to keep
+        // the section node out of `@others` also fails on the same
+        // suffix, so the node's content leaks into `@others` under a
+        // malformed marker instead -- or, when the headline additionally
+        // differs in case from the reference (see the next test), is lost
+        // from the file entirely. Matches leoGlobals.py's real
+        // `<< define global decorator dicts >> (leoGlobals.py)`.
+        let source = concat!(
+            "#@+leo-ver=5-thin\n",
+            "#@+node:r: * @file test.py\n",
+            "#@+<<sect>>\n",
+            "#@+node:s: ** <<sect>> (test.py)\n",
+            "inner\n",
+            "#@-<<sect>>\n",
+            "#@+others\n",
+            "#@+node:c: ** child\n",
+            "body\n",
+            "#@-others\n",
+            "#@-leo\n",
+        );
+        let parsed = DerivedFile::parse(source).unwrap();
+        let rendered = render_thin(&parsed.outline, &PositionId("0".into()), "#", "").unwrap();
+
+        assert!(
+            rendered.contains(concat!(
+                "#@+<<sect>>\n",
+                "#@+node:s: ** <<sect>> (test.py)\n",
+                "inner\n",
+                "#@-<<sect>>\n",
+            )),
+            "section content must render inline at its reference point, \
+             not empty there and relocated under @others:\n{rendered}"
+        );
+        assert_eq!(
+            rendered.matches("@+node:s:").count(),
+            1,
+            "the section-defining node must not be duplicated under @others:\n{rendered}"
+        );
+
+        let reparsed = DerivedFile::parse(&rendered).unwrap();
+        assert_eq!(reparsed.outline, parsed.outline);
+    }
+
+    #[test]
+    fn render_thin_resolves_section_reference_case_insensitively() {
+        // `VNode.matchHeadline` lowercases both sides before comparing, so
+        // a reference and its defining headline may differ in case (real
+        // Leo corpus: body reference `<<define g.decorators>>` against
+        // defining headline `<< define g.Decorators >>`). Here the section
+        // node's shape check succeeds (headline ends with the bracket, no
+        // suffix), correctly excluding it from `@others` -- so a case-only
+        // match failure loses the section's content entirely, with no
+        // trace anywhere in the rendered file.
+        let source = concat!(
+            "#@+leo-ver=5-thin\n",
+            "#@+node:r: * @file test.py\n",
+            "#@+<<Sect>>\n",
+            "#@+node:s: ** <<sect>>\n",
+            "inner\n",
+            "#@-<<Sect>>\n",
+            "#@+others\n",
+            "#@+node:c: ** child\n",
+            "body\n",
+            "#@-others\n",
+            "#@-leo\n",
+        );
+        let parsed = DerivedFile::parse(source).unwrap();
+        let rendered = render_thin(&parsed.outline, &PositionId("0".into()), "#", "").unwrap();
+
+        assert!(
+            rendered.contains("inner\n"),
+            "section content must not be dropped:\n{rendered}"
+        );
+
+        let reparsed = DerivedFile::parse(&rendered).unwrap();
+        assert_eq!(reparsed.outline, parsed.outline);
     }
 
     #[test]
