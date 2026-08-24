@@ -32,8 +32,8 @@ pub use relative::RelativeFile;
 pub use sync::{
     ExternalFormat, ExternalUpdate, OriginalExternalState, SyncError, SyncItem, SyncReport,
     WritableExternalFile, comment_delimiters, external_file_path, external_snapshot,
-    format_for_directive, prepare_external_updates, render_relative, render_thin,
-    restore_external_state, save_document, sync_document, track_external_rename,
+    external_snapshot_at, format_for_directive, prepare_external_updates, render_relative,
+    render_thin, restore_external_state, save_document, sync_document, track_external_rename,
     write_external_updates,
 };
 pub use tree::{AddPathsReport, HeadlinePathError};
