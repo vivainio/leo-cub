@@ -383,6 +383,7 @@ pub fn track_external_rename(
             file.path = path.clone();
             file.start_delimiter = start_delimiter.to_owned();
             file.end_delimiter = end_delimiter.to_owned();
+            file.format = format;
         })
         .or_insert(WritableExternalFile {
             path,
@@ -872,7 +873,11 @@ fn render_position_relative(
             result.push_str(&format!("{indent}{start}@@first{end}\n"));
         } else if trimmed.starts_with("@last ") {
             result.push_str(&format!("{indent}{start}@@last{end}\n"));
-        } else if let Some(directive) = trimmed.strip_prefix('@') {
+        } else if trimmed
+            .strip_prefix('@')
+            .is_some_and(needs_at_escaping)
+        {
+            let directive = trimmed.strip_prefix('@').expect("checked above");
             result.push_str(&format!(
                 "{indent}{start}@@{}{end}\n",
                 directive.trim_end_matches(['\r', '\n'])
@@ -1020,7 +1025,11 @@ fn render_position(
             result.push_str(&format!("{indent}{start}@@first{end}\n"));
         } else if trimmed.starts_with("@last ") {
             result.push_str(&format!("{indent}{start}@@last{end}\n"));
-        } else if let Some(directive) = trimmed.strip_prefix('@') {
+        } else if trimmed
+            .strip_prefix('@')
+            .is_some_and(needs_at_escaping)
+        {
+            let directive = trimmed.strip_prefix('@').expect("checked above");
             result.push_str(&format!(
                 "{indent}{start}@@{}{end}\n",
                 directive.trim_end_matches(['\r', '\n'])
@@ -1060,6 +1069,107 @@ fn is_section_node(outline: &Outline, position: &Position) -> bool {
 fn is_sentinel_like(line: &str, start: &str, end: &str) -> bool {
     let line = line.trim();
     line.starts_with(&format!("{start}@")) && (end.is_empty() || line.ends_with(end))
+}
+
+/// Leo's own recognized directive names (`g.globalDirectiveList` in
+/// `leoGlobals.py`), used by `needs_at_escaping` to tell an actual
+/// directive (`@language python`) from body text that merely starts with
+/// `@` (a Python decorator, an `@`-prefixed docstring line, ...).
+const GLOBAL_DIRECTIVES: &[&str] = &[
+    "all",
+    "beautify",
+    "c",
+    "code",
+    "color",
+    "colorcache",
+    "comment",
+    "delims",
+    "doc",
+    "encoding",
+    "first",
+    "header",
+    "ignore",
+    "killbeautify",
+    "killcolor",
+    "language",
+    "last",
+    "lineending",
+    "markup",
+    "nobeautify",
+    "nocolor-node",
+    "nocolor",
+    "noheader",
+    "nowrap",
+    "nopyflakes",
+    "nosearch",
+    "others",
+    "pagewidth",
+    "path",
+    "quiet",
+    "section-delims",
+    "silent",
+    "tabwidth",
+    "unit",
+    "verbose",
+    "wrap",
+];
+
+/// Whether `after_at` (the text right after a body line's leading `@`)
+/// would be misread as a node-boundary marker on a later parse: cub-1-thin
+/// node markers are bare tokens -- `@0 `, `@`, `@< `, `@> `, or
+/// `@<N `/`@>N ` (N = digits) -- before a space or end of line, unlike
+/// classic Leo's `@+node:gnx: ...` markers, which a line merely starting
+/// with a digit or `<`/`>` can never collide with.
+fn is_cub_node_marker_collision(after_at: &str) -> bool {
+    if after_at.is_empty() || after_at.starts_with(char::is_whitespace) {
+        return true;
+    }
+    if let Some(rest) = after_at.strip_prefix('0') {
+        return rest.is_empty() || rest.starts_with(char::is_whitespace);
+    }
+    for prefix in ['<', '>'] {
+        if let Some(rest) = after_at.strip_prefix(prefix) {
+            let digits_end = rest
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(rest.len());
+            let tail = &rest[digits_end..];
+            return tail.is_empty() || tail.starts_with(char::is_whitespace);
+        }
+    }
+    false
+}
+
+/// Whether `after_at` names a real Leo directive, mirroring classic Leo's
+/// `at.directiveKind4` (`leoAtFile.py`): the leading word must be in
+/// [`GLOBAL_DIRECTIVES`], *and* not immediately followed by `.` or `(` --
+/// that combination marks a decorator or method call instead (`@cmd('x')`,
+/// `@g.trace(...)`), which `directiveKind4` explicitly carves out to tell
+/// Leo directives from Python decorators.
+fn is_leo_directive_word(after_at: &str) -> bool {
+    let word_end = after_at
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '-'))
+        .unwrap_or(after_at.len());
+    if word_end == 0 {
+        return false;
+    }
+    let word = &after_at[..word_end];
+    let tail = &after_at[word_end..];
+    if tail.starts_with('.') || tail.starts_with('(') {
+        return false;
+    }
+    GLOBAL_DIRECTIVES.contains(&word)
+}
+
+/// Whether a body line's leading `@` needs `@@`-escaping in a derived
+/// file: either it would collide with cub's own node-marker syntax, or it
+/// names a real Leo directive that needs a comment prefix to stay valid
+/// source in the target language (`@language rhai` as bare text isn't
+/// valid Rhai). Anything else starting with `@` -- a decorator, an
+/// `@`-prefixed docstring, ... -- is safe to emit completely unescaped, the
+/// same as any other body line; see `render_position`/
+/// `render_position_relative`'s callers.
+fn needs_at_escaping(after_at: &str) -> bool {
+    is_cub_node_marker_collision(after_at) || is_leo_directive_word(after_at)
 }
 
 #[cfg(test)]
@@ -1208,6 +1318,48 @@ mod tests {
         assert_eq!(
             parsed.outline.roots[0].children[1].node,
             NodeId::from("clone1")
+        );
+    }
+
+    #[test]
+    fn body_lines_starting_with_at_are_only_escaped_when_actually_directive_like() {
+        // A Python decorator (`@cmd(...)`) or a dotted call (`@g.trace(...)`)
+        // merely starts with '@' -- it isn't a Leo directive, and escaping
+        // it as `@@cmd(...)` would comment it out, breaking the derived
+        // file as standalone Python. A real directive (`@language`) still
+        // needs escaping so it stays valid Python once commented -- bare
+        // `@language python` isn't. Mirrors classic Leo's
+        // `at.directiveKind4` disambiguation (`leoAtFile.py`).
+        let source = concat!(
+            r#"<leo_file><vnodes><v t="r"><vh>@f test.py</vh></v></vnodes>"#,
+            r#"<tnodes><t tx="r">"#,
+            "@cmd('buffer-copy')\n",
+            "def f(): pass\n",
+            "@g.commander_command('restart-leo')\n",
+            "def g(): pass\n",
+            "@language python\n",
+            "</t></tnodes></leo_file>",
+        );
+        let doc = LeoDocument::parse(source).unwrap();
+        let rendered = render_relative(&doc.outline, &PositionId("0".into()), "#", "").unwrap();
+
+        assert!(
+            rendered.contains("\n@cmd('buffer-copy')\n"),
+            "decorator should be unescaped, live code:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("\n@g.commander_command('restart-leo')\n"),
+            "dotted call should be unescaped, live code:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("#@@language python\n"),
+            "a real directive still needs escaping to stay valid Python:\n{rendered}"
+        );
+
+        let reparsed = RelativeFile::parse(&rendered).unwrap();
+        assert_eq!(
+            reparsed.outline.nodes[&NodeId::from("r")].body,
+            doc.outline.nodes[&NodeId::from("r")].body
         );
     }
 
