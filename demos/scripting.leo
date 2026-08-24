@@ -26,8 +26,9 @@ for child in doc.ensure(&quot;@variables&quot;).children() {
 }
 let repo_flag = if vars.contains(&quot;repo&quot;) &amp;&amp; vars.repo != &quot;&quot; { &quot; --repo '&quot; + vars.repo + &quot;'&quot; } else { &quot;&quot; };
 
-let prs = parse_json(doc.sh(&quot;gh pr list --json number,title,author,state,url&quot; + repo_flag).stdout);
-let issues = parse_json(doc.sh(&quot;gh issue list --json number,title,author,state,url&quot; + repo_flag).stdout);
+let opts = #{ cwd: doc.dir() };
+let prs = parse_json(sh(&quot;gh pr list --json number,title,author,state,url&quot; + repo_flag, opts).stdout);
+let issues = parse_json(sh(&quot;gh issue list --json number,title,author,state,url&quot; + repo_flag, opts).stdout);
 
 for pr in prs {
     let n = doc.ensure(&quot;Imports/PRs/#&quot; + pr.number + &quot;: &quot; + pr.title);

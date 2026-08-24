@@ -113,30 +113,19 @@ fn parse_json(json: &str) -> RhaiResult<Dynamic> {
         .map_err(rhai_err)
 }
 
-/// Runs `cmd` through `sh -c` with `default_cwd` as its working directory
+/// Runs `cmd` through `sh -c`, inheriting `cub`'s own working directory
 /// unless `opts` overrides it with a `cwd` entry. Always succeeds and hands
 /// back a `#{stdout, stderr, code}` map -- a nonzero exit is something the
 /// caller decides how to handle, not something this function judges -- the
 /// `Err` case is reserved for `sh` itself failing to launch (e.g. missing
 /// from `PATH`).
-fn run_shell(
-    cmd: &str,
-    opts: &rhai::Map,
-    default_cwd: Option<&std::path::Path>,
-) -> RhaiResult<rhai::Map> {
+fn run_shell(cmd: &str, opts: &rhai::Map) -> RhaiResult<rhai::Map> {
     let mut command = Command::new("sh");
     command.arg("-c").arg(cmd);
-    match opts.get("cwd") {
-        Some(cwd) => {
-            command.current_dir(cwd.clone().into_string().map_err(|type_name| {
-                rhai_err(format!("sh: `cwd` must be a string, got {type_name}"))
-            })?);
-        }
-        None => {
-            if let Some(default_cwd) = default_cwd {
-                command.current_dir(default_cwd);
-            }
-        }
+    if let Some(cwd) = opts.get("cwd") {
+        command.current_dir(cwd.clone().into_string().map_err(|type_name| {
+            rhai_err(format!("sh: `cwd` must be a string, got {type_name}"))
+        })?);
     }
     let output = command
         .output()
@@ -155,6 +144,17 @@ fn run_shell(
         Dynamic::from(output.status.code().unwrap_or(-1) as i64),
     );
     Ok(result)
+}
+
+/// `sh(cmd)`: runs in `cub`'s own working directory.
+fn sh_default_cwd(cmd: &str) -> RhaiResult<rhai::Map> {
+    run_shell(cmd, &rhai::Map::new())
+}
+
+/// `sh(cmd, opts)`: `opts` is currently just `#{cwd: path}`, to override
+/// the default working directory.
+fn sh_with_opts(cmd: &str, opts: rhai::Map) -> RhaiResult<rhai::Map> {
+    run_shell(cmd, &opts)
 }
 
 /// `root`'s subtree, depth-first and in outline order (`root` itself
@@ -638,21 +638,6 @@ impl Doc {
         save_document(&*document, path, writable_external, original_external).map_err(rhai_err)
     }
 
-    /// The escape hatch for the rare thing a script needs an external
-    /// process for (a build step, `git`, ...). Defaults `cwd` to the open
-    /// `.leo` file's directory, not `cub`'s own working directory, so a
-    /// script can reach a sibling file by relative path the same way an
-    /// external file reference in the outline itself would.
-    fn sh(&mut self, cmd: &str) -> RhaiResult<rhai::Map> {
-        run_shell(cmd, &rhai::Map::new(), self.dir().as_deref())
-    }
-
-    /// `sh` with an options map -- currently just `cwd`, to override the
-    /// default `.leo`-file-relative directory.
-    fn sh_with_opts(&mut self, cmd: &str, opts: rhai::Map) -> RhaiResult<rhai::Map> {
-        run_shell(cmd, &opts, self.dir().as_deref())
-    }
-
     /// The directory holding this `Doc`'s `.leo` file, or `None` if `path`
     /// is a bare filename with no directory component (in which case that
     /// directory is already `cub`'s own working directory).
@@ -666,9 +651,9 @@ impl Doc {
     }
 
     /// `dir()` as a script-facing string, `"."` standing in for `None` --
-    /// the pairing rhai-fs functions need to build a path next to the open
-    /// `.leo` file the same way `sh`'s default `cwd` already does (e.g.
-    /// `open_file(doc.dir() + "/notes.txt")`).
+    /// for building a path next to the open `.leo` file, e.g.
+    /// `open_file(doc.dir() + "/notes.txt")` or `sh("cd " + shq(doc.dir())
+    /// + " && ...")`.
     fn dir_string(&mut self) -> String {
         self.dir()
             .map(|dir| dir.display().to_string())
@@ -942,10 +927,10 @@ fn register_doc_api(engine: &mut Engine) {
     engine.register_fn("apply", Doc::apply);
     engine.register_fn("save", Doc::save);
     engine.register_fn("save_as", Doc::save_as);
-    engine.register_fn("sh", Doc::sh);
-    engine.register_fn("sh", Doc::sh_with_opts);
     engine.register_fn("dir", Doc::dir_string);
     engine.register_fn("parse_json", parse_json);
+    engine.register_fn("sh", sh_default_cwd);
+    engine.register_fn("sh", sh_with_opts);
 
     // rhai-fs: open_file/read_string/write/read_dir/create_dir/... on plain
     // path strings, global rather than `Doc`-scoped since a script may need

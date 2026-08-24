@@ -228,10 +228,11 @@ action, the error is displayed in the TUI.
 
 ## Run external tools and read files
 
-Use `doc.sh()` when a command should run relative to the open outline:
+Use `sh(command)` to run a command through `sh -c`, relative to `cub`'s own
+working directory:
 
 ```rust
-let result = doc.sh("git rev-parse --short HEAD");
+let result = sh("git rev-parse --short HEAD");
 assert(result.code == 0, "git failed: " + result.stderr);
 let hash = result.stdout;
 hash.trim();
@@ -242,8 +243,8 @@ The result contains `stdout`, `stderr`, and `code`. A non-zero command does not
 throw, so check `code` yourself. Rhai's `trim()` mutates its target in place and
 returns nothing, so it needs a variable to act on -- `result.stdout.trim()`
 discards the trimmed copy; see [gotchas](../reference/rhai-api.md#gotchas) in
-the API reference. The global `sh(command)` form instead uses
-`cub`'s current working directory and also accepts `#{ cwd: "path" }` options.
+the API reference. To run relative to the open outline instead, pass `#{ cwd:
+doc.dir() }`: `sh("git status", #{ cwd: doc.dir() })`.
 
 For direct filesystem access, Rhai's file functions are available too:
 

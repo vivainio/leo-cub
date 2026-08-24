@@ -548,6 +548,55 @@ fn cub_run_renaming_an_already_writable_thin_node_to_at_f_switches_its_sentinel_
     fs::remove_dir_all(&dir).unwrap();
 }
 
+#[test]
+fn cub_run_sh_defaults_to_cubs_cwd_and_honors_an_explicit_cwd_option() {
+    // The global `sh(cmd)` needs no open `Doc` -- unlike `Doc::sh`, which
+    // this replaced, it runs relative to `cub`'s own working directory
+    // unless `#{cwd: path}` overrides it.
+    let dir = temp_path("rhai_run_sh_dir");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+
+    let script_path = dir.join("sh.rhai");
+    fs::write(
+        &script_path,
+        r#"
+        let default_result = sh("pwd");
+        let default_pwd = default_result.stdout;
+        default_pwd.trim();
+        print("default: " + default_pwd);
+
+        let scoped_result = sh("pwd", #{ cwd: "CWD_DIR" });
+        let scoped_pwd = scoped_result.stdout;
+        scoped_pwd.trim();
+        print("scoped: " + scoped_pwd);
+        "#
+        .replace("CWD_DIR", dir.display().to_string().as_str()),
+    )
+    .unwrap();
+
+    let output = run_cub(&["run", script_path.to_str().unwrap()]);
+    assert!(
+        output.status.success(),
+        "cub run failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let cub_cwd = std::env::current_dir().unwrap();
+    assert!(
+        stdout.contains(&format!("default: {}", cub_cwd.display())),
+        "{stdout}"
+    );
+    let expected_scoped = fs::canonicalize(&dir).unwrap();
+    assert!(
+        stdout.contains(&format!("scoped: {}", expected_scoped.display())),
+        "{stdout}"
+    );
+
+    fs::remove_dir_all(&dir).unwrap();
+}
+
 // The bare `cub foo.rhai` shorthand (no `run` subcommand) is dispatched
 // from the same positional argument the TUI shorthand (`cub foo.leo`) uses,
 // which only exists when the `tui` feature is compiled in (see `Cli::file`
