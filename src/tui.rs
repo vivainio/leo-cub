@@ -1405,7 +1405,7 @@ fn import_path_arg(headline: &str) -> &str {
 /// scans every node once by gnx (`outline.nodes`) rather than every
 /// position, unlike `action_rows`, where a clone occurrence matters.
 /// Relative paths resolve against the open `.leo` file's own directory,
-/// the same convention `doc.sh`'s default `cwd` uses.
+/// the same convention `doc.dir()` uses.
 fn import_script_paths(app: &App) -> Vec<PathBuf> {
     let dir = app
         .path

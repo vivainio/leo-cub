@@ -112,10 +112,8 @@ directly:
 
 | Signature | Description |
 | --- | --- |
-| `doc.sh(command) -> map` | Run through `sh -c` relative to the document directory. |
-| `doc.sh(command, #{ cwd: path }) -> map` | Run in an explicit directory. |
 | `sh(command) -> map` | Run through `sh -c` relative to `cub`'s working directory. |
-| `sh(command, #{ cwd: path }) -> map` | Run in an explicit directory. |
+| `sh(command, #{ cwd: path }) -> map` | Run in an explicit directory, e.g. `doc.dir()`. |
 
 Each form returns `#{ stdout, stderr, code }`. A command's non-zero status is
 returned in `code` rather than thrown. A process terminated by a signal uses

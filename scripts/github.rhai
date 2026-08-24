@@ -5,9 +5,10 @@
 // An outline node with headline `@import scripts/github.rhai` (path
 // resolved relative to the open .leo file's own directory) makes every
 // name in COMMANDS below runnable from the action palette (Shift-A).
-// `doc.sh(...)` also runs relative to the open .leo file's directory, so
-// these assume that's inside (or dominated by) a git repo with a GitHub
-// remote and an authenticated `gh` (`gh auth status`).
+// `gh` commands run through `sh_in(doc, ...)`, which `cd`s into the open
+// .leo file's directory first, so these assume that's inside (or
+// dominated by) a git repo with a GitHub remote and an authenticated `gh`
+// (`gh auth status`).
 //
 // COMMANDS names the functions meant to be exposed as runnable commands --
 // everything else here (shq, get_variables, gh_repo_flag, and the
@@ -35,6 +36,15 @@ fn shq(s) {
     "'" + escaped + "'"
 }
 
+//@ fn sh_in
+/// Runs `cmd` with `dir` as its working directory -- `sh()` itself always
+/// runs relative to `cub`'s own working directory, so this is how a script
+/// reaches a directory-relative command (here, `gh`, which resolves its
+/// target repo from the git remote of the directory it runs in).
+fn sh_in(dir, cmd) {
+    sh(cmd, #{ cwd: dir })
+}
+
 //@ fn get_variables
 /// Reads the `@variables` node's children into a map, keyed by headline
 /// with each body (trimmed) as the value -- e.g. a child headlined `repo`
@@ -54,8 +64,8 @@ fn get_variables(doc) {
 //@ fn gh_repo_flag
 /// The `gh --repo` flag to append to a command, driven by the `repo`
 /// `@variables` entry (e.g. `leo-editor/leo-editor`). Empty when unset, so
-/// `gh` falls back to its default: the remote of the directory `doc.sh()`
-/// runs in.
+/// `gh` falls back to its default: the remote of the directory `sh_in`
+/// runs it in.
 fn gh_repo_flag(doc) {
     let vars = get_variables(doc);
     if vars.contains("repo") && vars.repo != "" {
@@ -67,32 +77,32 @@ fn gh_repo_flag(doc) {
 
 //@ fn gh_pr_list
 fn gh_pr_list(doc, target) {
-    parse_json(doc.sh("gh pr list --json number,title,author,state,url" + gh_repo_flag(doc)).stdout)
+    parse_json(sh_in(doc.dir(), "gh pr list --json number,title,author,state,url" + gh_repo_flag(doc)).stdout)
 }
 
 //@ fn gh_issue_list
 fn gh_issue_list(doc, target) {
-    parse_json(doc.sh("gh issue list --json number,title,author,state,url" + gh_repo_flag(doc)).stdout)
+    parse_json(sh_in(doc.dir(), "gh issue list --json number,title,author,state,url" + gh_repo_flag(doc)).stdout)
 }
 
 //@ fn gh_pr_view
 fn gh_pr_view(doc, number) {
-    parse_json(doc.sh("gh pr view " + number.to_string() + " --json number,title,author,state,url,body" + gh_repo_flag(doc)).stdout)
+    parse_json(sh_in(doc.dir(), "gh pr view " + number.to_string() + " --json number,title,author,state,url,body" + gh_repo_flag(doc)).stdout)
 }
 
 //@ fn gh_issue_view
 fn gh_issue_view(doc, number) {
-    parse_json(doc.sh("gh issue view " + number.to_string() + " --json number,title,author,state,url,body" + gh_repo_flag(doc)).stdout)
+    parse_json(sh_in(doc.dir(), "gh issue view " + number.to_string() + " --json number,title,author,state,url,body" + gh_repo_flag(doc)).stdout)
 }
 
 //@ fn gh_pr_create
 fn gh_pr_create(doc, title, body) {
-    doc.sh("gh pr create --title " + shq(title) + " --body " + shq(body) + gh_repo_flag(doc))
+    sh_in(doc.dir(), "gh pr create --title " + shq(title) + " --body " + shq(body) + gh_repo_flag(doc))
 }
 
 //@ fn gh_issue_create
 fn gh_issue_create(doc, title, body) {
-    doc.sh("gh issue create --title " + shq(title) + " --body " + shq(body) + gh_repo_flag(doc))
+    sh_in(doc.dir(), "gh issue create --title " + shq(title) + " --body " + shq(body) + gh_repo_flag(doc))
 }
 
 //@ fn import_prs_and_issues
