@@ -675,7 +675,7 @@ pub fn render_thin(
         result.push('\n');
     }
     result.push_str(&format!("{start}@+leo-ver=5-thin{end}\n"));
-    render_position(outline, root, 1, "", start, end, &mut result);
+    render_position(outline, root, 1, false, "", start, end, &mut result);
     result.push_str(&format!("{start}@-leo{end}\n"));
     for line in last {
         result.push_str(line);
@@ -715,6 +715,7 @@ pub fn render_relative(
         1,
         &mut prev_level,
         &protected,
+        false,
         "",
         start,
         end,
@@ -765,6 +766,7 @@ fn render_position_relative(
     level: usize,
     prev_level: &mut Option<usize>,
     protected: &HashSet<NodeId>,
+    in_all: bool,
     indent: &str,
     start: &str,
     end: &str,
@@ -801,6 +803,18 @@ fn render_position_relative(
         "{indent}{start}@{token} {gnx}{}{end}\n",
         node.headline
     ));
+
+    if in_all {
+        render_body_under_all(node, indent, start, end, result);
+        for child in &position.children {
+            render_position_relative(
+                outline, child, level + 1, prev_level, protected, true, indent, start, end,
+                result,
+            );
+        }
+        return;
+    }
+
     let mut expanded = false;
     for line in node.body.split_inclusive('\n') {
         let trimmed = line.trim_start();
@@ -820,6 +834,7 @@ fn render_position_relative(
                     level + 1,
                     prev_level,
                     protected,
+                    false,
                     &child_indent,
                     start,
                     end,
@@ -839,6 +854,7 @@ fn render_position_relative(
                     level + 1,
                     prev_level,
                     protected,
+                    true,
                     &child_indent,
                     start,
                     end,
@@ -862,6 +878,7 @@ fn render_position_relative(
                     level + 1,
                     prev_level,
                     protected,
+                    false,
                     &child_indent,
                     start,
                     end,
@@ -893,8 +910,14 @@ fn render_position_relative(
             }
         }
     }
-    if !expanded && !position.children.is_empty() {
-        result.push_str(&format!("{indent}{start}@+others{end}\n"));
+    if !expanded {
+        // No explicit `@others`/`@all`/section reference in the body:
+        // emit children as a flat leveled sequence, same as real Leo does
+        // for structural-only nesting. A synthetic `@+others` wrapper
+        // isn't needed -- the parser attaches children purely from level
+        // tokens (see `RelativeFile::parse`), not from wrapper sentinels
+        // -- and adding one anyway just inflates the derived file with
+        // noise relative to canonical Leo's own output for the same tree.
         for child in position
             .children
             .iter()
@@ -906,13 +929,13 @@ fn render_position_relative(
                 level + 1,
                 prev_level,
                 protected,
+                false,
                 indent,
                 start,
                 end,
                 result,
             );
         }
-        result.push_str(&format!("{indent}{start}@-others{end}\n"));
     }
 }
 
@@ -968,6 +991,7 @@ fn render_position(
     outline: &Outline,
     position: &Position,
     level: usize,
+    in_all: bool,
     indent: &str,
     start: &str,
     end: &str,
@@ -983,6 +1007,15 @@ fn render_position(
         "{indent}{start}@+node:{}: {stars} {}{end}\n",
         node.id.0, node.headline
     ));
+
+    if in_all {
+        render_body_under_all(node, indent, start, end, result);
+        for child in &position.children {
+            render_position(outline, child, level + 1, true, indent, start, end, result);
+        }
+        return;
+    }
+
     let mut expanded = false;
     for line in node.body.split_inclusive('\n') {
         let trimmed = line.trim_start();
@@ -996,7 +1029,16 @@ fn render_position(
                 .iter()
                 .filter(|child| !is_section_node(outline, child))
             {
-                render_position(outline, child, level + 1, &child_indent, start, end, result);
+                render_position(
+                    outline,
+                    child,
+                    level + 1,
+                    false,
+                    &child_indent,
+                    start,
+                    end,
+                    result,
+                );
             }
             result.push_str(&format!("{indent}{leading}{start}@-others{end}\n"));
         } else if trimmed.trim_end() == "@all" {
@@ -1005,7 +1047,16 @@ fn render_position(
             let child_indent = format!("{indent}{leading}");
             result.push_str(&format!("{child_indent}{start}@+all{end}\n"));
             for child in &position.children {
-                render_position(outline, child, level + 1, &child_indent, start, end, result);
+                render_position(
+                    outline,
+                    child,
+                    level + 1,
+                    true,
+                    &child_indent,
+                    start,
+                    end,
+                    result,
+                );
             }
             result.push_str(&format!("{child_indent}{start}@-all{end}\n"));
         } else if let Some(section) = section_reference(trimmed.trim_end()) {
@@ -1018,7 +1069,16 @@ fn render_position(
                 .iter()
                 .find(|child| outline.nodes[&child.node].headline.trim() == section)
             {
-                render_position(outline, child, level + 1, &child_indent, start, end, result);
+                render_position(
+                    outline,
+                    child,
+                    level + 1,
+                    false,
+                    &child_indent,
+                    start,
+                    end,
+                    result,
+                );
             }
             result.push_str(&format!("{child_indent}{start}@-{section}{end}\n"));
         } else if trimmed.starts_with("@first ") {
@@ -1045,16 +1105,21 @@ fn render_position(
             }
         }
     }
-    if !expanded && !position.children.is_empty() {
-        result.push_str(&format!("{indent}{start}@+others{end}\n"));
+    if !expanded {
+        // No explicit `@others`/`@all`/section reference in the body:
+        // emit children as a flat leveled sequence, same as real Leo does
+        // for structural-only nesting. A synthetic `@+others` wrapper
+        // isn't needed -- the parser attaches children purely from level
+        // tokens (see `DerivedFile::parse`), not from wrapper sentinels --
+        // and adding one anyway just inflates the derived file with noise
+        // relative to canonical Leo's own output for the same tree.
         for child in position
             .children
             .iter()
             .filter(|child| !is_section_node(outline, child))
         {
-            render_position(outline, child, level + 1, indent, start, end, result);
+            render_position(outline, child, level + 1, false, indent, start, end, result);
         }
-        result.push_str(&format!("{indent}{start}@-others{end}\n"));
     }
 }
 
@@ -1172,6 +1237,41 @@ fn needs_at_escaping(after_at: &str) -> bool {
     is_cub_node_marker_collision(after_at) || is_leo_directive_word(after_at)
 }
 
+/// Renders a node's body while already inside an ancestor's `@all`
+/// expansion. Real Leo's `putAtAllBody` (`leoAtFile.py`) writes body text
+/// completely unconditionally there, with zero directive scanning -- `@all`
+/// is already exhaustive, so a literal `@others`/`@language`/... appearing
+/// in a descendant's body under it is just inert text, never a directive.
+/// This mirrors that: no `@others`/`@all`/section-reference expansion, no
+/// Leo-directive-name escaping -- only the escaping cub's own parser
+/// genuinely needs regardless of context (a line that would collide with
+/// cub's node-marker syntax, or one that already happens to start with the
+/// sentinel prefix).
+fn render_body_under_all(node: &Node, indent: &str, start: &str, end: &str, result: &mut String) {
+    for line in node.body.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        if trimmed
+            .strip_prefix('@')
+            .is_some_and(is_cub_node_marker_collision)
+        {
+            let directive = trimmed.strip_prefix('@').expect("checked above");
+            result.push_str(&format!(
+                "{indent}{start}@@{}{end}\n",
+                directive.trim_end_matches(['\r', '\n'])
+            ));
+        } else {
+            let rendered = format!("{indent}{line}");
+            if is_sentinel_like(&rendered, start, end) {
+                result.push_str(&format!("{indent}{start}@verbatim{end}\n"));
+            }
+            result.push_str(&rendered);
+            if !line.ends_with('\n') {
+                result.push('\n');
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1235,6 +1335,130 @@ mod tests {
         assert_eq!(reparsed.outline, parsed.outline);
         assert!(rendered.starts_with("#!/usr/bin/env python\n#@+leo-ver=5-thin\n"));
         assert!(rendered.ends_with("#@-leo\n# trailing\n"));
+    }
+
+    #[test]
+    fn render_thin_omits_at_others_for_children_with_no_explicit_marker_in_body() {
+        // Real Leo represents purely-structural nesting (no body text
+        // asking for children at a specific point) as a flat sequence of
+        // leveled `@+node:...` lines, no `@+others` wrapper -- and its own
+        // parser attaches children from level numbers alone (see
+        // `DerivedFile::parse`), so a synthetic wrapper here would just be
+        // noise a canonical-Leo diff wouldn't have.
+        let source = concat!(
+            "#@+leo-ver=5-thin\n",
+            "#@+node:r: * @file test.py\n",
+            "#@+node:c1: ** child one\n",
+            "line one\n",
+            "#@+node:c2: ** child two\n",
+            "line two\n",
+            "#@-leo\n",
+        );
+        let parsed = DerivedFile::parse(source).unwrap();
+        let rendered = render_thin(&parsed.outline, &PositionId("0".into()), "#", "").unwrap();
+
+        assert!(
+            !rendered.contains("@+others") && !rendered.contains("@-others"),
+            "expected no @+others wrapper for implicit children:\n{rendered}"
+        );
+        let reparsed = DerivedFile::parse(&rendered).unwrap();
+        assert_eq!(reparsed.outline, parsed.outline);
+    }
+
+    #[test]
+    fn render_relative_omits_at_others_for_children_with_no_explicit_marker_in_body() {
+        let source = concat!(
+            r#"<leo_file><vnodes><v t="r"><vh>@f test.py</vh>"#,
+            r#"<v t="c1"><vh>child one</vh></v>"#,
+            r#"<v t="c2"><vh>child two</vh></v>"#,
+            r#"</v></vnodes><tnodes><t tx="r"></t><t tx="c1">line one</t>"#,
+            r#"<t tx="c2">line two</t></tnodes></leo_file>"#,
+        );
+        let doc = LeoDocument::parse(source).unwrap();
+        let rendered = render_relative(&doc.outline, &PositionId("0".into()), "#", "").unwrap();
+
+        assert!(
+            !rendered.contains("@+others") && !rendered.contains("@-others"),
+            "expected no @+others wrapper for implicit children:\n{rendered}"
+        );
+        let reparsed = RelativeFile::parse(&rendered).unwrap();
+        let children = &reparsed.outline.roots[0].children;
+        assert_eq!(children.len(), 2);
+        assert_eq!(
+            reparsed.outline.nodes[&children[0].node].body,
+            "line one\n"
+        );
+        assert_eq!(
+            reparsed.outline.nodes[&children[1].node].body,
+            "line two\n"
+        );
+    }
+
+    #[test]
+    fn render_thin_treats_at_others_as_inert_text_under_an_active_at_all() {
+        // Real Leo's `putAtAllBody` (`leoAtFile.py`) writes body text
+        // completely unconditionally under an ancestor's `@all` -- no
+        // directive scanning at all -- so a literal `@others` in a
+        // descendant's body there is just inert text, not an expansion
+        // point. `render_position` must match: it shouldn't treat it as a
+        // directive just because the word matches.
+        let source = concat!(
+            r#"<leo_file><vnodes><v t="r"><vh>@file test.py</vh>"#,
+            r#"<v t="c"><vh>class Foo</vh></v>"#,
+            r#"</v></vnodes><tnodes><t tx="r">"#,
+            "@all\n",
+            r#"</t><t tx="c">"#,
+            "class Foo:\n@others\n    pass\n",
+            r#"</t></tnodes></leo_file>"#,
+        );
+        let doc = LeoDocument::parse(source).unwrap();
+        let rendered = render_thin(&doc.outline, &PositionId("0".into()), "#", "").unwrap();
+
+        assert!(
+            rendered.contains("\nclass Foo:\n@others\n    pass\n"),
+            "expected the literal @others line to survive as plain, unescaped body text:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("#@+others") && !rendered.contains("#@@others"),
+            "a literal @others under @all must not be treated as a directive:\n{rendered}"
+        );
+
+        let reparsed = DerivedFile::parse(&rendered).unwrap();
+        assert_eq!(
+            reparsed.outline.nodes[&NodeId::from("c")].body,
+            "class Foo:\n@others\n    pass\n"
+        );
+    }
+
+    #[test]
+    fn render_relative_treats_at_others_as_inert_text_under_an_active_at_all() {
+        let source = concat!(
+            r#"<leo_file><vnodes><v t="r"><vh>@f test.py</vh>"#,
+            r#"<v t="c"><vh>class Foo</vh></v>"#,
+            r#"</v></vnodes><tnodes><t tx="r">"#,
+            "@all\n",
+            r#"</t><t tx="c">"#,
+            "class Foo:\n@others\n    pass\n",
+            r#"</t></tnodes></leo_file>"#,
+        );
+        let doc = LeoDocument::parse(source).unwrap();
+        let rendered = render_relative(&doc.outline, &PositionId("0".into()), "#", "").unwrap();
+
+        assert!(
+            rendered.contains("\nclass Foo:\n@others\n    pass\n"),
+            "expected the literal @others line to survive as plain, unescaped body text:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("#@+others") && !rendered.contains("#@@others"),
+            "a literal @others under @all must not be treated as a directive:\n{rendered}"
+        );
+
+        let reparsed = RelativeFile::parse(&rendered).unwrap();
+        let child = &reparsed.outline.roots[0].children[0];
+        assert_eq!(
+            reparsed.outline.nodes[&child.node].body,
+            "class Foo:\n@others\n    pass\n"
+        );
     }
 
     #[test]
