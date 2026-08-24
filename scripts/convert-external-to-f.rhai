@@ -5,10 +5,18 @@
 // own cub-1-thin sentinel format, so the resulting tree can be diffed
 // against the pre-conversion checkout to see exactly what changes.
 //
-// Usage: cub run scripts/convert-external-to-f.rhai <directory>
+// Usage: cub run scripts/convert-external-to-f.rhai <directory> [directive]
+//
+// The optional second argument restricts the conversion to one directive
+// (e.g. `@file`), instead of every recognized one. Useful for an
+// apples-to-apples diff: `@file`/`@thin`/`@file-thin` already carry full
+// sentinels before conversion, so promoting just those to `@f` mostly
+// reformats existing node markers rather than introducing new @others
+// structure the way `@auto`/`@auto-md`/`@clean` (which start with none)
+// would.
 
 if ARGS.len() == 0 {
-    print("usage: cub run convert-external-to-f.rhai <directory>");
+    print("usage: cub run convert-external-to-f.rhai <directory> [directive]");
     throw "missing directory argument";
 }
 
@@ -18,7 +26,16 @@ let root = ARGS[0];
 // in src/inspect.rs -- everything but `@f` itself, since that's the target
 // format. Matching "<directive>(\s|$)" (not a bare prefix) keeps `@auto`
 // from also matching `@auto-md`/`@auto-markdown` headlines.
-const DIRECTIVES = ["@file-thin", "@auto-markdown", "@auto-md", "@auto", "@file", "@thin", "@clean"];
+const ALL_DIRECTIVES = ["@file-thin", "@auto-markdown", "@auto-md", "@auto", "@file", "@thin", "@clean"];
+let DIRECTIVES = ALL_DIRECTIVES;
+if ARGS.len() > 1 {
+    let wanted = ARGS[1];
+    assert(
+        ALL_DIRECTIVES.contains(wanted),
+        "unknown directive " + wanted + " -- expected one of " + ALL_DIRECTIVES.to_string()
+    );
+    DIRECTIVES = [wanted];
+}
 
 let find = sh("find '" + root + "' -iname '*.leo'");
 assert(find.code == 0, "find failed: " + find.stderr);
