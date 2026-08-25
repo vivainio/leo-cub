@@ -1124,6 +1124,7 @@ fn ensure_supported_clean_tree(outline: &Outline, position: &Position) -> Result
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_position(
     outline: &Outline,
     position: &Position,
