@@ -892,7 +892,15 @@ fn render_position_relative(
         render_body_under_all(node, indent, start, end, result);
         for child in &position.children {
             render_position_relative(
-                outline, child, level + 1, prev_level, protected, true, indent, start, end,
+                outline,
+                child,
+                level + 1,
+                prev_level,
+                protected,
+                true,
+                indent,
+                start,
+                end,
                 result,
             );
         }
@@ -969,11 +977,9 @@ fn render_position_relative(
             let leading = &line[..line.len() - trimmed.len()];
             let child_indent = format!("{indent}{leading}");
             result.push_str(&format!("{child_indent}{start}@+{section}{end}\n"));
-            if let Some(child) = position
-                .children
-                .iter()
-                .find(|child| headline_matches_section_reference(&outline.nodes[&child.node].headline, section))
-            {
+            if let Some(child) = position.children.iter().find(|child| {
+                headline_matches_section_reference(&outline.nodes[&child.node].headline, section)
+            }) {
                 render_position_relative(
                     outline,
                     child,
@@ -1209,11 +1215,9 @@ fn render_position(
             let leading = &line[..line.len() - trimmed.len()];
             let child_indent = format!("{indent}{leading}");
             result.push_str(&format!("{child_indent}{start}@+{section}{end}\n"));
-            if let Some(child) = position
-                .children
-                .iter()
-                .find(|child| headline_matches_section_reference(&outline.nodes[&child.node].headline, section))
-            {
+            if let Some(child) = position.children.iter().find(|child| {
+                headline_matches_section_reference(&outline.nodes[&child.node].headline, section)
+            }) {
                 render_position(
                     outline,
                     child,
@@ -1817,14 +1821,8 @@ mod tests {
         let reparsed = RelativeFile::parse(&rendered).unwrap();
         let children = &reparsed.outline.roots[0].children;
         assert_eq!(children.len(), 2);
-        assert_eq!(
-            reparsed.outline.nodes[&children[0].node].body,
-            "line one\n"
-        );
-        assert_eq!(
-            reparsed.outline.nodes[&children[1].node].body,
-            "line two\n"
-        );
+        assert_eq!(reparsed.outline.nodes[&children[0].node].body, "line one\n");
+        assert_eq!(reparsed.outline.nodes[&children[1].node].body, "line two\n");
     }
 
     #[test]
@@ -2052,8 +2050,7 @@ mod tests {
 
         for (rendered, reparsed_body) in [
             {
-                let rendered =
-                    render_thin(&doc.outline, &PositionId("0".into()), "#", "").unwrap();
+                let rendered = render_thin(&doc.outline, &PositionId("0".into()), "#", "").unwrap();
                 let reparsed_body = DerivedFile::parse(&rendered).unwrap().outline.nodes
                     [&NodeId::from("r")]
                     .body
