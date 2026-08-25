@@ -499,6 +499,66 @@ fn cub_run_promotes_an_auto_node_to_at_f_by_renaming_and_saving() {
 }
 
 #[test]
+fn cub_run_warns_instead_of_silently_swallowing_a_derived_load_failure() {
+    // Two different .leo outlines can legitimately share a gnx for the
+    // same external file -- leo-editor's own LeoPyRef.leo does this for
+    // hundreds of files also owned by their own dedicated .leo outlines.
+    // If a script converts/saves both in one run, the first save rewrites
+    // the shared file to a new sentinel format; the second outline's own
+    // node still expects the old format at *its* open() time, so the load
+    // fails -- and used to fail *silently* (Doc::open discarded
+    // load_derived_files's report.errors entirely), leaving that node's
+    // body empty with no indication anything went wrong. A later save of
+    // that second outline would then happily render and write the empty
+    // state, destroying the first outline's correct content. open() must
+    // now print something so this isn't invisible.
+    let dir = temp_path("rhai_run_load_conflict_dir");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("shared.py"),
+        "#@+leo-ver=5-thin\n#@+node:shared: * @file shared.py\nprint(\"hi\")\n#@-leo\n",
+    )
+    .unwrap();
+    let leo_xml = r#"<leo_file><vnodes><v t="shared"><vh>@file shared.py</vh></v></vnodes><tnodes><t tx="shared"></t></tnodes></leo_file>"#;
+    fs::write(dir.join("a.leo"), leo_xml).unwrap();
+    fs::write(dir.join("b.leo"), leo_xml).unwrap();
+
+    let script_path = dir.join("conflict.rhai");
+    let escaped_dir = dir.display().to_string().replace('\\', "\\\\");
+    fs::write(
+        &script_path,
+        format!(
+            r#"
+            let a = open("{escaped_dir}/a.leo");
+            a.set_headline("shared", "@f shared.py");
+            a.save();
+
+            let b = open("{escaped_dir}/b.leo");
+            print("opened b");
+            "#
+        ),
+    )
+    .unwrap();
+
+    let output = run_cub(&["run", script_path.to_str().unwrap()]);
+    assert!(
+        output.status.success(),
+        "cub run failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("opened b"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("no @+node sentinel"),
+        "expected the second open() to warn about the load failure it hit, not swallow it silently:\n{stderr}"
+    );
+
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
 fn cub_run_renaming_an_already_writable_thin_node_to_at_f_switches_its_sentinel_format() {
     // Unlike the plain-`@auto` promotion above, a `@thin` node is already
     // tracked as writable at `open()` time. The rename must still swap its

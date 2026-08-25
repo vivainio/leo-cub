@@ -253,6 +253,20 @@ impl Doc {
     fn open(path: &str) -> RhaiResult<Doc> {
         let mut document = LeoDocument::open(path).map_err(rhai_err)?;
         let report = load_derived_files(&mut document.outline, Path::new(path));
+        // A load failure (e.g. a file whose on-disk sentinel format no
+        // longer matches what this node's headline expects -- which can
+        // happen when two different .leo outlines share a gnx for the same
+        // external file and a script converts/saves both in one run)
+        // leaves that node's body/children exactly as they were before the
+        // failed load, typically empty. Silently proceeding is dangerous:
+        // a later `save()` would then happily render and write that empty
+        // state, destroying whatever correct content was already on disk.
+        // The TUI's own open surfaces the same report.errors as a status
+        // message (see open_document in tui.rs); scripts get no status
+        // bar, so this prints to stderr instead.
+        for error in &report.errors {
+            eprintln!("cub: {path}: {error}");
+        }
         let original_external = OriginalExternalState {
             children: report.original_children,
             bodies: report.original_bodies,
