@@ -308,29 +308,29 @@ impl DerivedFile {
                 derived: self.root.0.clone(),
             });
         }
-        let mut next = outline.clone();
         let derived_root = &self.outline.roots[0];
         let root_body = self.outline.nodes[&self.root].body.clone();
-        next.nodes
+        outline
+            .nodes
             .get_mut(&self.root)
             .expect("validated target")
             .body = root_body;
         for (id, node) in &self.outline.nodes {
             if id != &self.root {
-                if let Some(existing) = next.nodes.get_mut(id) {
+                if let Some(existing) = outline.nodes.get_mut(id) {
                     existing.headline.clone_from(&node.headline);
                     existing.body.clone_from(&node.body);
                 } else {
-                    next.nodes.insert(id.clone(), node.clone());
+                    outline.nodes.insert(id.clone(), node.clone());
                 }
             }
         }
-        next.children_mut(Some(target))
+        outline
+            .children_mut(Some(target))
             .expect("validated target")
             .clone_from(&derived_root.children);
-        let referenced = referenced_nodes(&next.roots);
-        next.nodes.retain(|id, _| referenced.contains(id));
-        *outline = next;
+        let referenced = referenced_nodes(&outline.roots);
+        outline.nodes.retain(|id, _| referenced.contains(id));
         Ok(())
     }
 }
