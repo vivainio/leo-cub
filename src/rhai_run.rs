@@ -157,6 +157,13 @@ fn sh_with_opts(cmd: &str, opts: rhai::Map) -> RhaiResult<rhai::Map> {
     run_shell(cmd, &opts)
 }
 
+/// Reads an environment variable, `""` when unset -- lets a script build a
+/// path under `$HOME` (or honor `$XDG_*`, `$EDITOR`, ...) without shelling
+/// out to `sh("echo -n $HOME")` just to ask the process's own environment.
+fn env_var(name: &str) -> String {
+    std::env::var(name).unwrap_or_default()
+}
+
 /// `root`'s subtree, depth-first and in outline order (`root` itself
 /// first), paired with each occurrence's own `PositionId` -- the
 /// exact-occurrence counterpart to `Outline::subtree_ids`, which only
@@ -923,6 +930,15 @@ fn dynamic_eq(a: &Dynamic, b: &Dynamic) -> bool {
 /// point; callers differ only in how output is captured and how (or
 /// whether) a script obtains its `Doc`.
 fn register_doc_api(engine: &mut Engine) {
+    // Rhai's defaults (32 levels of expression nesting inside a function,
+    // 64 at a script's top level) are sized to guard against pathological
+    // or malicious input, not ordinary code -- a multi-line string build
+    // (each `+` nests one level deeper than the last) inside a function
+    // with a couple of levels of `if`/`for` around it can hit 32 easily.
+    // Matching the function limit to the top-level one avoids that for
+    // any reasonably-sized `@import`ed command, while still bounding
+    // pathological nesting well short of a stack overflow.
+    engine.set_max_expr_depths(64, 64);
     engine.register_type_with_name::<Doc>("Doc");
     engine.register_fn("open", Doc::open);
     engine.register_fn("ensure", Doc::ensure);
@@ -955,6 +971,7 @@ fn register_doc_api(engine: &mut Engine) {
     engine.register_fn("parse_json", parse_json);
     engine.register_fn("sh", sh_default_cwd);
     engine.register_fn("sh", sh_with_opts);
+    engine.register_fn("env_var", env_var);
 
     // rhai-fs: open_file/read_string/write/read_dir/create_dir/... on plain
     // path strings, global rather than `Doc`-scoped since a script may need
@@ -1288,5 +1305,26 @@ pub(crate) fn run_command(
             stdout: output.borrow().clone(),
             stderr: error.to_string(),
         },
+    }
+}
+
+#[cfg(all(test, feature = "tui"))]
+mod tests {
+    use super::discover_commands;
+    use std::path::Path;
+
+    /// `scripts/claude-history.rhai` (the repo's `@import`-shaped demo, see
+    /// demos/scripting.leo) must keep exposing exactly its one intended
+    /// palette command -- not the private `first_text`/`excerpt` helpers it
+    /// also defines -- so the palette entry `demos/scripting.leo`'s
+    /// `@import` node expects doesn't silently disappear or multiply.
+    #[test]
+    fn claude_history_script_exposes_only_its_import_command() {
+        let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/claude-history.rhai");
+        let names: Vec<String> = discover_commands(&script)
+            .into_iter()
+            .map(|command| command.name)
+            .collect();
+        assert_eq!(names, vec!["import_claude_history".to_string()]);
     }
 }

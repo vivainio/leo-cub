@@ -114,10 +114,11 @@ directly:
 | --- | --- |
 | `sh(command) -> map` | Run through `sh -c` relative to `cub`'s working directory. |
 | `sh(command, #{ cwd: path }) -> map` | Run in an explicit directory, e.g. `doc.dir()`. |
+| `env_var(name: string) -> string` | Read an environment variable, `""` when unset. |
 
-Each form returns `#{ stdout, stderr, code }`. A command's non-zero status is
-returned in `code` rather than thrown. A process terminated by a signal uses
-`-1`.
+Each `sh` form returns `#{ stdout, stderr, code }`. A command's non-zero
+status is returned in `code` rather than thrown. A process terminated by a
+signal uses `-1`.
 
 ### Paths and directories
 
@@ -183,3 +184,11 @@ let hash = result.stdout;
 hash.trim();
 print(hash);                   // prints the trimmed value
 ```
+
+Rhai caps expression nesting depth to guard against pathological input --
+64 levels at a script's top level, 32 (raised here to 64, matching the
+top-level limit) inside a `fn`. A long `+`-chained string build or a few
+levels of `if`/`for` around a compound condition can reach that inside one
+function faster than it looks; if a script fails to parse with "Expression
+exceeds maximum complexity", split the expression across a few `let`/`+=`
+statements or an extra helper function rather than one large one.
