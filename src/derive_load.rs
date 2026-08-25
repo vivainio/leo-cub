@@ -10,6 +10,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use rayon::prelude::*;
+
 use crate::{
     AutoFile, DerivedFile, ExternalFormat, Node, NodeId, Outline, Position, PositionId,
     RelativeFile, WritableExternalFile, comment_delimiters, external_snapshot_at,
@@ -66,198 +68,321 @@ pub fn load_derived_files(outline: &mut Outline, outline_path: &Path) -> LoadRep
 /// freshly-created nodes without re-merging -- and so silently discarding
 /// unsaved edits to -- every other derived node in the document, which a
 /// full [`load_derived_files`] pass would do.
+/// A directive's file already read from disk and parsed against a snapshot
+/// of `outline` taken before any job in the batch merged into it -- the
+/// output of the read+parse phase of [`load_derived_jobs`], which runs in
+/// parallel across jobs since none of it touches `outline` mutably.
+enum ParsedFile {
+    Auto(AutoFile),
+    Relative(RelativeFile),
+    Derived(DerivedFile),
+}
+
+/// What [`load_derived_jobs`] reads from `outline` before a job's own merge
+/// can overwrite it. Captured per job during the parallel prepare phase, not
+/// the later sequential merge phase, so it always reflects pre-load state --
+/// even for a clone occurrence whose sibling job merges first.
+struct JobPrep {
+    root_node: NodeId,
+    original_children: Vec<Position>,
+    original_body: String,
+    original_nodes: HashMap<NodeId, Node>,
+}
+
+enum JobOutcome {
+    /// Not `@auto` and the file doesn't exist yet: recorded as writable with
+    /// no prior content, nothing to read or parse.
+    Missing(DerivedJob),
+    Parsed {
+        job: DerivedJob,
+        prep: JobPrep,
+        parsed: Box<ParsedFile>,
+    },
+    Failed {
+        label: String,
+        error: String,
+    },
+}
+
 pub fn load_derived_jobs(outline: &mut Outline, jobs: Vec<DerivedJob>) -> LoadReport {
     let mut report = LoadReport::default();
-    for job in jobs {
-        let label = job.path.display().to_string();
-        if !job.auto && !job.path.exists() {
-            report.writable_external.insert(
-                job.root.clone(),
-                WritableExternalFile {
-                    path: job.path.clone(),
-                    start_delimiter: comment_delimiters(&job.path).0.to_owned(),
-                    end_delimiter: comment_delimiters(&job.path).1.to_owned(),
-                    original: Outline::default(),
-                    format: format_for_directive(&job.directive),
-                },
-            );
-            report.loaded += 1;
-            continue;
-        }
-        let result = fs::read_to_string(&job.path)
-            .map_err(|error| error.to_string())
-            .and_then(|source| {
-                let root_node = outline
-                    .position(&job.position)
-                    .map(|position| position.node.clone())
-                    .ok_or_else(|| "derived root position disappeared".to_owned())?;
-                let original_children = outline
-                    .position(&job.position)
-                    .map(|position| position.children.clone())
-                    .unwrap_or_default();
-                let original_body = outline.nodes[&root_node].body.clone();
-                // Captured before merge_into prunes outline.nodes down to
-                // what the freshly generated tree references: these ids
-                // otherwise vanish from outline.nodes even though
-                // original_children (restored just before serializing)
-                // still points at them.
-                let original_nodes: HashMap<NodeId, Node> = referenced_nodes(&original_children)
-                    .into_iter()
-                    .filter_map(|id| outline.nodes.get(&id).cloned().map(|node| (id, node)))
-                    .collect();
-                if job.auto {
-                    let auto = AutoFile::parse_with_directive(
-                        &job.path,
-                        job.root.clone(),
-                        &source,
-                        Some(&job.directive),
-                    )
-                    .map_err(|error| error.to_string())?;
-                    if !auto.merge_into(outline, &job.position) {
-                        return Err("auto root position disappeared".to_owned());
-                    }
-                    report
-                        .node_locations
-                        .entry(auto.root.clone())
-                        .or_insert(SourceLocation {
-                            path: job.path.clone(),
-                            line: 1,
-                        });
-                    for (id, line) in &auto.locations {
-                        report
-                            .node_locations
-                            .entry(id.clone())
-                            .or_insert(SourceLocation {
-                                path: job.path.clone(),
-                                line: *line,
-                            });
-                    }
-                    report.derived_nodes.extend(
-                        auto.outline
-                            .nodes
-                            .keys()
-                            .filter(|id| **id != auto.root)
-                            .cloned(),
-                    );
-                } else if job.directive == "@f" {
-                    let derived =
-                        RelativeFile::parse(&source).map_err(|error| error.to_string())?;
-                    derived
-                        .merge_into(outline, &job.position)
-                        .map_err(|error| error.to_string())?;
-                    let original = external_snapshot_at(outline, &job.position)
-                        .map(|(_, snapshot)| snapshot)
-                        .ok_or_else(|| "merged external root disappeared".to_owned())?;
-                    report.writable_external.insert(
-                        derived.root.clone(),
-                        WritableExternalFile {
-                            path: job.path.clone(),
-                            start_delimiter: derived.start_delimiter.clone(),
-                            end_delimiter: derived.end_delimiter.clone(),
-                            original,
-                            format: ExternalFormat::Relative,
-                        },
-                    );
-                    for (derived_position, line) in &derived.locations {
-                        let suffix = derived_position
-                            .0
-                            .strip_prefix("0")
-                            .unwrap_or(&derived_position.0);
-                        let position = PositionId(format!("{}{}", job.position.0, suffix));
-                        report.locations.insert(
-                            position,
-                            SourceLocation {
-                                path: job.path.clone(),
-                                line: *line,
-                            },
-                        );
-                        if let Some(position) = derived.outline.position(derived_position) {
-                            report
-                                .node_locations
-                                .entry(position.node.clone())
-                                .or_insert(SourceLocation {
-                                    path: job.path.clone(),
-                                    line: *line,
-                                });
-                        }
-                    }
-                    report.derived_nodes.extend(
-                        derived
-                            .outline
-                            .nodes
-                            .keys()
-                            .filter(|id| **id != derived.root)
-                            .cloned(),
-                    );
-                } else {
-                    let derived = DerivedFile::parse(&source).map_err(|error| error.to_string())?;
-                    derived
-                        .merge_into(outline, &job.position)
-                        .map_err(|error| error.to_string())?;
-                    let original = external_snapshot_at(outline, &job.position)
-                        .map(|(_, snapshot)| snapshot)
-                        .ok_or_else(|| "merged external root disappeared".to_owned())?;
-                    report.writable_external.insert(
-                        derived.root.clone(),
-                        WritableExternalFile {
-                            path: job.path.clone(),
-                            start_delimiter: derived.start_delimiter.clone(),
-                            end_delimiter: derived.end_delimiter.clone(),
-                            original,
-                            format: ExternalFormat::Thin,
-                        },
-                    );
-                    for (derived_position, line) in &derived.locations {
-                        let suffix = derived_position
-                            .0
-                            .strip_prefix("0")
-                            .unwrap_or(&derived_position.0);
-                        let position = PositionId(format!("{}{}", job.position.0, suffix));
-                        report.locations.insert(
-                            position,
-                            SourceLocation {
-                                path: job.path.clone(),
-                                line: *line,
-                            },
-                        );
-                        if let Some(position) = derived.outline.position(derived_position) {
-                            report
-                                .node_locations
-                                .entry(position.node.clone())
-                                .or_insert(SourceLocation {
-                                    path: job.path.clone(),
-                                    line: *line,
-                                });
-                        }
-                    }
-                    report.derived_nodes.extend(
-                        derived
-                            .outline
-                            .nodes
-                            .keys()
-                            .filter(|id| **id != derived.root)
-                            .cloned(),
-                    );
+    // Read+parse every job's file up front, in parallel: this is the
+    // I/O- and CPU-heavy part, and it only ever reads `outline` (to snapshot
+    // pre-load state), never mutates it. The actual merge into `outline`
+    // stays a plain sequential loop below since it has to.
+    let outcomes: Vec<JobOutcome> = jobs
+        .into_par_iter()
+        .map(|job| prepare_job(outline, job))
+        .collect();
+    for outcome in outcomes {
+        match outcome {
+            JobOutcome::Missing(job) => {
+                report.writable_external.insert(
+                    job.root.clone(),
+                    WritableExternalFile {
+                        path: job.path.clone(),
+                        start_delimiter: comment_delimiters(&job.path).0.to_owned(),
+                        end_delimiter: comment_delimiters(&job.path).1.to_owned(),
+                        original: Outline::default(),
+                        format: format_for_directive(&job.directive),
+                    },
+                );
+                report.loaded += 1;
+            }
+            JobOutcome::Failed { label, error } => {
+                report.errors.push(format!("{label}: {error}"));
+            }
+            JobOutcome::Parsed { job, prep, parsed } => {
+                match merge_parsed(outline, &mut report, &job, prep, *parsed) {
+                    Ok(()) => report.loaded += 1,
+                    Err(error) => report
+                        .errors
+                        .push(format!("{}: {error}", job.path.display())),
                 }
-                report
-                    .original_children
-                    .entry(root_node)
-                    .or_insert(original_children);
-                report
-                    .original_bodies
-                    .entry(job.root.clone())
-                    .or_insert(original_body);
-                for (id, node) in original_nodes {
-                    report.original_nodes.entry(id).or_insert(node);
-                }
-                Ok(())
-            });
-        match result {
-            Ok(()) => report.loaded += 1,
-            Err(error) => report.errors.push(format!("{label}: {error}")),
+            }
         }
     }
     report
+}
+
+/// Reads and parses one job's file against a read-only view of `outline`.
+/// Safe to run concurrently across jobs: it never mutates `outline`, only
+/// snapshots the pre-load state each job's later merge needs.
+fn prepare_job(outline: &Outline, job: DerivedJob) -> JobOutcome {
+    let label = job.path.display().to_string();
+    if !job.auto && !job.path.exists() {
+        return JobOutcome::Missing(job);
+    }
+    let source = match fs::read_to_string(&job.path) {
+        Ok(source) => source,
+        Err(error) => {
+            return JobOutcome::Failed {
+                label,
+                error: error.to_string(),
+            };
+        }
+    };
+    let Some(root_node) = outline
+        .position(&job.position)
+        .map(|position| position.node.clone())
+    else {
+        return JobOutcome::Failed {
+            label,
+            error: "derived root position disappeared".to_owned(),
+        };
+    };
+    let original_children = outline
+        .position(&job.position)
+        .map(|position| position.children.clone())
+        .unwrap_or_default();
+    let original_body = outline.nodes[&root_node].body.clone();
+    // Captured before merge_into prunes outline.nodes down to what the
+    // freshly generated tree references: these ids otherwise vanish from
+    // outline.nodes even though original_children (restored just before
+    // serializing) still points at them.
+    let original_nodes: HashMap<NodeId, Node> = referenced_nodes(&original_children)
+        .into_iter()
+        .filter_map(|id| outline.nodes.get(&id).cloned().map(|node| (id, node)))
+        .collect();
+
+    let parsed = if job.auto {
+        match AutoFile::parse_with_directive(
+            &job.path,
+            job.root.clone(),
+            &source,
+            Some(&job.directive),
+        ) {
+            Ok(auto) => ParsedFile::Auto(auto),
+            Err(error) => {
+                return JobOutcome::Failed {
+                    label,
+                    error: error.to_string(),
+                };
+            }
+        }
+    } else if job.directive == "@f" {
+        match RelativeFile::parse(&source) {
+            Ok(derived) => ParsedFile::Relative(derived),
+            Err(error) => {
+                return JobOutcome::Failed {
+                    label,
+                    error: error.to_string(),
+                };
+            }
+        }
+    } else {
+        match DerivedFile::parse(&source) {
+            Ok(derived) => ParsedFile::Derived(derived),
+            Err(error) => {
+                return JobOutcome::Failed {
+                    label,
+                    error: error.to_string(),
+                };
+            }
+        }
+    };
+
+    JobOutcome::Parsed {
+        job,
+        prep: JobPrep {
+            root_node,
+            original_children,
+            original_body,
+            original_nodes,
+        },
+        parsed: Box::new(parsed),
+    }
+}
+
+/// Merges one already-parsed job into `outline` and records it in `report`.
+/// Sequential by nature: it mutates the shared `Outline`.
+fn merge_parsed(
+    outline: &mut Outline,
+    report: &mut LoadReport,
+    job: &DerivedJob,
+    prep: JobPrep,
+    parsed: ParsedFile,
+) -> Result<(), String> {
+    match parsed {
+        ParsedFile::Auto(auto) => {
+            if !auto.merge_into(outline, &job.position) {
+                return Err("auto root position disappeared".to_owned());
+            }
+            report
+                .node_locations
+                .entry(auto.root.clone())
+                .or_insert(SourceLocation {
+                    path: job.path.clone(),
+                    line: 1,
+                });
+            for (id, line) in &auto.locations {
+                report
+                    .node_locations
+                    .entry(id.clone())
+                    .or_insert(SourceLocation {
+                        path: job.path.clone(),
+                        line: *line,
+                    });
+            }
+            report.derived_nodes.extend(
+                auto.outline
+                    .nodes
+                    .keys()
+                    .filter(|id| **id != auto.root)
+                    .cloned(),
+            );
+        }
+        ParsedFile::Relative(derived) => {
+            derived
+                .merge_into(outline, &job.position)
+                .map_err(|error| error.to_string())?;
+            let original = external_snapshot_at(outline, &job.position)
+                .map(|(_, snapshot)| snapshot)
+                .ok_or_else(|| "merged external root disappeared".to_owned())?;
+            report.writable_external.insert(
+                derived.root.clone(),
+                WritableExternalFile {
+                    path: job.path.clone(),
+                    start_delimiter: derived.start_delimiter.clone(),
+                    end_delimiter: derived.end_delimiter.clone(),
+                    original,
+                    format: ExternalFormat::Relative,
+                },
+            );
+            for (derived_position, line) in &derived.locations {
+                let suffix = derived_position
+                    .0
+                    .strip_prefix("0")
+                    .unwrap_or(&derived_position.0);
+                let position = PositionId(format!("{}{}", job.position.0, suffix));
+                report.locations.insert(
+                    position,
+                    SourceLocation {
+                        path: job.path.clone(),
+                        line: *line,
+                    },
+                );
+                if let Some(position) = derived.outline.position(derived_position) {
+                    report
+                        .node_locations
+                        .entry(position.node.clone())
+                        .or_insert(SourceLocation {
+                            path: job.path.clone(),
+                            line: *line,
+                        });
+                }
+            }
+            report.derived_nodes.extend(
+                derived
+                    .outline
+                    .nodes
+                    .keys()
+                    .filter(|id| **id != derived.root)
+                    .cloned(),
+            );
+        }
+        ParsedFile::Derived(derived) => {
+            derived
+                .merge_into(outline, &job.position)
+                .map_err(|error| error.to_string())?;
+            let original = external_snapshot_at(outline, &job.position)
+                .map(|(_, snapshot)| snapshot)
+                .ok_or_else(|| "merged external root disappeared".to_owned())?;
+            report.writable_external.insert(
+                derived.root.clone(),
+                WritableExternalFile {
+                    path: job.path.clone(),
+                    start_delimiter: derived.start_delimiter.clone(),
+                    end_delimiter: derived.end_delimiter.clone(),
+                    original,
+                    format: ExternalFormat::Thin,
+                },
+            );
+            for (derived_position, line) in &derived.locations {
+                let suffix = derived_position
+                    .0
+                    .strip_prefix("0")
+                    .unwrap_or(&derived_position.0);
+                let position = PositionId(format!("{}{}", job.position.0, suffix));
+                report.locations.insert(
+                    position,
+                    SourceLocation {
+                        path: job.path.clone(),
+                        line: *line,
+                    },
+                );
+                if let Some(position) = derived.outline.position(derived_position) {
+                    report
+                        .node_locations
+                        .entry(position.node.clone())
+                        .or_insert(SourceLocation {
+                            path: job.path.clone(),
+                            line: *line,
+                        });
+                }
+            }
+            report.derived_nodes.extend(
+                derived
+                    .outline
+                    .nodes
+                    .keys()
+                    .filter(|id| **id != derived.root)
+                    .cloned(),
+            );
+        }
+    }
+    report
+        .original_children
+        .entry(prep.root_node)
+        .or_insert(prep.original_children);
+    report
+        .original_bodies
+        .entry(job.root.clone())
+        .or_insert(prep.original_body);
+    for (id, node) in prep.original_nodes {
+        report.original_nodes.entry(id).or_insert(node);
+    }
+    Ok(())
 }
 
 fn derived_jobs(outline: &Outline, outline_path: &Path) -> Vec<DerivedJob> {

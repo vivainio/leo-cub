@@ -24,6 +24,7 @@ include_dir = "0.7"
 crossterm = { version = "0.29.0", optional = true, features = ["osc52"] }
 quick-xml = "0.41"
 ratatui = { version = "0.30.0", optional = true, features = ["unstable-rendered-line-info"] }
+rayon = "1.10"
 regex = "1.13"
 rhai = { version = "1", optional = true }
 rhai-fs = { version = "0.1.5", optional = true }
