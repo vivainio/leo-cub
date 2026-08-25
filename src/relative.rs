@@ -353,12 +353,12 @@ impl RelativeFile {
                 derived: self.root.0.clone(),
             });
         }
-        let mut next = outline.clone();
         let existing_children = outline
             .position(target)
             .map(|position| position.children.clone())
             .unwrap_or_default();
-        next.nodes
+        outline
+            .nodes
             .get_mut(&self.root)
             .expect("validated target")
             .body
@@ -369,14 +369,14 @@ impl RelativeFile {
             &existing_children,
             &self.outline.nodes,
             &self.anonymous,
-            &mut next.nodes,
+            &mut outline.nodes,
         );
-        next.children_mut(Some(target))
+        outline
+            .children_mut(Some(target))
             .expect("validated target")
             .clone_from(&children);
-        let referenced = referenced_nodes(&next.roots);
-        next.nodes.retain(|id, _| referenced.contains(id));
-        *outline = next;
+        let referenced = referenced_nodes(&outline.roots);
+        outline.nodes.retain(|id, _| referenced.contains(id));
         Ok(())
     }
 }
