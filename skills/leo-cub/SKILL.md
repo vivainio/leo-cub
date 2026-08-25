@@ -14,13 +14,17 @@ directly. Run `cub --help` or `cub <command> --help` for complete options.
 cub new outline.leo
 cub new notes.leo --headline "Notes"
 cub add outline.leo "Project/Tasks/First task" "Project/Notes"
+cub add outline.leo "Project/Notes/Quick note" --body "Body text here"
+echo "Body text here" | cub add outline.leo "Project/Notes/Quick note" --body -
 ```
 
 `add` accepts one or more slash-separated headline paths, reuses shared or
 existing prefixes, and rejects ambiguous duplicate siblings. Write `\/` for a
 literal slash and `\\` for a literal backslash within one headline (a
-branch-name-style PR title, say). To import below a node, pass either its
-exact GNX or its unique headline path:
+branch-name-style PR title, say). `--body` sets the leaf node's body text
+(requires exactly one path); pass `-` to read the body from stdin instead of
+an argument. To import below a node, pass either its exact GNX or its unique
+headline path:
 
 ```bash
 cub import outline.leo README.md --parent "Project/Notes"

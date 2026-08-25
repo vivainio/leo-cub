@@ -103,6 +103,10 @@ enum Command {
         /// one headline.
         #[arg(required = true)]
         paths: Vec<String>,
+        /// Set the leaf node's body text. Requires exactly one path. Pass
+        /// "-" to read the body from stdin.
+        #[arg(long)]
+        body: Option<String>,
     },
     /// Install the bundled skill into ~/.claude/skills.
     InstallSkills,
@@ -374,10 +378,28 @@ fn main() -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             }
         }
-        Command::Add { file, paths } => {
+        Command::Add { file, paths, body } => {
+            if body.is_some() && paths.len() != 1 {
+                anyhow::bail!("--body requires exactly one path");
+            }
             let mut document = LeoDocument::open(&file)?;
             let report = document.outline.add_headline_paths(&paths)?;
-            if report.created > 0 {
+            let mut changed = report.created > 0;
+            if let Some(body) = body {
+                let body = if body == "-" {
+                    let mut buffer = String::new();
+                    std::io::stdin()
+                        .read_to_string(&mut buffer)
+                        .context("read body from stdin")?;
+                    buffer
+                } else {
+                    body
+                };
+                let node_id = document.outline.resolve_headline_path(&paths[0])?;
+                document.outline.nodes.get_mut(&node_id).unwrap().body = body;
+                changed = true;
+            }
+            if changed {
                 document.save(&file)?;
             }
             println!("{}", serde_json::to_string_pretty(&report)?);
