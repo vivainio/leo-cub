@@ -8,6 +8,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use rayon::prelude::*;
 use serde::Serialize;
 use thiserror::Error;
 
@@ -555,61 +556,75 @@ pub fn prepare_external_updates(
     outline: &Outline,
     writable: &HashMap<NodeId, WritableExternalFile>,
 ) -> Result<Vec<ExternalUpdate>, SyncError> {
-    let mut updates = Vec::new();
     let index = position_index(outline);
-    for (root, file) in writable {
-        let Some((position, snapshot)) = snapshot_at(outline, &index, root) else {
-            continue;
-        };
-        if snapshot == file.original {
-            continue;
-        }
-        let rendered = match file.format {
-            ExternalFormat::Relative => {
-                let rendered = render_relative(
-                    outline,
-                    &position,
-                    &file.start_delimiter,
-                    &file.end_delimiter,
-                )
-                .map_err(|error| SyncError::Render {
-                    path: file.path.clone(),
-                    source: Box::new(error),
-                })?;
-                RelativeFile::parse(&rendered).map_err(|error| SyncError::GeneratedInvalid {
-                    path: file.path.clone(),
-                    label: "@f",
-                    source: error,
-                })?;
-                rendered
-            }
-            ExternalFormat::Thin => {
-                let rendered = render_thin(
-                    outline,
-                    &position,
-                    &file.start_delimiter,
-                    &file.end_delimiter,
-                )
-                .map_err(|error| SyncError::Render {
-                    path: file.path.clone(),
-                    source: Box::new(error),
-                })?;
-                DerivedFile::parse(&rendered).map_err(|error| SyncError::GeneratedInvalid {
-                    path: file.path.clone(),
-                    label: "thin",
-                    source: error,
-                })?;
-                rendered
-            }
-        };
-        updates.push(ExternalUpdate {
-            root: root.clone(),
-            path: file.path.clone(),
-            rendered,
-            snapshot,
-        });
+    // Every step here -- snapshotting, rendering, and validating the
+    // rendered text -- only ever reads `outline`/`index`, so rendering each
+    // writable root is independent of every other one and safe to run in
+    // parallel.
+    writable
+        .par_iter()
+        .filter_map(|(root, file)| render_update(outline, &index, root, file).transpose())
+        .collect()
+}
+
+/// Renders `root`'s writable external file if its live subtree has diverged
+/// from `file.original`, or returns `Ok(None)` if it's unchanged.
+fn render_update(
+    outline: &Outline,
+    index: &HashMap<NodeId, (PositionId, &Position)>,
+    root: &NodeId,
+    file: &WritableExternalFile,
+) -> Result<Option<ExternalUpdate>, SyncError> {
+    let Some((position, snapshot)) = snapshot_at(outline, index, root) else {
+        return Ok(None);
+    };
+    if snapshot == file.original {
+        return Ok(None);
     }
-    Ok(updates)
+    let rendered = match file.format {
+        ExternalFormat::Relative => {
+            let rendered = render_relative(
+                outline,
+                &position,
+                &file.start_delimiter,
+                &file.end_delimiter,
+            )
+            .map_err(|error| SyncError::Render {
+                path: file.path.clone(),
+                source: Box::new(error),
+            })?;
+            RelativeFile::parse(&rendered).map_err(|error| SyncError::GeneratedInvalid {
+                path: file.path.clone(),
+                label: "@f",
+                source: error,
+            })?;
+            rendered
+        }
+        ExternalFormat::Thin => {
+            let rendered = render_thin(
+                outline,
+                &position,
+                &file.start_delimiter,
+                &file.end_delimiter,
+            )
+            .map_err(|error| SyncError::Render {
+                path: file.path.clone(),
+                source: Box::new(error),
+            })?;
+            DerivedFile::parse(&rendered).map_err(|error| SyncError::GeneratedInvalid {
+                path: file.path.clone(),
+                label: "thin",
+                source: error,
+            })?;
+            rendered
+        }
+    };
+    Ok(Some(ExternalUpdate {
+        root: root.clone(),
+        path: file.path.clone(),
+        rendered,
+        snapshot,
+    }))
 }
 
 /// Writes every update to its target path, all-or-nothing: each file is
@@ -617,44 +632,35 @@ pub fn prepare_external_updates(
 /// write has succeeded, so a mid-batch failure leaves none of the target
 /// files touched.
 pub fn write_external_updates(updates: &[ExternalUpdate]) -> Result<(), SyncError> {
-    let mut staged = Vec::new();
-    for (index, update) in updates.iter().enumerate() {
-        let name = update
-            .path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("external");
-        let temporary = update
-            .path
-            .with_file_name(format!(".{name}.cub-save-{}-{index}", std::process::id()));
-        let permissions = fs::metadata(&update.path)
-            .ok()
-            .map(|metadata| metadata.permissions());
-        let result = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)
-            .and_then(|mut file| {
-                file.write_all(update.rendered.as_bytes())?;
-                file.sync_all()
-            })
-            .and_then(|()| {
-                permissions.map_or(Ok(()), |permissions| {
-                    fs::set_permissions(&temporary, permissions)
-                })
-            });
-        if let Err(error) = result {
-            for path in &staged {
-                let _ = fs::remove_file(path);
-            }
-            let _ = fs::remove_file(&temporary);
-            return Err(SyncError::Io {
-                path: update.path.clone(),
-                source: error,
-            });
+    let staged: Vec<PathBuf> = updates
+        .iter()
+        .enumerate()
+        .map(|(index, update)| {
+            let name = update
+                .path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("external");
+            update
+                .path
+                .with_file_name(format!(".{name}.cub-save-{}-{index}", std::process::id()))
+        })
+        .collect();
+
+    // Each update stages to its own pre-computed temp path, so staging is
+    // independent per file -- and staging (open, write, fsync) is exactly
+    // where wall-clock time goes for a large batch of external files.
+    if let Err(error) = updates
+        .par_iter()
+        .zip(staged.par_iter())
+        .try_for_each(|(update, temporary)| stage_update(update, temporary))
+    {
+        for path in &staged {
+            let _ = fs::remove_file(path);
         }
-        staged.push(temporary);
+        return Err(error);
     }
+
     for (update, temporary) in updates.iter().zip(&staged) {
         if let Err(error) = fs::rename(temporary, &update.path) {
             for path in &staged {
@@ -667,6 +673,32 @@ pub fn write_external_updates(updates: &[ExternalUpdate]) -> Result<(), SyncErro
         }
     }
     Ok(())
+}
+
+/// Writes `update.rendered` to `temporary`, preserving the target's existing
+/// permissions if it has any. Safe to run concurrently across updates: each
+/// one owns a distinct pre-computed temp path.
+fn stage_update(update: &ExternalUpdate, temporary: &Path) -> Result<(), SyncError> {
+    let permissions = fs::metadata(&update.path)
+        .ok()
+        .map(|metadata| metadata.permissions());
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(temporary)
+        .and_then(|mut file| {
+            file.write_all(update.rendered.as_bytes())?;
+            file.sync_all()
+        })
+        .and_then(|()| {
+            permissions.map_or(Ok(()), |permissions| {
+                fs::set_permissions(temporary, permissions)
+            })
+        })
+        .map_err(|error| SyncError::Io {
+            path: update.path.clone(),
+            source: error,
+        })
 }
 
 /// Restores the disk-only children and bodies captured in `children`/`bodies`
