@@ -152,6 +152,11 @@ Other functions may use any signature, but do not appear in the palette.
 
 The repository's [`scripts/github.rhai`](https://github.com/vivainio/leo-cub/blob/main/scripts/github.rhai)
 is a larger example with both palette commands and private helper functions.
+[`scripts/claude-history.rhai`](https://github.com/vivainio/leo-cub/blob/main/scripts/claude-history.rhai)
+is another: a single command, `import_claude_history`, that reads Claude
+Code's own `~/.claude/projects/*/*.jsonl` session transcripts with
+`open_dir`/`open_file`/`read_string` and creates one outline node per
+session.
 
 ## Configure a script with an `@variables` tree
 
