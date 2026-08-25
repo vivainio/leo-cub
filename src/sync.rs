@@ -759,7 +759,13 @@ pub fn render_thin(
         result.push('\n');
     }
     result.push_str(&format!("{start}@+leo-ver=5-thin{end}\n"));
-    render_position(outline, root, 1, false, "", start, end, &mut result);
+    let mut ctx = RenderCtx {
+        outline,
+        start,
+        end,
+        result: &mut result,
+    };
+    render_position(&mut ctx, root, 1, false, "");
     result.push_str(&format!("{start}@-leo{end}\n"));
     for line in last {
         result.push_str(line);
@@ -793,18 +799,15 @@ pub fn render_relative(
     result.push_str(&format!("{start}@+leo-ver=cub-1-thin{end}\n"));
     let protected = protected_node_ids(outline, root);
     let mut prev_level = None;
-    render_position_relative(
+    let mut ctx = RelativeRenderCtx {
         outline,
-        root,
-        1,
-        &mut prev_level,
-        &protected,
-        false,
-        "",
+        protected: &protected,
         start,
         end,
-        &mut result,
-    );
+        result: &mut result,
+        prev_level: &mut prev_level,
+    };
+    render_position_relative(&mut ctx, root, 1, false, "");
     result.push_str(&format!("{start}@-leo{end}\n"));
     for line in last {
         result.push_str(line);
@@ -843,21 +846,24 @@ fn protected_node_ids(outline: &Outline, root: &Position) -> HashSet<NodeId> {
     protected
 }
 
-#[allow(clippy::too_many_arguments)]
+struct RelativeRenderCtx<'a> {
+    outline: &'a Outline,
+    protected: &'a HashSet<NodeId>,
+    start: &'a str,
+    end: &'a str,
+    result: &'a mut String,
+    prev_level: &'a mut Option<usize>,
+}
+
 fn render_position_relative(
-    outline: &Outline,
+    ctx: &mut RelativeRenderCtx,
     position: &Position,
     level: usize,
-    prev_level: &mut Option<usize>,
-    protected: &HashSet<NodeId>,
     in_all: bool,
     indent: &str,
-    start: &str,
-    end: &str,
-    result: &mut String,
 ) {
-    let node = &outline.nodes[&position.node];
-    let token = match *prev_level {
+    let node = &ctx.outline.nodes[&position.node];
+    let token = match *ctx.prev_level {
         None => "0".to_owned(),
         Some(previous) if level == previous => String::new(),
         Some(previous) if level > previous => {
@@ -877,32 +883,23 @@ fn render_position_relative(
             }
         }
     };
-    *prev_level = Some(level);
-    let gnx = if protected.contains(&position.node) {
+    *ctx.prev_level = Some(level);
+    let gnx = if ctx.protected.contains(&position.node) {
         format!("[{}] ", node.id.0)
     } else {
         String::new()
     };
-    result.push_str(&format!(
+    let start = ctx.start;
+    let end = ctx.end;
+    ctx.result.push_str(&format!(
         "{indent}{start}@{token} {gnx}{}{end}\n",
         node.headline
     ));
 
     if in_all {
-        render_body_under_all(node, indent, start, end, result);
+        render_body_under_all(node, indent, start, end, ctx.result);
         for child in &position.children {
-            render_position_relative(
-                outline,
-                child,
-                level + 1,
-                prev_level,
-                protected,
-                true,
-                indent,
-                start,
-                end,
-                result,
-            );
+            render_position_relative(ctx, child, level + 1, true, indent);
         }
         return;
     }
@@ -919,26 +916,17 @@ fn render_position_relative(
             } else {
                 format!(" {others_tail}")
             };
-            result.push_str(&format!("{indent}{leading}{start}@+others{suffix}{end}\n"));
+            ctx.result
+                .push_str(&format!("{indent}{leading}{start}@+others{suffix}{end}\n"));
             for child in position
                 .children
                 .iter()
-                .filter(|child| !is_section_node(outline, child))
+                .filter(|child| !is_section_node(ctx.outline, child))
             {
-                render_position_relative(
-                    outline,
-                    child,
-                    level + 1,
-                    prev_level,
-                    protected,
-                    false,
-                    &child_indent,
-                    start,
-                    end,
-                    result,
-                );
+                render_position_relative(ctx, child, level + 1, false, &child_indent);
             }
-            result.push_str(&format!("{indent}{leading}{start}@-others{end}\n"));
+            ctx.result
+                .push_str(&format!("{indent}{leading}{start}@-others{end}\n"));
         } else if let Some(all_tail) = directive_tail(trimmed.trim_end(), "@all") {
             expanded = true;
             let leading = &line[..line.len() - trimmed.len()];
@@ -948,22 +936,13 @@ fn render_position_relative(
             } else {
                 format!(" {all_tail}")
             };
-            result.push_str(&format!("{child_indent}{start}@+all{suffix}{end}\n"));
+            ctx.result
+                .push_str(&format!("{child_indent}{start}@+all{suffix}{end}\n"));
             for child in &position.children {
-                render_position_relative(
-                    outline,
-                    child,
-                    level + 1,
-                    prev_level,
-                    protected,
-                    true,
-                    &child_indent,
-                    start,
-                    end,
-                    result,
-                );
+                render_position_relative(ctx, child, level + 1, true, &child_indent);
             }
-            result.push_str(&format!("{child_indent}{start}@-all{end}\n"));
+            ctx.result
+                .push_str(&format!("{child_indent}{start}@-all{end}\n"));
         } else if let Some(section) = section_reference(trimmed.trim_end()) {
             // Deliberately does *not* set `expanded`: unlike `@others`/
             // `@all`, a bare section reference accounts for only the one
@@ -976,24 +955,18 @@ fn render_position_relative(
             // is what stands in for that walk here, and must still run.
             let leading = &line[..line.len() - trimmed.len()];
             let child_indent = format!("{indent}{leading}");
-            result.push_str(&format!("{child_indent}{start}@+{section}{end}\n"));
+            ctx.result
+                .push_str(&format!("{child_indent}{start}@+{section}{end}\n"));
             if let Some(child) = position.children.iter().find(|child| {
-                headline_matches_section_reference(&outline.nodes[&child.node].headline, section)
+                headline_matches_section_reference(
+                    &ctx.outline.nodes[&child.node].headline,
+                    section,
+                )
             }) {
-                render_position_relative(
-                    outline,
-                    child,
-                    level + 1,
-                    prev_level,
-                    protected,
-                    false,
-                    &child_indent,
-                    start,
-                    end,
-                    result,
-                );
+                render_position_relative(ctx, child, level + 1, false, &child_indent);
             }
-            result.push_str(&format!("{child_indent}{start}@-{section}{end}\n"));
+            ctx.result
+                .push_str(&format!("{child_indent}{start}@-{section}{end}\n"));
         } else if line.starts_with("@first ") {
             // Real Leo's `directiveKind4` (leoAtFile.py) only recognizes a
             // directive word -- including `@first`/`@last` -- when the `@`
@@ -1007,9 +980,11 @@ fn render_position_relative(
             // unescaped -- unlike here, real Leo's own `@first`/`@last`
             // handling drops whatever follows the directive word, so this
             // form must stay column-0-only to avoid losing that text.
-            result.push_str(&format!("{indent}{start}@@first{end}\n"));
+            ctx.result
+                .push_str(&format!("{indent}{start}@@first{end}\n"));
         } else if line.starts_with("@last ") {
-            result.push_str(&format!("{indent}{start}@@last{end}\n"));
+            ctx.result
+                .push_str(&format!("{indent}{start}@@last{end}\n"));
         } else if line.strip_prefix('@').is_some_and(is_leo_directive_word) {
             // A bare `@`-prefixed body line (no comment prefix yet -- that
             // only gets added below) can never be mistaken for a real
@@ -1028,7 +1003,7 @@ fn render_position_relative(
             // doesn't treat an indented `@language`/`@path`/etc. line as a
             // directive either.
             let directive = line.strip_prefix('@').expect("checked above");
-            result.push_str(&format!(
+            ctx.result.push_str(&format!(
                 "{indent}{start}@@{}{end}\n",
                 directive.trim_end_matches(['\r', '\n'])
             ));
@@ -1039,11 +1014,12 @@ fn render_position_relative(
                 format!("{indent}{line}")
             };
             if is_sentinel_like(&rendered, start, end) {
-                result.push_str(&format!("{indent}{start}@verbatim{end}\n"));
+                ctx.result
+                    .push_str(&format!("{indent}{start}@verbatim{end}\n"));
             }
-            result.push_str(&rendered);
+            ctx.result.push_str(&rendered);
             if !line.ends_with('\n') {
-                result.push('\n');
+                ctx.result.push('\n');
             }
         }
     }
@@ -1058,20 +1034,9 @@ fn render_position_relative(
         for child in position
             .children
             .iter()
-            .filter(|child| !is_section_node(outline, child))
+            .filter(|child| !is_section_node(ctx.outline, child))
         {
-            render_position_relative(
-                outline,
-                child,
-                level + 1,
-                prev_level,
-                protected,
-                false,
-                indent,
-                start,
-                end,
-                result,
-            );
+            render_position_relative(ctx, child, level + 1, false, indent);
         }
     }
 }
@@ -1124,32 +1089,37 @@ fn ensure_supported_clean_tree(outline: &Outline, position: &Position) -> Result
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
+struct RenderCtx<'a> {
+    outline: &'a Outline,
+    start: &'a str,
+    end: &'a str,
+    result: &'a mut String,
+}
+
 fn render_position(
-    outline: &Outline,
+    ctx: &mut RenderCtx,
     position: &Position,
     level: usize,
     in_all: bool,
     indent: &str,
-    start: &str,
-    end: &str,
-    result: &mut String,
 ) {
-    let node = &outline.nodes[&position.node];
+    let node = &ctx.outline.nodes[&position.node];
     let stars = if level <= 5 {
         "*".repeat(level)
     } else {
         format!("*{level}*")
     };
-    result.push_str(&format!(
+    let start = ctx.start;
+    let end = ctx.end;
+    ctx.result.push_str(&format!(
         "{indent}{start}@+node:{}: {stars} {}{end}\n",
         node.id.0, node.headline
     ));
 
     if in_all {
-        render_body_under_all(node, indent, start, end, result);
+        render_body_under_all(node, indent, start, end, ctx.result);
         for child in &position.children {
-            render_position(outline, child, level + 1, true, indent, start, end, result);
+            render_position(ctx, child, level + 1, true, indent);
         }
         return;
     }
@@ -1166,24 +1136,17 @@ fn render_position(
             } else {
                 format!(" {others_tail}")
             };
-            result.push_str(&format!("{indent}{leading}{start}@+others{suffix}{end}\n"));
+            ctx.result
+                .push_str(&format!("{indent}{leading}{start}@+others{suffix}{end}\n"));
             for child in position
                 .children
                 .iter()
-                .filter(|child| !is_section_node(outline, child))
+                .filter(|child| !is_section_node(ctx.outline, child))
             {
-                render_position(
-                    outline,
-                    child,
-                    level + 1,
-                    false,
-                    &child_indent,
-                    start,
-                    end,
-                    result,
-                );
+                render_position(ctx, child, level + 1, false, &child_indent);
             }
-            result.push_str(&format!("{indent}{leading}{start}@-others{end}\n"));
+            ctx.result
+                .push_str(&format!("{indent}{leading}{start}@-others{end}\n"));
         } else if let Some(all_tail) = directive_tail(trimmed.trim_end(), "@all") {
             expanded = true;
             let leading = &line[..line.len() - trimmed.len()];
@@ -1193,20 +1156,13 @@ fn render_position(
             } else {
                 format!(" {all_tail}")
             };
-            result.push_str(&format!("{child_indent}{start}@+all{suffix}{end}\n"));
+            ctx.result
+                .push_str(&format!("{child_indent}{start}@+all{suffix}{end}\n"));
             for child in &position.children {
-                render_position(
-                    outline,
-                    child,
-                    level + 1,
-                    true,
-                    &child_indent,
-                    start,
-                    end,
-                    result,
-                );
+                render_position(ctx, child, level + 1, true, &child_indent);
             }
-            result.push_str(&format!("{child_indent}{start}@-all{end}\n"));
+            ctx.result
+                .push_str(&format!("{child_indent}{start}@-all{end}\n"));
         } else if let Some(section) = section_reference(trimmed.trim_end()) {
             // See the matching comment in `render_position_relative`:
             // deliberately doesn't set `expanded` -- a bare section
@@ -1215,22 +1171,18 @@ fn render_position(
             // further, non-section-shaped children of this node.
             let leading = &line[..line.len() - trimmed.len()];
             let child_indent = format!("{indent}{leading}");
-            result.push_str(&format!("{child_indent}{start}@+{section}{end}\n"));
+            ctx.result
+                .push_str(&format!("{child_indent}{start}@+{section}{end}\n"));
             if let Some(child) = position.children.iter().find(|child| {
-                headline_matches_section_reference(&outline.nodes[&child.node].headline, section)
+                headline_matches_section_reference(
+                    &ctx.outline.nodes[&child.node].headline,
+                    section,
+                )
             }) {
-                render_position(
-                    outline,
-                    child,
-                    level + 1,
-                    false,
-                    &child_indent,
-                    start,
-                    end,
-                    result,
-                );
+                render_position(ctx, child, level + 1, false, &child_indent);
             }
-            result.push_str(&format!("{child_indent}{start}@-{section}{end}\n"));
+            ctx.result
+                .push_str(&format!("{child_indent}{start}@-{section}{end}\n"));
         } else if line.starts_with("@first ") {
             // See render_position_relative's matching branch: real Leo's
             // `directiveKind4` requires column zero for every directive
@@ -1239,16 +1191,18 @@ fn render_position(
             // used above for `@others`/`@all` -- an indented `@first ...`
             // is plain text, not a directive, and must fall through to the
             // unescaped `else` branch instead of losing its tail text.
-            result.push_str(&format!("{indent}{start}@@first{end}\n"));
+            ctx.result
+                .push_str(&format!("{indent}{start}@@first{end}\n"));
         } else if line.starts_with("@last ") {
-            result.push_str(&format!("{indent}{start}@@last{end}\n"));
+            ctx.result
+                .push_str(&format!("{indent}{start}@@last{end}\n"));
         } else if line.strip_prefix('@').is_some_and(is_leo_directive_word) {
             // See render_position_relative's matching branch: only a real
             // Leo directive name needs escaping here, not every `@`-led
             // line -- a bare `@`/`@data whatever` goes out unescaped,
             // matching `at.directiveKind4`.
             let directive = line.strip_prefix('@').expect("checked above");
-            result.push_str(&format!(
+            ctx.result.push_str(&format!(
                 "{indent}{start}@@{}{end}\n",
                 directive.trim_end_matches(['\r', '\n'])
             ));
@@ -1259,11 +1213,12 @@ fn render_position(
                 format!("{indent}{line}")
             };
             if is_sentinel_like(&rendered, start, end) {
-                result.push_str(&format!("{indent}{start}@verbatim{end}\n"));
+                ctx.result
+                    .push_str(&format!("{indent}{start}@verbatim{end}\n"));
             }
-            result.push_str(&rendered);
+            ctx.result.push_str(&rendered);
             if !line.ends_with('\n') {
-                result.push('\n');
+                ctx.result.push('\n');
             }
         }
     }
@@ -1278,9 +1233,9 @@ fn render_position(
         for child in position
             .children
             .iter()
-            .filter(|child| !is_section_node(outline, child))
+            .filter(|child| !is_section_node(ctx.outline, child))
         {
-            render_position(outline, child, level + 1, false, indent, start, end, result);
+            render_position(ctx, child, level + 1, false, indent);
         }
     }
 }
