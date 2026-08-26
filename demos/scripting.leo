@@ -8,6 +8,7 @@
 <vnodes>
   <v t="cub.1787246563.223586211"><vh>GitHub CLI fetch demo</vh>
     <v t="demo.1787246563.226321852.1"><vh>@action Import PRs and issues</vh></v>
+    <v t="cub.1787761438.595926913.1"><vh>@import ../scripts/github.rhai</vh></v>
   </v>
   <v t="cub.1787246563.998877665"><vh>Insert child at selection demo</vh>
     <v t="demo.1787246563.998877665.1"><vh>@action new child</vh></v>
@@ -16,14 +17,14 @@
     <v t="cub.1787507388.876784675.2"><vh>repo</vh></v>
   </v>
   <v t="cub.1787689114.613937740.1"><vh>Claude session history import demo</vh>
-    <v t="cub.1787689114.613937740.2"><vh>@import scripts/claude-history.rhai</vh></v>
+    <v t="cub.1787689114.613937740.2"><vh>@import ../scripts/claude-history.rhai</vh></v>
   </v>
 </vnodes>
 <tnodes>
   <t tx="cub.1787507388.876784675.2">leo-editor/leo-editor</t>
   <t tx="cub.1787689114.613937740.1">Imports Claude Code session transcripts into Sessions/&lt;project&gt;/&lt;session&gt;
 nodes below, via the import_claude_history command scripts/claude-history.rhai
-lists in its COMMANDS array. Run it from the action palette (Shift-A).</t>
+lists in its COMMANDS map. Run it from the action palette (Shift-A).</t>
   <t tx="demo.1787246563.226321852.1">let vars = #{};
 for child in doc.ensure(&quot;@variables&quot;).children() {
     let value = child.b;

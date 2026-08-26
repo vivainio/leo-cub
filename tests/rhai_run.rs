@@ -716,6 +716,59 @@ fn cub_run_sh_defaults_to_cubs_cwd_and_honors_an_explicit_cwd_option() {
     fs::remove_dir_all(&dir).unwrap();
 }
 
+#[test]
+fn cub_run_regex_functions_match_find_capture_and_replace() {
+    // Like `sh`, these are global -- no open `Doc` needed.
+    let script_path = temp_path("rhai_run_regex.rhai");
+    fs::write(
+        &script_path,
+        r#"
+        assert_eq(regex_is_match("^\\d+$", "123"), true);
+        assert_eq(regex_is_match("^\\d+$", "abc"), false);
+
+        assert_eq(regex_find("\\d+", "abc123def456"), "123");
+        assert(regex_find("\\d+", "abc") == ());
+
+        let all = regex_find_all("\\d+", "abc123def456");
+        assert_eq(all.len(), 2);
+        assert_eq(all[0], "123");
+        assert_eq(all[1], "456");
+
+        let caps = regex_captures("(\\w+)@(\\w+)", "user@host");
+        assert_eq(caps.len(), 3);
+        assert_eq(caps[0], "user@host");
+        assert_eq(caps[1], "user");
+        assert_eq(caps[2], "host");
+        assert(regex_captures("\\d+", "abc") == ());
+
+        assert_eq(regex_replace("\\d+", "abc123def456", "X"), "abcXdef456");
+        assert_eq(regex_replace_all("\\d+", "abc123def456", "X"), "abcXdefX");
+
+        print("regex functions ok");
+        "#,
+    )
+    .unwrap();
+
+    let output = run_cub(&["run", script_path.to_str().unwrap()]);
+    assert!(
+        output.status.success(),
+        "cub run failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("regex functions ok"));
+}
+
+#[test]
+fn cub_run_regex_functions_fail_on_an_invalid_pattern() {
+    let script_path = temp_path("rhai_run_regex_invalid.rhai");
+    fs::write(&script_path, r#"regex_is_match("(", "abc");"#).unwrap();
+
+    let output = run_cub(&["run", script_path.to_str().unwrap()]);
+
+    assert!(!output.status.success());
+}
+
 // The bare `cub foo.rhai` shorthand (no `run` subcommand) is dispatched
 // from the same positional argument the TUI shorthand (`cub foo.leo`) uses,
 // which only exists when the `tui` feature is compiled in (see `Cli::file`

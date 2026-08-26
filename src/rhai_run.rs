@@ -113,6 +113,74 @@ fn parse_json(json: &str) -> RhaiResult<Dynamic> {
         .map_err(rhai_err)
 }
 
+/// Reports whether `pattern` matches anywhere in `text`. Fails if `pattern`
+/// isn't a valid regular expression -- the same syntax `cub inspect
+/// --search` and `doc.find_h`/`doc.find_b` use.
+fn regex_is_match(pattern: &str, text: &str) -> RhaiResult<bool> {
+    let regex = Regex::new(pattern).map_err(rhai_err)?;
+    Ok(regex.is_match(text))
+}
+
+/// Returns the leftmost match of `pattern` in `text`, or `()` when there is
+/// none.
+fn regex_find(pattern: &str, text: &str) -> RhaiResult<Dynamic> {
+    let regex = Regex::new(pattern).map_err(rhai_err)?;
+    Ok(regex
+        .find(text)
+        .map(|m| Dynamic::from(m.as_str().to_string()))
+        .unwrap_or(Dynamic::UNIT))
+}
+
+/// Returns every non-overlapping match of `pattern` in `text`, left to
+/// right, as an array of strings -- `[]` when there are none.
+fn regex_find_all(pattern: &str, text: &str) -> RhaiResult<Array> {
+    let regex = Regex::new(pattern).map_err(rhai_err)?;
+    Ok(regex
+        .find_iter(text)
+        .map(|m| Dynamic::from(m.as_str().to_string()))
+        .collect())
+}
+
+/// Returns the leftmost match's capture groups as an array of strings --
+/// index 0 is the whole match, followed by one entry per `(...)` group,
+/// with `()` for a group the match didn't reach (e.g. inside an
+/// unmatched `|` alternative). Returns `()`, not `[]`, when `pattern`
+/// doesn't match `text` at all, so callers can tell "no match" from
+/// "matched, no groups".
+fn regex_captures(pattern: &str, text: &str) -> RhaiResult<Dynamic> {
+    let regex = Regex::new(pattern).map_err(rhai_err)?;
+    Ok(match regex.captures(text) {
+        Some(captures) => {
+            let groups: Array = captures
+                .iter()
+                .map(|group| {
+                    group
+                        .map(|m| Dynamic::from(m.as_str().to_string()))
+                        .unwrap_or(Dynamic::UNIT)
+                })
+                .collect();
+            Dynamic::from(groups)
+        }
+        None => Dynamic::UNIT,
+    })
+}
+
+/// Replaces the leftmost match of `pattern` in `text` with `replacement`
+/// (`$1`-style references reach into capture groups, same as the `regex`
+/// crate) and returns the result. Returns `text` unchanged when `pattern`
+/// doesn't match.
+fn regex_replace(pattern: &str, text: &str, replacement: &str) -> RhaiResult<String> {
+    let regex = Regex::new(pattern).map_err(rhai_err)?;
+    Ok(regex.replace(text, replacement).into_owned())
+}
+
+/// Same as `regex_replace`, but replaces every non-overlapping match
+/// instead of only the leftmost.
+fn regex_replace_all(pattern: &str, text: &str, replacement: &str) -> RhaiResult<String> {
+    let regex = Regex::new(pattern).map_err(rhai_err)?;
+    Ok(regex.replace_all(text, replacement).into_owned())
+}
+
 /// Runs `cmd` through `sh -c`, inheriting `cub`'s own working directory
 /// unless `opts` overrides it with a `cwd` entry. Always succeeds and hands
 /// back a `#{stdout, stderr, code}` map -- a nonzero exit is something the
@@ -972,6 +1040,12 @@ fn register_doc_api(engine: &mut Engine) {
     engine.register_fn("sh", sh_default_cwd);
     engine.register_fn("sh", sh_with_opts);
     engine.register_fn("env_var", env_var);
+    engine.register_fn("regex_is_match", regex_is_match);
+    engine.register_fn("regex_find", regex_find);
+    engine.register_fn("regex_find_all", regex_find_all);
+    engine.register_fn("regex_captures", regex_captures);
+    engine.register_fn("regex_replace", regex_replace);
+    engine.register_fn("regex_replace_all", regex_replace_all);
 
     // rhai-fs: open_file/read_string/write/read_dir/create_dir/... on plain
     // path strings, global rather than `Doc`-scoped since a script may need
@@ -1142,52 +1216,126 @@ pub(crate) fn run_bound(
     }
 }
 
-/// One function an `@import`ed script's `COMMANDS` array names as directly
+/// One function an `@import`ed script's `COMMANDS` map names as directly
 /// runnable -- see [`discover_commands`].
 #[cfg(feature = "tui")]
 pub(crate) struct ImportedCommand {
     pub(crate) name: String,
+    /// The one-line description `COMMANDS` gave this command, if its value
+    /// wasn't empty. Shown in the action palette so a command's purpose
+    /// doesn't require opening the script to check.
+    pub(crate) doc: Option<String>,
 }
 
-/// Reads back the `COMMANDS` array a script at `script_path` declares,
+/// Reads back the `COMMANDS` map a script at `script_path` declares,
 /// without invoking anything in it: compiles the script, runs only its
 /// top-level `let`/`const` statements (registering its `fn`s along the
 /// way, same as any script load), then reads `COMMANDS` out of the
-/// resulting scope. `COMMANDS` names the functions meant to be exposed as
-/// zero-input commands -- runnable with just `doc` -- in the action
-/// palette; everything else the script defines is a library helper, or a
-/// function that needs more input than the palette can supply yet, and
-/// stays invisible there.
+/// resulting scope. `COMMANDS` is `#{ fn_name: "one-line description", ...
+/// }`, naming the functions meant to be exposed as zero-input commands --
+/// runnable with just `doc` -- in the action palette, each paired with the
+/// description shown there; everything else the script defines is a
+/// library helper, or a function that needs more input than the palette
+/// can supply yet, and stays invisible there.
 ///
-/// Returns an empty list -- rather than failing the whole palette -- if
-/// the file can't be read, doesn't parse, throws while its top level runs,
-/// or declares no `COMMANDS`.
+/// Returns an empty list -- not an error -- for a script that parses fine
+/// but declares no `COMMANDS` (most imports imported only for their
+/// `available_commands`, or with none at all, look like this). `Err`
+/// covers the cases actually worth surfacing to the user: the file can't
+/// be read, doesn't parse, or throws while its top level runs -- e.g. a
+/// `fn` named after a Rhai reserved word breaks the whole script's
+/// `COMMANDS` (and `available_commands`) silently unless a caller shows
+/// this message somewhere.
 #[cfg(feature = "tui")]
-pub(crate) fn discover_commands(script_path: &std::path::Path) -> Vec<ImportedCommand> {
-    let Ok(source) = fs::read_to_string(script_path) else {
-        return Vec::new();
-    };
+pub(crate) fn discover_commands(
+    script_path: &std::path::Path,
+) -> Result<Vec<ImportedCommand>, String> {
+    let source = fs::read_to_string(script_path)
+        .map_err(|error| format!("{}: {error}", script_path.display()))?;
     let mut engine = Engine::new();
     engine.on_print(|_| {});
     engine.on_debug(|_, _, _| {});
     register_doc_api(&mut engine);
-    let Ok(ast) = engine.compile(&source) else {
-        return Vec::new();
-    };
+    let ast = engine
+        .compile(&source)
+        .map_err(|error| format!("{}: {error}", script_path.display()))?;
     let mut scope = Scope::new();
-    if engine
-        .eval_ast_with_scope::<Dynamic>(&mut scope, &ast)
-        .is_err()
-    {
-        return Vec::new();
-    }
-    scope
-        .get_value::<Array>("COMMANDS")
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|value| value.into_string().ok())
-        .map(|name| ImportedCommand { name })
+    let _: Dynamic = engine
+        .eval_ast_with_scope(&mut scope, &ast)
+        .map_err(|error| format!("{}: {error}", script_path.display()))?;
+    Ok(commands_from_map(
+        scope.get_value::<rhai::Map>("COMMANDS").unwrap_or_default(),
+    ))
+}
+
+/// Converts a `#{ fn_name: "description", ... }` map -- the shape both
+/// `COMMANDS` and `available_commands`'s return value use -- into
+/// `ImportedCommand`s. A non-string or empty description becomes `None`
+/// rather than an empty label in the palette.
+#[cfg(feature = "tui")]
+fn commands_from_map(map: rhai::Map) -> Vec<ImportedCommand> {
+    map.into_iter()
+        .map(|(name, doc)| ImportedCommand {
+            name: name.to_string(),
+            doc: doc
+                .into_immutable_string()
+                .ok()
+                .map(|doc| doc.to_string())
+                .filter(|doc| !doc.is_empty()),
+        })
         .collect()
+}
+
+/// Calls `available_commands(doc, target)` in the script at `script_path`,
+/// if it defines one, to get commands whose palette availability depends
+/// on the current selection -- the dynamic counterpart to the static
+/// `COMMANDS` map `discover_commands` reads. `document` is cloned before
+/// binding, so `available_commands` runs against a throwaway copy: nothing
+/// it does (it's meant to be a pure query, but nothing stops a script from
+/// calling a mutating `Doc` method) touches the outline actually open in
+/// the TUI, unlike a real command run via [`run_command`].
+///
+/// A script simply not defining `available_commands` -- true for most
+/// imports, since it's opt-in -- returns an empty list, not an `Err`;
+/// that's the expected, silent case. `Err` is for the same "worth telling
+/// someone" failures `discover_commands` reports (unreadable, doesn't
+/// parse, throws at the top level), plus `available_commands` itself
+/// throwing or not returning a map -- both signal a bug in that function
+/// specifically, since its mere presence was already confirmed. Also `Err`
+/// if `target_position` doesn't resolve, though callers don't currently
+/// invoke this without a live selection.
+#[cfg(feature = "tui")]
+pub(crate) fn discover_available_commands(
+    document: &LeoDocument,
+    path: PathBuf,
+    script_path: &std::path::Path,
+    target_position: &PositionId,
+) -> Result<Vec<ImportedCommand>, String> {
+    let source = fs::read_to_string(script_path)
+        .map_err(|error| format!("{}: {error}", script_path.display()))?;
+    let mut engine = Engine::new();
+    engine.on_print(|_| {});
+    engine.on_debug(|_, _, _| {});
+    register_doc_api(&mut engine);
+    let ast = engine
+        .compile(&source)
+        .map_err(|error| format!("{}: {error}", script_path.display()))?;
+    let mut scope = Scope::new();
+    let _: Dynamic = engine
+        .eval_ast_with_scope(&mut scope, &ast)
+        .map_err(|error| format!("{}: {error}", script_path.display()))?;
+    let mut doc = Doc::bind(document.clone(), path);
+    let target = doc
+        .node_at(&target_position.0)
+        .map_err(|error| format!("{}: {error}", script_path.display()))?;
+    match engine.call_fn::<rhai::Map>(&mut scope, &ast, "available_commands", (doc, target)) {
+        Ok(result) => Ok(commands_from_map(result)),
+        Err(error) if matches!(*error, EvalAltResult::ErrorFunctionNotFound(..)) => Ok(Vec::new()),
+        Err(error) => Err(format!(
+            "{}: available_commands: {error}",
+            script_path.display()
+        )),
+    }
 }
 
 /// Runs the function `fn_name` from the script at `script_path` with
@@ -1322,6 +1470,7 @@ mod tests {
     fn claude_history_script_exposes_only_its_import_command() {
         let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/claude-history.rhai");
         let names: Vec<String> = discover_commands(&script)
+            .expect("claude-history.rhai should compile and declare COMMANDS")
             .into_iter()
             .map(|command| command.name)
             .collect();

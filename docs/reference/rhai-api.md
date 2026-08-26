@@ -106,6 +106,32 @@ directly:
 | `print(...)` | Write to standard output or the TUI action output. |
 | `debug(...)` | Write diagnostic output with its source position. |
 
+## Rhai extensions
+
+Functions `cub` adds to the base Rhai engine, available anywhere -- not tied
+to a `Doc` or `Node`.
+
+| Signature | Description |
+| --- | --- |
+| `parse_json(json: string) -> dynamic` | Parse an object, array, or scalar into the matching Rhai value. Replaces Rhai's built-in `parse_json`, which only accepts an object. |
+| `regex_is_match(pattern: string, text: string) -> bool` | Report whether `pattern` matches anywhere in `text`. |
+| `regex_find(pattern: string, text: string) -> string \| ()` | Return the leftmost match, or `()` when there is none. |
+| `regex_find_all(pattern: string, text: string) -> array` | Return every non-overlapping match, left to right. `[]` when there are none. |
+| `regex_captures(pattern: string, text: string) -> array \| ()` | Return the leftmost match's capture groups: index 0 is the whole match, followed by one entry per `(...)` group (`()` for a group the match didn't reach). Returns `()`, not `[]`, when `pattern` doesn't match at all, so "no match" is distinguishable from "matched, no groups". |
+| `regex_replace(pattern: string, text: string, replacement: string) -> string` | Replace the leftmost match. `replacement` supports `$1`-style group references. Returns `text` unchanged when `pattern` doesn't match. |
+| `regex_replace_all(pattern: string, text: string, replacement: string) -> string` | Same as `regex_replace`, but replaces every match. |
+
+All `regex_*` functions fail (throw) if `pattern` isn't a valid regular
+expression -- the same syntax `cub inspect --search` and
+`doc.find_h`/`doc.find_b` use.
+
+Rhai string literals apply their own escaping before the pattern ever
+reaches the regex engine, so a backslash meant for the regex needs a second
+one to survive the string literal: match a literal digit with
+`regex_is_match("\\d+", text)`, not `"\d+"` -- the latter is a syntax error
+("Invalid escape sequence"), since Rhai doesn't recognize `\d` as a string
+escape.
+
 ## Subprocesses and files
 
 ### Subprocesses
@@ -163,8 +189,28 @@ An `@action` body receives:
 | `target` | The selection's GNX string. |
 
 An `@import` command must have the signature `fn name(doc, target)`, where
-`target` is a positioned `Node`. Only functions named in the top-level
-`COMMANDS` array appear in the action palette.
+`target` is a positioned `Node`. Only functions the top-level `COMMANDS`
+map names appear in the action palette -- `COMMANDS` is `#{ fn_name:
+"one-line description", ... }`; the description shows next to the command
+in the palette.
+
+A script may also define `fn available_commands(doc, target) -> map`, same
+shape, for commands whose palette availability depends on the current
+selection rather than being always offered. Called with the live selection
+each time the palette opens (or the query changes), the returned map is
+unioned into `COMMANDS`'s -- a name in both takes `available_commands`'s
+description, letting it override as well as add. It's meant to be a pure
+query; nothing stops it from also calling a mutating `Doc` method, but any
+such mutation is discarded rather than applied, since it runs against a
+throwaway copy of the outline, not the one actually open in the TUI.
+Simply not defining `available_commands` is the normal, silent case --
+most scripts don't need it, and the static `COMMANDS` set still shows.
+
+An `@import`ed script that fails to read, doesn't parse, throws while its
+top level runs, or (for `available_commands` specifically) throws or
+doesn't return a map, contributes no entries -- and its error message
+shows in place of the usual per-entry description line below the palette
+list, so a broken script doesn't just look like one with nothing to offer.
 
 ## Gotchas
 

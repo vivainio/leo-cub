@@ -424,16 +424,25 @@ struct ActionPalette {
     query: String,
     matches: Vec<PaletteEntry>,
     active: usize,
+    /// Messages from `@import`ed scripts that failed to compile or threw
+    /// while loading -- see `palette_entries`. Independent of `matches`:
+    /// still populated (and shown) even when filtering leaves `matches`
+    /// empty, since a broken script and "no entries match your query" are
+    /// different problems.
+    errors: Vec<String>,
 }
 
 /// One entry in the action palette (`Shift-A`): either an `@action` node in
 /// the outline, or a zero-input command an `@import`ed script's `COMMANDS`
-/// array names (see `discover_commands`). `label` is precomputed at
+/// map names (see `discover_commands`). `label` is precomputed at
 /// [`palette_entries`] time so filtering/drawing never need to re-walk the
-/// outline or re-read a script per entry.
+/// outline or re-read a script per entry. `doc` is the description
+/// `COMMANDS` gave a command, shown for the active entry below the list;
+/// always `None` for an `@action` entry, which has no such description.
 #[derive(Clone, Debug, PartialEq)]
 struct PaletteEntry {
     label: String,
+    doc: Option<String>,
     kind: PaletteEntryKind,
 }
 
@@ -1427,29 +1436,78 @@ fn import_script_paths(app: &App) -> Vec<PathBuf> {
     paths
 }
 
-/// Every entry the action palette (`Shift-A`) offers: `@action` nodes from
-/// the outline, plus commands discovered from every `@import`ed script's
-/// `COMMANDS` array. Recomputed on open and on every keystroke (like
-/// `action_rows` before it) rather than cached -- outlines and imported
-/// scripts are both small enough that re-scanning is cheap, and this way
-/// the palette never shows a command a script no longer declares.
-fn palette_entries(app: &App) -> Vec<PaletteEntry> {
+/// Every entry the action palette (`Shift-A`) offers, plus any script
+/// errors hit along the way: `@action` nodes from the outline, plus
+/// commands discovered from every `@import`ed script's `COMMANDS` map,
+/// unioned with whatever its `available_commands(doc, target)` (if it
+/// defines one) returns for the current selection -- commands whose
+/// palette availability is conditional on the selected node, keyed by
+/// name against the static set so a name in both wins with
+/// `available_commands`'s (possibly different) description. No selected
+/// row (an empty outline) just skips the dynamic half; the static set
+/// still shows. A script that fails to compile or throws while loading
+/// (see `discover_commands`/`discover_available_commands`) contributes no
+/// entries and its error message instead -- `draw_palette_panel` shows
+/// these in place of the usual per-entry description line, since a script
+/// silently contributing nothing to the palette would otherwise look
+/// identical to one that legitimately declares no commands. Recomputed on
+/// open and on every keystroke (like `action_rows` before it) rather than
+/// cached -- outlines and imported scripts are both small enough that
+/// re-scanning is cheap, and this way the palette never shows a command a
+/// script no longer declares.
+fn palette_entries(app: &App) -> (Vec<PaletteEntry>, Vec<String>) {
     let outline = &app.document.outline;
     let mut entries: Vec<PaletteEntry> = action_rows(outline)
         .into_iter()
         .map(|row| PaletteEntry {
             label: action_name(&outline.nodes[&row.node].headline).to_owned(),
+            doc: None,
             kind: PaletteEntryKind::Action(row.position),
         })
         .collect();
+    let mut errors = Vec::new();
+    let target_position = app.selected_row().map(|row| row.position);
     for script in import_script_paths(app) {
         let stem = script
             .file_stem()
             .and_then(|stem| stem.to_str())
             .unwrap_or("script");
-        for command in crate::rhai_run::discover_commands(&script) {
+        let mut commands = match crate::rhai_run::discover_commands(&script) {
+            Ok(commands) => commands,
+            Err(error) => {
+                errors.push(error);
+                continue;
+            }
+        };
+        if let Some(target_position) = &target_position {
+            match crate::rhai_run::discover_available_commands(
+                &app.document,
+                app.path.clone(),
+                &script,
+                target_position,
+            ) {
+                Ok(dynamic_commands) => {
+                    for dynamic in dynamic_commands {
+                        match commands.iter_mut().find(|c| c.name == dynamic.name) {
+                            Some(existing) => *existing = dynamic,
+                            None => commands.push(dynamic),
+                        }
+                    }
+                    // `COMMANDS` alone already lists alphabetically (it
+                    // reads back as a `rhai::Map`, a `BTreeMap`) -- keep
+                    // that property after folding in a name
+                    // `available_commands` only just added, rather than
+                    // leaving new names trailing in whatever order it
+                    // returned them.
+                    commands.sort_by(|a, b| a.name.cmp(&b.name));
+                }
+                Err(error) => errors.push(error),
+            }
+        }
+        for command in commands {
             entries.push(PaletteEntry {
                 label: format!("{}  ({stem})", command.name),
+                doc: command.doc,
                 kind: PaletteEntryKind::Command {
                     script: script.clone(),
                     name: command.name,
@@ -1457,14 +1515,16 @@ fn palette_entries(app: &App) -> Vec<PaletteEntry> {
             });
         }
     }
-    entries
+    (entries, errors)
 }
 
 fn start_palette(app: &mut App) {
+    let (matches, errors) = palette_entries(app);
     app.palette = Some(ActionPalette {
         query: String::new(),
-        matches: palette_entries(app),
+        matches,
         active: 0,
+        errors,
     });
     app.status = "run action: type to filter, Enter runs, Esc cancels".into();
 }
@@ -1541,13 +1601,15 @@ fn update_palette_matches(app: &mut App) {
         .expect("palette input exists")
         .query
         .to_lowercase();
-    let matches = palette_entries(app)
+    let (all_entries, errors) = palette_entries(app);
+    let matches = all_entries
         .into_iter()
         .filter(|entry| entry.label.to_lowercase().contains(&query))
         .collect::<Vec<_>>();
     let palette = app.palette.as_mut().expect("palette input exists");
     palette.active = palette.active.min(matches.len().saturating_sub(1));
     palette.matches = matches;
+    palette.errors = errors;
 }
 
 fn cycle_palette_match(app: &mut App, delta: isize) {
@@ -2140,50 +2202,65 @@ fn cancel_headline_edit(app: &mut App) {
     }
 }
 
+/// Accepts the in-progress headline edit, same as pressing Enter. Returns
+/// `false` (leaving the edit open) if the headline is empty.
+fn commit_headline_edit(app: &mut App) -> bool {
+    let Some(input) = app.input.as_ref() else {
+        return false;
+    };
+    let headline = input.value.trim().to_owned();
+    let node_id = input.node.clone();
+    let inserted_position = input.inserted_position.clone();
+    if headline.is_empty() {
+        app.status = "headline may not be empty".into();
+        return false;
+    }
+    app.document
+        .outline
+        .nodes
+        .get_mut(&node_id)
+        .expect("edited node exists")
+        .headline = headline.clone();
+    if let Some(row) = app.rows().iter().find(|row| row.node == node_id).cloned()
+        && external_filename(&headline).is_some()
+    {
+        let path = dynamic_source_location(app, &row)
+            .map(|location| location.path)
+            .expect("edited external node has a source path");
+        track_external_rename(
+            &mut app.writable_external,
+            node_id.clone(),
+            path,
+            external_format(&headline),
+        );
+    }
+    app.dirty_nodes.insert(node_id);
+    app.input = None;
+    app.dirty = true;
+    app.quit_armed = false;
+    #[cfg(feature = "syntax")]
+    app.highlight_cache.clear();
+    #[cfg(feature = "syntax")]
+    app.preview_cache.clear();
+    if inserted_position.is_some() {
+        insert_headline(app);
+    } else {
+        app.status = "headline changed (Ctrl-S to save)".into();
+    }
+    true
+}
+
 fn handle_headline_input(app: &mut App, key: KeyEvent) {
     let Some(input) = app.input.as_mut() else {
         return;
     };
     match key.code {
         KeyCode::Enter => {
-            let headline = input.value.trim().to_owned();
-            let node_id = input.node.clone();
-            let inserted_position = input.inserted_position.clone();
-            if headline.is_empty() {
-                app.status = "headline may not be empty".into();
-                return;
-            }
-            app.document
-                .outline
-                .nodes
-                .get_mut(&node_id)
-                .expect("edited node exists")
-                .headline = headline.clone();
-            if let Some(row) = app.rows().iter().find(|row| row.node == node_id).cloned()
-                && external_filename(&headline).is_some()
-            {
-                let path = dynamic_source_location(app, &row)
-                    .map(|location| location.path)
-                    .expect("edited external node has a source path");
-                track_external_rename(
-                    &mut app.writable_external,
-                    node_id.clone(),
-                    path,
-                    external_format(&headline),
-                );
-            }
-            app.dirty_nodes.insert(node_id);
-            app.input = None;
-            app.dirty = true;
-            app.quit_armed = false;
-            #[cfg(feature = "syntax")]
-            app.highlight_cache.clear();
-            #[cfg(feature = "syntax")]
-            app.preview_cache.clear();
-            if inserted_position.is_some() {
-                insert_headline(app);
-            } else {
-                app.status = "headline changed (Ctrl-S to save)".into();
+            commit_headline_edit(app);
+        }
+        KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if commit_headline_edit(app) {
+                save(app);
             }
         }
         KeyCode::Esc => {
@@ -3364,12 +3441,16 @@ fn draw_finder_panel(
 
 /// Renders the docked action palette (`Shift-A`), listing `@action` node
 /// names and imported commands (labels precomputed by `palette_entries`)
-/// rather than full headlines. Laid out the same as `draw_finder_panel`.
+/// rather than full headlines. Laid out the same as `draw_finder_panel`,
+/// plus one reserved line below the list -- always present, even when
+/// blank, so the list's height doesn't jump as the active entry changes --
+/// showing the active entry's `doc` (an imported command's `COMMANDS`
+/// description; `@action` entries have none).
 fn draw_palette_panel(frame: &mut ratatui::Frame<'_>, area: Rect, state: &ActionPalette) {
     let shown = state
         .matches
         .len()
-        .min(usize::from(area.height.saturating_sub(1)));
+        .min(usize::from(area.height.saturating_sub(2)));
     let first = state.active.saturating_sub(shown.saturating_sub(1));
     let mut lines: Vec<Line> = state
         .matches
@@ -3389,6 +3470,23 @@ fn draw_palette_panel(frame: &mut ratatui::Frame<'_>, area: Rect, state: &Action
     } else {
         format!("{} of {}", state.active + 1, state.matches.len())
     };
+    // A broken `@import`ed script would otherwise look identical to one
+    // that legitimately declares no commands -- surface it here, taking
+    // priority over the active entry's own description, since it's the
+    // more actionable thing to see.
+    if state.errors.is_empty() {
+        let doc = state
+            .matches
+            .get(state.active)
+            .and_then(|entry| entry.doc.as_deref())
+            .unwrap_or("");
+        lines.push(Line::styled(doc, Style::default().fg(Color::DarkGray)));
+    } else {
+        lines.push(Line::styled(
+            state.errors.join(" | "),
+            Style::default().fg(Color::LightRed),
+        ));
+    }
     lines.push(Line::from(vec![
         Span::styled("Run action: ", Style::default().fg(Color::DarkGray)),
         Span::raw(format!("{}▏", state.query)),
@@ -4535,6 +4633,7 @@ mod tests {
             palette.matches,
             vec![PaletteEntry {
                 label: "Build".into(),
+                doc: None,
                 kind: PaletteEntryKind::Action(PositionId("0".into())),
             }]
         );
@@ -4551,7 +4650,7 @@ mod tests {
         fs::write(
             directory.join("lib.rhai"),
             r#"
-const COMMANDS = ["greet"];
+const COMMANDS = #{ greet: "Say hello to the selected node." };
 
 fn greet(doc, target) {
     target.h = target.h + " done";
@@ -4575,12 +4674,14 @@ fn private_helper(doc, target) {
             .headline = "@import lib.rhai".into();
 
         start_palette(&mut app);
-        // "greet" is listed (it's in COMMANDS); "private_helper" isn't, even
-        // though it's a function in the same script.
+        // "greet" is listed (it's in COMMANDS, with its description); the
+        // description came through, and "private_helper" isn't listed at
+        // all, even though it's a function in the same script.
         assert_eq!(
             app.palette.as_ref().unwrap().matches,
             vec![PaletteEntry {
                 label: "greet  (lib)".into(),
+                doc: Some("Say hello to the selected node.".into()),
                 kind: PaletteEntryKind::Command {
                     script: directory.join("lib.rhai"),
                     name: "greet".into(),
@@ -4597,6 +4698,131 @@ fn private_helper(doc, target) {
         assert!(app.status.starts_with("'greet' finished"));
         let output = app.action_output.as_ref().expect("command produced output");
         assert_eq!(output.text.trim(), "greeted A done");
+
+        fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn palette_unions_available_commands_with_commands_and_lets_it_override_by_name() {
+        let directory = env::temp_dir().join(format!(
+            "leo-cub-tui-available-commands-{}-{}",
+            std::process::id(),
+            fresh_node_id().0
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            directory.join("lib.rhai"),
+            r#"
+const COMMANDS = #{ always: "Always available.", both: "static doc" };
+
+fn available_commands(doc, target) {
+    let extra = #{};
+    if target.b == "trigger" {
+        extra.conditional = "Only when the body says trigger.";
+    }
+    extra.both = "dynamic doc";
+    extra
+}
+
+fn always(doc, target) {}
+fn conditional(doc, target) {}
+fn both(doc, target) {}
+"#,
+        )
+        .unwrap();
+
+        let mut app = editing_app();
+        app.path = directory.join("outline.leo");
+        app.document
+            .outline
+            .nodes
+            .get_mut(&NodeId::from("c"))
+            .unwrap()
+            .headline = "@import lib.rhai".into();
+
+        // Selection ("a", the default) has an empty body -- `conditional`
+        // stays hidden, but `both`'s dynamic description already wins
+        // over its static one from COMMANDS.
+        start_palette(&mut app);
+        let labels: Vec<&str> = app
+            .palette
+            .as_ref()
+            .unwrap()
+            .matches
+            .iter()
+            .map(|entry| entry.label.as_str())
+            .collect();
+        assert_eq!(labels, vec!["always  (lib)", "both  (lib)"]);
+        let both_doc = app
+            .palette
+            .as_ref()
+            .unwrap()
+            .matches
+            .iter()
+            .find(|entry| entry.label == "both  (lib)")
+            .unwrap()
+            .doc
+            .clone();
+        assert_eq!(both_doc, Some("dynamic doc".into()));
+
+        // Give "a" a body that satisfies available_commands' condition --
+        // "conditional" should now join the union.
+        app.document.outline.nodes.get_mut(&NodeId::from("a")).unwrap().body = "trigger".into();
+        start_palette(&mut app);
+        let labels: Vec<&str> = app
+            .palette
+            .as_ref()
+            .unwrap()
+            .matches
+            .iter()
+            .map(|entry| entry.label.as_str())
+            .collect();
+        assert_eq!(labels, vec!["always  (lib)", "both  (lib)", "conditional  (lib)"]);
+
+        fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn palette_surfaces_an_imported_scripts_compile_error_instead_of_going_silent() {
+        let directory = env::temp_dir().join(format!(
+            "leo-cub-tui-broken-import-{}-{}",
+            std::process::id(),
+            fresh_node_id().0
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        // `shared` is a Rhai reserved word -- this fails to compile at
+        // all, so both COMMANDS and any fn defs are unreachable. Without
+        // surfacing the error, the palette would look exactly like an
+        // import that legitimately declares no commands.
+        fs::write(
+            directory.join("broken.rhai"),
+            "const COMMANDS = #{};\nfn shared(doc, target) {}\n",
+        )
+        .unwrap();
+
+        let mut app = editing_app();
+        app.path = directory.join("outline.leo");
+        app.document
+            .outline
+            .nodes
+            .get_mut(&NodeId::from("c"))
+            .unwrap()
+            .headline = "@import broken.rhai".into();
+
+        start_palette(&mut app);
+        let palette = app.palette.as_ref().unwrap();
+        assert!(palette.matches.is_empty());
+        assert_eq!(palette.errors.len(), 1);
+        assert!(
+            palette.errors[0].contains("reserved keyword"),
+            "{:?}",
+            palette.errors[0]
+        );
+        assert!(
+            palette.errors[0].contains("broken.rhai"),
+            "{:?}",
+            palette.errors[0]
+        );
 
         fs::remove_dir_all(&directory).ok();
     }
@@ -5280,6 +5506,39 @@ fn private_helper(doc, target) {
         assert_eq!(input.value, "Z");
         assert_eq!(input.cursor, 1);
         assert!(!input.selected);
+    }
+
+    #[test]
+    fn ctrl_s_while_editing_a_headline_commits_the_edit_and_saves() {
+        let directory = env::temp_dir().join(format!(
+            "leo-cub-tui-ctrl-s-headline-{}-{}",
+            std::process::id(),
+            fresh_node_id().0
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("test.leo");
+
+        let mut app = editing_app();
+        app.path = path.clone();
+
+        edit_headline(&mut app);
+        assert!(app.input.is_some());
+        app.input.as_mut().unwrap().value = "Renamed".into();
+        handle_headline_input(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+        );
+
+        assert!(app.input.is_none(), "Ctrl-S should exit headline editing");
+        assert_eq!(
+            app.document.outline.nodes[&NodeId::from("a")].headline,
+            "Renamed"
+        );
+        assert!(!app.dirty, "Ctrl-S should have saved the document");
+        assert!(app.status.starts_with("saved"), "{}", app.status);
+        assert!(path.exists());
+
+        fs::remove_dir_all(&directory).unwrap();
     }
 
     #[test]

@@ -126,7 +126,10 @@ For commands you want to edit as normal source files or reuse across outlines,
 put the Rhai code in a file. For example, `scripts/tasks.rhai` could contain:
 
 ```rust
-const COMMANDS = ["mark_done", "list_todos"];
+const COMMANDS = #{
+    mark_done: "Append a checkmark to the selected node's headline.",
+    list_todos: "Print every node headlined TODO.",
+};
 
 fn mark_done(doc, target) {
     target.h = target.h + " ✓";
@@ -145,10 +148,37 @@ Then add a node to the outline with this headline and an empty body:
 @import scripts/tasks.rhai
 ```
 
-The path is relative to the `.leo` file. Each function named in `COMMANDS`
-appears in the `Shift-A` action palette. It must accept exactly `(doc,
-target)`, where `target` is a positioned `Node` for the current selection.
-Other functions may use any signature, but do not appear in the palette.
+The path is relative to the `.leo` file. Each function `COMMANDS` names
+appears in the `Shift-A` action palette, alongside the description its map
+value gives; the active entry's full description shows below the list. A
+command function must accept exactly `(doc, target)`, where `target` is a
+positioned `Node` for the current selection. Other functions may use any
+signature, but do not appear in the palette.
+
+### Commands that depend on the selection
+
+`COMMANDS` always offers the same commands regardless of what's selected.
+For a command that only makes sense on some nodes -- say, one that expects
+the selected node's body to already look like a URL -- add
+`available_commands(doc, target)` instead of (or alongside) listing it in
+`COMMANDS`:
+
+```rust
+fn available_commands(doc, target) {
+    if target.b.starts_with("https://") {
+        #{ open_link: "Fetch this node's URL and replace its body with the response." }
+    } else {
+        #{}
+    }
+}
+```
+
+The palette calls it with the live selection each time it opens, and unions
+the map it returns into `COMMANDS`'s -- a name in both takes
+`available_commands`'s description. It runs against a throwaway copy of the
+outline, so a mutating `Doc` call inside it has no effect; treat it as a
+read-only query that decides what to *offer*, not something that changes
+the outline itself.
 
 The repository's [`scripts/github.rhai`](https://github.com/vivainio/leo-cub/blob/main/scripts/github.rhai)
 is a larger example with both palette commands and private helper functions.

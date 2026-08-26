@@ -18,7 +18,9 @@
 // Rhai's max-expression-depth guard, and isn't needed here anyway -- this
 // finds the one `ai-title` line and one `user` line it actually wants
 // with a plain substring search, and counts the rest by substring too.
-const COMMANDS = ["import_claude_history"];
+const COMMANDS = #{
+    import_claude_history: "Import Claude Code session history as outline nodes under Sessions/.",
+};
 
 /// The first line in `lines` containing `needle`, or "".
 fn find_line(lines, needle) {
