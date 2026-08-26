@@ -30,6 +30,8 @@ use regex::Regex;
 use rhai::packages::Package;
 use rhai::{Array, Dynamic, Engine, EvalAltResult, Scope};
 
+mod cub;
+
 /// The outline handle a script gets back from `open(path)` (or, for a bound
 /// `@action` script, from the predefined `doc`). Every method mutates or
 /// reads the in-memory document; nothing touches disk until `save`/
@@ -892,6 +894,26 @@ impl Node {
             .collect())
     }
 
+    /// This `Node` and its ancestors, nearest first, ending at the root --
+    /// the upward counterpart to `subtree()` (this node and its
+    /// descendants). Just `parent()` called repeatedly until it wraps `""`
+    /// (the root-has-no-parent sentinel `parent()` itself returns), so it
+    /// inherits the same position-aware-when-possible correctness for
+    /// cloned content.
+    fn parents(&mut self) -> RhaiResult<Array> {
+        let mut result: Array = vec![Dynamic::from(self.clone())];
+        let mut current = self.clone();
+        loop {
+            let next = current.parent()?;
+            if next.gnx.is_empty() {
+                break;
+            }
+            result.push(Dynamic::from(next.clone()));
+            current = next;
+        }
+        Ok(result)
+    }
+
     /// This `Node` and everything under it, depth-first and in outline
     /// order (this node itself first) -- the `Node`-returning equivalent
     /// of `doc.subtree(gnx)`.
@@ -1058,6 +1080,7 @@ fn register_doc_api(engine: &mut Engine) {
     engine.register_get_set("h", Node::get_h, Node::set_h);
     engine.register_get_set("b", Node::get_b, Node::set_b);
     engine.register_fn("parent", Node::parent);
+    engine.register_fn("parents", Node::parents);
     engine.register_fn("children", Node::children);
     engine.register_fn("subtree", Node::subtree);
     engine.register_get("gnx", Node::gnx);
@@ -1066,6 +1089,10 @@ fn register_doc_api(engine: &mut Engine) {
     engine.register_fn("file_path", Node::file_path);
     engine.register_fn("remove", Node::remove);
     engine.register_fn("to_string", Node::describe);
+
+    // `cub::`-namespaced functions for cub's own outline conventions --
+    // see rhai_run/cub.rs.
+    cub::register(engine);
 
     engine.register_fn("assert", |cond: bool| -> RhaiResult<()> {
         if cond {

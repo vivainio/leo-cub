@@ -28,6 +28,7 @@ useful when an operation specifically requires a node id.
 | `node.gnx: string` | Read the node's GNX. |
 | `node.position: string` | Read the exact index path, or `""` for a GNX-only handle. |
 | `node.parent() -> Node` | Get the parent; a root's parent wraps `""`. |
+| `node.parents() -> array` | Get this node and its ancestors, nearest first, ending at the root. |
 | `node.children() -> array` | Get direct children as positioned nodes. |
 | `node.subtree() -> array` | Get this node and its descendants, depth-first. |
 | `node.path() -> string` | Get the slash-separated headline path. |
@@ -44,8 +45,8 @@ that node in the outline.
 
 `doc.node(gnx)`, `find_h()`, and `find_b()` produce GNX-based handles. When a
 node has clones, structural operations on such a handle use its first
-occurrence. Nodes returned by `node_at()`, `parent()`, `children()`, and
-`subtree()` retain the exact occurrence in `node.position`.
+occurrence. Nodes returned by `node_at()`, `parent()`, `parents()`,
+`children()`, and `subtree()` retain the exact occurrence in `node.position`.
 
 This distinction is most important for removal:
 
@@ -131,6 +132,31 @@ one to survive the string literal: match a literal digit with
 `regex_is_match("\\d+", text)`, not `"\d+"` -- the latter is a syntax error
 ("Invalid escape sequence"), since Rhai doesn't recognize `\d` as a string
 escape.
+
+## `cub::` conventions
+
+Unlike the extensions above (generic engine additions with no opinion about
+outline shape) and the `Doc`/`Node` API (generic outline primitives with no
+opinion about *content*), `cub::` holds functions for cub's own outline
+*conventions* -- built on that API, but opinionated about what particular
+nodes mean.
+
+| Signature | Description |
+| --- | --- |
+| `cub::variable(target: Node, name: string) -> string \| ()` | Resolve one named `@variables` setting (see [Configure a script with an `@variables` tree](../workflows/scripting.md#configure-a-script-with-an-variables-tree)) for `target`. `()` when `name` is set nowhere in reach. |
+
+`cub::variable` walks `target` and its ancestors, nearest first, returning
+the first definition of `name` it finds among any `@variables` child along
+the way -- so different subtrees in the same outline can each set their own
+value for the same name without clobbering each other. Falls back to a
+top-level root itself headlined `@variables` if nothing turned up walking
+ancestors, for an outline that keeps one outline-wide settings block rather
+than scoping it to a subtree.
+
+A setting can be written either way: a child headlined `name = value`, or a
+child headlined plain `name` with `value` in its body (`get_variables`'s
+shape, from before `@variables` could be scoped -- both still work, and can
+be mixed within the same `@variables` node).
 
 ## Subprocesses and files
 

@@ -13,19 +13,18 @@
   <v t="cub.1786725356.346248974.5"><vh>@f ../scripts/github.rhai</vh>
     <v t="cub.1786725356.346248974.5::f-anon:33"><vh>fn shq</vh></v>
     <v t="cub.1786725356.346248974.5::f-anon:40"><vh>fn sh_in</vh></v>
-    <v t="cub.1786725356.346248974.5::f-anon:49"><vh>fn get_variables</vh></v>
-    <v t="cub.1786725356.346248974.5::f-anon:65"><vh>fn gh_repo_flag</vh></v>
-    <v t="cub.1786725356.346248974.5::f-anon:79"><vh>fn gh_pr_list</vh></v>
-    <v t="cub.1786725356.346248974.5::f-anon:84"><vh>fn gh_issue_list</vh></v>
-    <v t="cub.1786725356.346248974.5::f-anon:89"><vh>fn gh_pr_view</vh></v>
-    <v t="cub.1786725356.346248974.5::f-anon:94"><vh>fn gh_issue_view</vh></v>
-    <v t="cub.1786725356.346248974.5::f-anon:99"><vh>fn gh_parse_url</vh></v>
-    <v t="cub.1786725356.346248974.5::f-anon:118"><vh>fn gh_view_url</vh></v>
-    <v t="cub.1786725356.346248974.5::f-anon:140"><vh>fn available_commands</vh></v>
-    <v t="cub.1786725356.346248974.5::f-anon:159"><vh>fn gh_import_url</vh></v>
-    <v t="cub.1786725356.346248974.5::f-anon:164"><vh>fn gh_pr_create</vh></v>
-    <v t="cub.1786725356.346248974.5::f-anon:169"><vh>fn gh_issue_create</vh></v>
-    <v t="cub.1786725356.346248974.5::f-anon:195"><vh>fn import_prs_and_issues</vh></v>
+    <v t="cub.1786725356.346248974.5::f-anon:49"><vh>fn gh_repo_flag</vh></v>
+    <v t="cub.1786725356.346248974.5::f-anon:65"><vh>fn gh_pr_list</vh></v>
+    <v t="cub.1786725356.346248974.5::f-anon:79"><vh>fn gh_issue_list</vh></v>
+    <v t="cub.1786725356.346248974.5::f-anon:84"><vh>fn gh_pr_view</vh></v>
+    <v t="cub.1786725356.346248974.5::f-anon:89"><vh>fn gh_issue_view</vh></v>
+    <v t="cub.1786725356.346248974.5::f-anon:94"><vh>fn gh_parse_url</vh></v>
+    <v t="cub.1786725356.346248974.5::f-anon:99"><vh>fn gh_view_url</vh></v>
+    <v t="cub.1786725356.346248974.5::f-anon:118"><vh>fn available_commands</vh></v>
+    <v t="cub.1786725356.346248974.5::f-anon:140"><vh>fn gh_import_url</vh></v>
+    <v t="cub.1786725356.346248974.5::f-anon:159"><vh>fn gh_pr_create</vh></v>
+    <v t="cub.1786725356.346248974.5::f-anon:164"><vh>fn gh_issue_create</vh></v>
+    <v t="cub.1786725356.346248974.5::f-anon:169"><vh>fn import_prs_and_issues</vh></v>
   </v>
 </vnodes>
 <tnodes>
@@ -41,15 +40,14 @@
 //
 // COMMANDS maps the functions meant to be exposed as runnable commands to
 // a one-line description of what running them does, shown alongside each
-// in the palette -- everything else here (shq, get_variables,
-// gh_repo_flag, gh_parse_url, gh_view_url, and the functions needing more
-// than `doc`/`target`) is a library helper, callable from other scripts or
-// the REPL but not listed for direct invocation. Every listed function
-// takes exactly `(doc, target)` -- `target` is a `Node` for whatever was
-// selected when the command was run (the current position), with
-// `.h`/`.b`/`.gnx`/etc. straight away, no `doc.node(...)` needed first.
-// Most below don't happen to need it, but the palette always passes it
-// regardless.
+// in the palette -- everything else here (shq, gh_repo_flag, gh_parse_url,
+// gh_view_url, and the functions needing more than `doc`/`target`) is a
+// library helper, callable from other scripts or the REPL but not listed
+// for direct invocation. Every listed function takes exactly `(doc,
+// target)` -- `target` is a `Node` for whatever was selected when the
+// command was run (the current position), with `.h`/`.b`/`.gnx`/etc.
+// straight away, no `doc.node(...)` needed first. Most below don't happen
+// to need it, but the palette always passes it regardless.
 //
 // `gh_import_url` isn't listed here -- it only makes sense when the
 // selected node's body actually is a GitHub issue/PR URL, so it's offered
@@ -73,29 +71,7 @@ const COMMANDS = #{
 @language rhai
 @tabwidth -4
 </t>
-  <t tx="cub.1786725356.346248974.5::f-anon:118">/// Fetches an issue or PR's full details -- including its description --
-/// straight from its GitHub URL, via `gh_parse_url`. The `repo` it parses
-/// out of the URL overrides `doc`'s `@variables` repo, so this works
-/// against a link into any repo regardless of what `sh_in`'s directory
-/// defaults to. Returns `()` (after printing a warning) when `url` isn't a
-/// GitHub issue/PR link; otherwise the returned map also carries `kind`
-/// (`&quot;issue&quot;` or `&quot;pr&quot;`) alongside the usual `number`/`title`/`author`/
-/// `state`/`url`/`body` fields `gh` returns.
-fn gh_view_url(doc, url) {
-    let parsed = gh_parse_url(url);
-    if parsed == () {
-        print(&quot;gh_view_url: not a GitHub issue/PR URL: &quot; + url);
-        return ();
-    }
-    let repo_flag = &quot; --repo &quot; + shq(parsed.repo);
-    let sub = if parsed.kind == &quot;pr&quot; { &quot;pr&quot; } else { &quot;issue&quot; };
-    let item = parse_json(sh_in(doc.dir(), &quot;gh &quot; + sub + &quot; view &quot; + parsed.number.to_string() + &quot; --json number,title,author,state,url,body&quot; + repo_flag).stdout);
-    item.kind = parsed.kind;
-    item
-}
-
-</t>
-  <t tx="cub.1786725356.346248974.5::f-anon:140">/// The palette's dynamic counterpart to `COMMANDS` -- called with the live
+  <t tx="cub.1786725356.346248974.5::f-anon:118">/// The palette's dynamic counterpart to `COMMANDS` -- called with the live
 /// selection to decide which of this script's *conditional* commands
 /// apply right now. Offers `gh_import_url` only when `target`'s body is
 /// already a GitHub issue/PR URL (checked via `gh_parse_url`, the same
@@ -110,7 +86,7 @@ fn available_commands(doc, target) {
 }
 
 </t>
-  <t tx="cub.1786725356.346248974.5::f-anon:159">/// Command: fetches the issue/PR whose URL is `target`'s body and
+  <t tx="cub.1786725356.346248974.5::f-anon:140">/// Command: fetches the issue/PR whose URL is `target`'s body and
 /// overwrites `target` with its title (headline) and state/author/url plus
 /// full description (body) -- point a node's body at a GitHub link, run
 /// this from the action palette, and it turns into that issue/PR's
@@ -129,17 +105,17 @@ fn gh_import_url(doc, target) {
 }
 
 </t>
-  <t tx="cub.1786725356.346248974.5::f-anon:164">fn gh_pr_create(doc, title, body) {
-    sh_in(doc.dir(), &quot;gh pr create --title &quot; + shq(title) + &quot; --body &quot; + shq(body) + gh_repo_flag(doc))
+  <t tx="cub.1786725356.346248974.5::f-anon:159">fn gh_pr_create(doc, target, title, body) {
+    sh_in(doc.dir(), &quot;gh pr create --title &quot; + shq(title) + &quot; --body &quot; + shq(body) + gh_repo_flag(doc, target))
 }
 
 </t>
-  <t tx="cub.1786725356.346248974.5::f-anon:169">fn gh_issue_create(doc, title, body) {
-    sh_in(doc.dir(), &quot;gh issue create --title &quot; + shq(title) + &quot; --body &quot; + shq(body) + gh_repo_flag(doc))
+  <t tx="cub.1786725356.346248974.5::f-anon:164">fn gh_issue_create(doc, target, title, body) {
+    sh_in(doc.dir(), &quot;gh issue create --title &quot; + shq(title) + &quot; --body &quot; + shq(body) + gh_repo_flag(doc, target))
 }
 
 </t>
-  <t tx="cub.1786725356.346248974.5::f-anon:195">/// Imports open PRs and issues into `Imports/PRs` and `Imports/Issues`,
+  <t tx="cub.1786725356.346248974.5::f-anon:169">/// Imports open PRs and issues into `Imports/PRs` and `Imports/Issues`,
 /// one node per item -- the same shape as the `@action Import PRs and
 /// issues` demo in demos/scripting.leo, factored out so other scripts can
 /// call it instead of duplicating the fetch/ensure loop. `target` isn't
@@ -176,43 +152,29 @@ fn sh_in(dir, cmd) {
 }
 
 </t>
-  <t tx="cub.1786725356.346248974.5::f-anon:49">/// Reads the `@variables` node's children into a map, keyed by headline
-/// with each body (trimmed) as the value -- e.g. a child headlined `repo`
-/// with body `leo-editor/leo-editor` becomes `get_variables(doc).repo`. Missing
-/// `@variables` or an empty body just means the map is missing that key;
-/// callers decide what &quot;unset&quot; means for them.
-fn get_variables(doc) {
-    let vars = #{};
-    for child in doc.ensure(&quot;@variables&quot;).children() {
-        let value = child.b;
-        value.trim();
-        vars[child.h] = value;
-    }
-    vars
-}
-
-</t>
-  <t tx="cub.1786725356.346248974.5::f-anon:65">/// The `gh --repo` flag to append to a command, driven by the `repo`
-/// `@variables` entry (e.g. `leo-editor/leo-editor`). Empty when unset, so
-/// `gh` falls back to its default: the remote of the directory `sh_in`
-/// runs it in.
-fn gh_repo_flag(doc) {
-    let vars = get_variables(doc);
-    if vars.contains(&quot;repo&quot;) &amp;&amp; vars.repo != &quot;&quot; {
-        &quot; --repo &quot; + shq(vars.repo)
-    } else {
+  <t tx="cub.1786725356.346248974.5::f-anon:49">/// The `gh --repo` flag to append to a command, driven by the `repo`
+/// `@variables` setting nearest `target` (`cub::variable` walks `target`
+/// and its ancestors, so different subtrees in the same outline can each
+/// target a different repo -- see docs/workflows/scripting.md). Empty when
+/// unset anywhere in reach, so `gh` falls back to its own default: the
+/// remote of the directory `sh_in` runs it in.
+fn gh_repo_flag(doc, target) {
+    let repo = cub::variable(target, &quot;repo&quot;);
+    if repo == () || repo == &quot;&quot; {
         &quot;&quot;
+    } else {
+        &quot; --repo &quot; + shq(repo)
     }
 }
 
 </t>
-  <t tx="cub.1786725356.346248974.5::f-anon:79">/// Also returns the parsed list, for `import_prs_and_issues` (or another
+  <t tx="cub.1786725356.346248974.5::f-anon:65">/// Also returns the parsed list, for `import_prs_and_issues` (or another
 /// script) to reuse -- but a command's return value never reaches the
 /// output panel (only `print()` output does), so this prints one line per
 /// PR itself, unlike a pure library helper, to actually show something
 /// when run directly from the palette.
 fn gh_pr_list(doc, target) {
-    let prs = parse_json(sh_in(doc.dir(), &quot;gh pr list --json number,title,author,state,url&quot; + gh_repo_flag(doc)).stdout);
+    let prs = parse_json(sh_in(doc.dir(), &quot;gh pr list --json number,title,author,state,url&quot; + gh_repo_flag(doc, target)).stdout);
     for pr in prs {
         print(&quot;#&quot; + pr.number + &quot; &quot; + pr.title + &quot; -- &quot; + pr.state + &quot; · &quot; + pr.author.login + &quot; · &quot; + pr.url);
     }
@@ -220,9 +182,9 @@ fn gh_pr_list(doc, target) {
 }
 
 </t>
-  <t tx="cub.1786725356.346248974.5::f-anon:84">/// See `gh_pr_list` -- same reasoning, same shape, for issues instead.
+  <t tx="cub.1786725356.346248974.5::f-anon:79">/// See `gh_pr_list` -- same reasoning, same shape, for issues instead.
 fn gh_issue_list(doc, target) {
-    let issues = parse_json(sh_in(doc.dir(), &quot;gh issue list --json number,title,author,state,url&quot; + gh_repo_flag(doc)).stdout);
+    let issues = parse_json(sh_in(doc.dir(), &quot;gh issue list --json number,title,author,state,url&quot; + gh_repo_flag(doc, target)).stdout);
     for issue in issues {
         print(&quot;#&quot; + issue.number + &quot; &quot; + issue.title + &quot; -- &quot; + issue.state + &quot; · &quot; + issue.author.login + &quot; · &quot; + issue.url);
     }
@@ -230,17 +192,17 @@ fn gh_issue_list(doc, target) {
 }
 
 </t>
-  <t tx="cub.1786725356.346248974.5::f-anon:89">fn gh_pr_view(doc, number) {
-    parse_json(sh_in(doc.dir(), &quot;gh pr view &quot; + number.to_string() + &quot; --json number,title,author,state,url,body&quot; + gh_repo_flag(doc)).stdout)
+  <t tx="cub.1786725356.346248974.5::f-anon:84">fn gh_pr_view(doc, target, number) {
+    parse_json(sh_in(doc.dir(), &quot;gh pr view &quot; + number.to_string() + &quot; --json number,title,author,state,url,body&quot; + gh_repo_flag(doc, target)).stdout)
 }
 
 </t>
-  <t tx="cub.1786725356.346248974.5::f-anon:94">fn gh_issue_view(doc, number) {
-    parse_json(sh_in(doc.dir(), &quot;gh issue view &quot; + number.to_string() + &quot; --json number,title,author,state,url,body&quot; + gh_repo_flag(doc)).stdout)
+  <t tx="cub.1786725356.346248974.5::f-anon:89">fn gh_issue_view(doc, target, number) {
+    parse_json(sh_in(doc.dir(), &quot;gh issue view &quot; + number.to_string() + &quot; --json number,title,author,state,url,body&quot; + gh_repo_flag(doc, target)).stdout)
 }
 
 </t>
-  <t tx="cub.1786725356.346248974.5::f-anon:99">/// Parses a GitHub issue or PR URL -- e.g.
+  <t tx="cub.1786725356.346248974.5::f-anon:94">/// Parses a GitHub issue or PR URL -- e.g.
 /// `https://github.com/owner/repo/issues/123` or
 /// `https://github.com/owner/repo/pull/123`, including one with a trailing
 /// path segment, query string, or `#anchor` (`.../pull/123/files`,
@@ -256,6 +218,28 @@ fn gh_parse_url(url) {
     }
     let kind = if caps[3] == &quot;pull&quot; { &quot;pr&quot; } else { &quot;issue&quot; };
     #{ repo: caps[1] + &quot;/&quot; + caps[2], kind: kind, number: parse_int(caps[4]) }
+}
+
+</t>
+  <t tx="cub.1786725356.346248974.5::f-anon:99">/// Fetches an issue or PR's full details -- including its description --
+/// straight from its GitHub URL, via `gh_parse_url`. The `repo` it parses
+/// out of the URL overrides `doc`'s `@variables` repo, so this works
+/// against a link into any repo regardless of what `sh_in`'s directory
+/// defaults to. Returns `()` (after printing a warning) when `url` isn't a
+/// GitHub issue/PR link; otherwise the returned map also carries `kind`
+/// (`&quot;issue&quot;` or `&quot;pr&quot;`) alongside the usual `number`/`title`/`author`/
+/// `state`/`url`/`body` fields `gh` returns.
+fn gh_view_url(doc, url) {
+    let parsed = gh_parse_url(url);
+    if parsed == () {
+        print(&quot;gh_view_url: not a GitHub issue/PR URL: &quot; + url);
+        return ();
+    }
+    let repo_flag = &quot; --repo &quot; + shq(parsed.repo);
+    let sub = if parsed.kind == &quot;pr&quot; { &quot;pr&quot; } else { &quot;issue&quot; };
+    let item = parse_json(sh_in(doc.dir(), &quot;gh &quot; + sub + &quot; view &quot; + parsed.number.to_string() + &quot; --json number,title,author,state,url,body&quot; + repo_flag).stdout);
+    item.kind = parsed.kind;
+    item
 }
 
 </t>

@@ -127,6 +127,97 @@ fn cub_run_walks_the_tree_with_roots_children_parent_and_path() {
 }
 
 #[test]
+fn cub_run_node_parents_walks_ancestors_nearest_first_ending_at_the_root() {
+    let leo_path = temp_path("rhai_run_parents.leo");
+    let _ = fs::remove_file(&leo_path);
+    LeoDocument::new("Root").save_new(&leo_path).unwrap();
+
+    let script_path = temp_path("rhai_run_parents.rhai");
+    let escaped_path = leo_path.display().to_string().replace('\\', "\\\\");
+    fs::write(
+        &script_path,
+        format!(
+            r#"
+            let doc = open("{escaped_path}");
+            let root = doc.node(doc.ensure("Root").gnx);
+            let leaf = doc.node(doc.ensure("Root/A/B/Leaf").gnx);
+
+            let chain = leaf.parents();
+            assert_eq(chain.len(), 4);
+            assert_eq(chain[0].h, "Leaf");
+            assert_eq(chain[1].h, "B");
+            assert_eq(chain[2].h, "A");
+            assert_eq(chain[3].h, "Root");
+
+            // A root's own chain is just itself -- `parent()` on a root
+            // wraps "", which ends the walk immediately.
+            assert_eq(root.parents().len(), 1);
+            assert_eq(root.parents()[0].h, "Root");
+            print("ok");
+            "#
+        ),
+    )
+    .unwrap();
+
+    let output = run_cub(&["run", script_path.to_str().unwrap()]);
+    assert!(
+        output.status.success(),
+        "cub run failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("ok"));
+}
+
+#[test]
+fn cub_run_cub_variable_prefers_the_nearest_scoped_at_variables_over_a_global_one() {
+    let leo_path = temp_path("rhai_run_cub_variable.leo");
+    let _ = fs::remove_file(&leo_path);
+    LeoDocument::new("Root").save_new(&leo_path).unwrap();
+
+    let script_path = temp_path("rhai_run_cub_variable.rhai");
+    let escaped_path = leo_path.display().to_string().replace('\\', "\\\\");
+    fs::write(
+        &script_path,
+        format!(
+            r#"
+            let doc = open("{escaped_path}");
+
+            // A global fallback: a top-level root literally headlined
+            // "@variables", body-form setting.
+            let global_repo = doc.ensure("@variables/repo");
+            global_repo.b = "global/repo";
+
+            // A subtree with its own scoped @variables, headline `key =
+            // value` form -- nearer than the global one, so it should win
+            // for anything under it.
+            doc.ensure("Scoped/@variables/repo = owner\\/scoped-repo");
+            let inner = doc.node(doc.ensure("Scoped/Sub/Leaf").gnx);
+
+            // A sibling subtree with no @variables of its own at all --
+            // should fall through to the global one.
+            let outer = doc.node(doc.ensure("Unscoped/Leaf").gnx);
+
+            assert_eq(cub::variable(inner, "repo"), "owner/scoped-repo");
+            assert_eq(cub::variable(outer, "repo"), "global/repo");
+            assert(cub::variable(inner, "does_not_exist") == ());
+            print("ok");
+            "#
+        ),
+    )
+    .unwrap();
+
+    let output = run_cub(&["run", script_path.to_str().unwrap()]);
+    assert!(
+        output.status.success(),
+        "cub run failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("ok"));
+}
+
+#[test]
 fn cub_run_reads_and_writes_nodes_through_the_node_wrapper() {
     let leo_path = temp_path("rhai_run_node.leo");
     let _ = fs::remove_file(&leo_path);

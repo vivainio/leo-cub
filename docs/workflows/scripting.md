@@ -192,39 +192,40 @@ session.
 
 `@variables` isn't a directive `cub` treats specially -- it's a plain
 headline convention for settings a script should read instead of
-hard-coding. Put one node headlined `@variables` in the outline, with one
-child per setting: the child's headline is the name, its body is the value.
+hard-coding. Put a node headlined `@variables` in the outline, with one
+child per setting, either shape:
 
 ```text
 @variables
   repo
     leo-editor/leo-editor
+  repo = leo-editor/leo-editor
 ```
 
-A script reads it with `doc.ensure()` and `children()`, same as any other
-lookup:
+(a child headlined `name` with the value in its body, or a child headlined
+`name = value` directly -- both are read the same way, and can be mixed in
+one `@variables` node).
+
+Read a setting with `cub::variable(target, name)` -- see the [API
+reference](../reference/rhai-api.md#cub-conventions):
 
 ```rust
-fn get_variables(doc) {
-    let vars = #{};
-    for child in doc.ensure("@variables").children() {
-        let value = child.b;
-        value.trim();
-        vars[child.h] = value;
-    }
-    vars
-}
+let repo = cub::variable(target, "repo");   // "leo-editor/leo-editor", or () if unset
 ```
 
-`doc.ensure("@variables")` returns an empty node (no children) when the tree
-is missing, so `get_variables()` just yields `#{}` rather than throwing --
-callers decide what an absent key should default to.
+It walks `target` and its ancestors, nearest first, so `@variables` can live
+at the outline root for one setting shared by the whole file, or nested
+under a particular subtree to scope it there instead -- letting different
+parts of the same outline set the same name (`repo`, say) to different
+values. A subtree's own `@variables` wins over an outline-wide one further
+out; an outline-wide `@variables` (a root of its own, not nested under
+anything) still works as a fallback when nothing closer sets the name.
 
-`scripts/github.rhai` uses exactly this pattern for a `repo` variable: when
-`@variables/repo` is set to `owner/name`, every `gh` command it runs adds
-` --repo owner/name`, targeting that repository instead of the one implied by
-the current directory. Leave `@variables` (or the `repo` child) absent and
-`gh` falls back to its own default.
+`scripts/github.rhai` uses this for its `repo` setting: when `@variables/repo`
+is set to `owner/name` somewhere in reach of the selected node, every `gh`
+command it runs adds ` --repo owner/name`, targeting that repository instead
+of the one implied by the current directory. Leave `@variables` (or the
+`repo` child) absent entirely and `gh` falls back to its own default.
 
 `@variables` suits settings that belong to one outline. For a value that
 changes per invocation instead -- which outline to open, a one-off flag --

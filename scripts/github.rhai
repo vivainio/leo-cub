@@ -12,15 +12,14 @@
 //
 // COMMANDS maps the functions meant to be exposed as runnable commands to
 // a one-line description of what running them does, shown alongside each
-// in the palette -- everything else here (shq, get_variables,
-// gh_repo_flag, gh_parse_url, gh_view_url, and the functions needing more
-// than `doc`/`target`) is a library helper, callable from other scripts or
-// the REPL but not listed for direct invocation. Every listed function
-// takes exactly `(doc, target)` -- `target` is a `Node` for whatever was
-// selected when the command was run (the current position), with
-// `.h`/`.b`/`.gnx`/etc. straight away, no `doc.node(...)` needed first.
-// Most below don't happen to need it, but the palette always passes it
-// regardless.
+// in the palette -- everything else here (shq, gh_repo_flag, gh_parse_url,
+// gh_view_url, and the functions needing more than `doc`/`target`) is a
+// library helper, callable from other scripts or the REPL but not listed
+// for direct invocation. Every listed function takes exactly `(doc,
+// target)` -- `target` is a `Node` for whatever was selected when the
+// command was run (the current position), with `.h`/`.b`/`.gnx`/etc.
+// straight away, no `doc.node(...)` needed first. Most below don't happen
+// to need it, but the palette always passes it regardless.
 //
 // `gh_import_url` isn't listed here -- it only makes sense when the
 // selected node's body actually is a GitHub issue/PR URL, so it's offered
@@ -57,33 +56,19 @@ fn sh_in(dir, cmd) {
     sh(cmd, #{ cwd: dir })
 }
 
-//@ fn get_variables
-/// Reads the `@variables` node's children into a map, keyed by headline
-/// with each body (trimmed) as the value -- e.g. a child headlined `repo`
-/// with body `leo-editor/leo-editor` becomes `get_variables(doc).repo`. Missing
-/// `@variables` or an empty body just means the map is missing that key;
-/// callers decide what "unset" means for them.
-fn get_variables(doc) {
-    let vars = #{};
-    for child in doc.ensure("@variables").children() {
-        let value = child.b;
-        value.trim();
-        vars[child.h] = value;
-    }
-    vars
-}
-
 //@ fn gh_repo_flag
 /// The `gh --repo` flag to append to a command, driven by the `repo`
-/// `@variables` entry (e.g. `leo-editor/leo-editor`). Empty when unset, so
-/// `gh` falls back to its default: the remote of the directory `sh_in`
-/// runs it in.
-fn gh_repo_flag(doc) {
-    let vars = get_variables(doc);
-    if vars.contains("repo") && vars.repo != "" {
-        " --repo " + shq(vars.repo)
-    } else {
+/// `@variables` setting nearest `target` (`cub::variable` walks `target`
+/// and its ancestors, so different subtrees in the same outline can each
+/// target a different repo -- see docs/workflows/scripting.md). Empty when
+/// unset anywhere in reach, so `gh` falls back to its own default: the
+/// remote of the directory `sh_in` runs it in.
+fn gh_repo_flag(doc, target) {
+    let repo = cub::variable(target, "repo");
+    if repo == () || repo == "" {
         ""
+    } else {
+        " --repo " + shq(repo)
     }
 }
 
@@ -94,7 +79,7 @@ fn gh_repo_flag(doc) {
 /// PR itself, unlike a pure library helper, to actually show something
 /// when run directly from the palette.
 fn gh_pr_list(doc, target) {
-    let prs = parse_json(sh_in(doc.dir(), "gh pr list --json number,title,author,state,url" + gh_repo_flag(doc)).stdout);
+    let prs = parse_json(sh_in(doc.dir(), "gh pr list --json number,title,author,state,url" + gh_repo_flag(doc, target)).stdout);
     for pr in prs {
         print("#" + pr.number + " " + pr.title + " -- " + pr.state + " · " + pr.author.login + " · " + pr.url);
     }
@@ -104,7 +89,7 @@ fn gh_pr_list(doc, target) {
 //@ fn gh_issue_list
 /// See `gh_pr_list` -- same reasoning, same shape, for issues instead.
 fn gh_issue_list(doc, target) {
-    let issues = parse_json(sh_in(doc.dir(), "gh issue list --json number,title,author,state,url" + gh_repo_flag(doc)).stdout);
+    let issues = parse_json(sh_in(doc.dir(), "gh issue list --json number,title,author,state,url" + gh_repo_flag(doc, target)).stdout);
     for issue in issues {
         print("#" + issue.number + " " + issue.title + " -- " + issue.state + " · " + issue.author.login + " · " + issue.url);
     }
@@ -112,13 +97,13 @@ fn gh_issue_list(doc, target) {
 }
 
 //@ fn gh_pr_view
-fn gh_pr_view(doc, number) {
-    parse_json(sh_in(doc.dir(), "gh pr view " + number.to_string() + " --json number,title,author,state,url,body" + gh_repo_flag(doc)).stdout)
+fn gh_pr_view(doc, target, number) {
+    parse_json(sh_in(doc.dir(), "gh pr view " + number.to_string() + " --json number,title,author,state,url,body" + gh_repo_flag(doc, target)).stdout)
 }
 
 //@ fn gh_issue_view
-fn gh_issue_view(doc, number) {
-    parse_json(sh_in(doc.dir(), "gh issue view " + number.to_string() + " --json number,title,author,state,url,body" + gh_repo_flag(doc)).stdout)
+fn gh_issue_view(doc, target, number) {
+    parse_json(sh_in(doc.dir(), "gh issue view " + number.to_string() + " --json number,title,author,state,url,body" + gh_repo_flag(doc, target)).stdout)
 }
 
 //@ fn gh_parse_url
@@ -197,13 +182,13 @@ fn gh_import_url(doc, target) {
 }
 
 //@ fn gh_pr_create
-fn gh_pr_create(doc, title, body) {
-    sh_in(doc.dir(), "gh pr create --title " + shq(title) + " --body " + shq(body) + gh_repo_flag(doc))
+fn gh_pr_create(doc, target, title, body) {
+    sh_in(doc.dir(), "gh pr create --title " + shq(title) + " --body " + shq(body) + gh_repo_flag(doc, target))
 }
 
 //@ fn gh_issue_create
-fn gh_issue_create(doc, title, body) {
-    sh_in(doc.dir(), "gh issue create --title " + shq(title) + " --body " + shq(body) + gh_repo_flag(doc))
+fn gh_issue_create(doc, target, title, body) {
+    sh_in(doc.dir(), "gh issue create --title " + shq(title) + " --body " + shq(body) + gh_repo_flag(doc, target))
 }
 
 //@ fn import_prs_and_issues
