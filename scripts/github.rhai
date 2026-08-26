@@ -88,13 +88,27 @@ fn gh_repo_flag(doc) {
 }
 
 //@ fn gh_pr_list
+/// Also returns the parsed list, for `import_prs_and_issues` (or another
+/// script) to reuse -- but a command's return value never reaches the
+/// output panel (only `print()` output does), so this prints one line per
+/// PR itself, unlike a pure library helper, to actually show something
+/// when run directly from the palette.
 fn gh_pr_list(doc, target) {
-    parse_json(sh_in(doc.dir(), "gh pr list --json number,title,author,state,url" + gh_repo_flag(doc)).stdout)
+    let prs = parse_json(sh_in(doc.dir(), "gh pr list --json number,title,author,state,url" + gh_repo_flag(doc)).stdout);
+    for pr in prs {
+        print("#" + pr.number + " " + pr.title + " -- " + pr.state + " · " + pr.author.login + " · " + pr.url);
+    }
+    prs
 }
 
 //@ fn gh_issue_list
+/// See `gh_pr_list` -- same reasoning, same shape, for issues instead.
 fn gh_issue_list(doc, target) {
-    parse_json(sh_in(doc.dir(), "gh issue list --json number,title,author,state,url" + gh_repo_flag(doc)).stdout)
+    let issues = parse_json(sh_in(doc.dir(), "gh issue list --json number,title,author,state,url" + gh_repo_flag(doc)).stdout);
+    for issue in issues {
+        print("#" + issue.number + " " + issue.title + " -- " + issue.state + " · " + issue.author.login + " · " + issue.url);
+    }
+    issues
 }
 
 //@ fn gh_pr_view

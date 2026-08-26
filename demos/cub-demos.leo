@@ -206,13 +206,27 @@ fn gh_repo_flag(doc) {
 }
 
 </t>
-  <t tx="cub.1786725356.346248974.5::f-anon:79">fn gh_pr_list(doc, target) {
-    parse_json(sh_in(doc.dir(), &quot;gh pr list --json number,title,author,state,url&quot; + gh_repo_flag(doc)).stdout)
+  <t tx="cub.1786725356.346248974.5::f-anon:79">/// Also returns the parsed list, for `import_prs_and_issues` (or another
+/// script) to reuse -- but a command's return value never reaches the
+/// output panel (only `print()` output does), so this prints one line per
+/// PR itself, unlike a pure library helper, to actually show something
+/// when run directly from the palette.
+fn gh_pr_list(doc, target) {
+    let prs = parse_json(sh_in(doc.dir(), &quot;gh pr list --json number,title,author,state,url&quot; + gh_repo_flag(doc)).stdout);
+    for pr in prs {
+        print(&quot;#&quot; + pr.number + &quot; &quot; + pr.title + &quot; -- &quot; + pr.state + &quot; · &quot; + pr.author.login + &quot; · &quot; + pr.url);
+    }
+    prs
 }
 
 </t>
-  <t tx="cub.1786725356.346248974.5::f-anon:84">fn gh_issue_list(doc, target) {
-    parse_json(sh_in(doc.dir(), &quot;gh issue list --json number,title,author,state,url&quot; + gh_repo_flag(doc)).stdout)
+  <t tx="cub.1786725356.346248974.5::f-anon:84">/// See `gh_pr_list` -- same reasoning, same shape, for issues instead.
+fn gh_issue_list(doc, target) {
+    let issues = parse_json(sh_in(doc.dir(), &quot;gh issue list --json number,title,author,state,url&quot; + gh_repo_flag(doc)).stdout);
+    for issue in issues {
+        print(&quot;#&quot; + issue.number + &quot; &quot; + issue.title + &quot; -- &quot; + issue.state + &quot; · &quot; + issue.author.login + &quot; · &quot; + issue.url);
+    }
+    issues
 }
 
 </t>
