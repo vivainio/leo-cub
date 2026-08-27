@@ -25,10 +25,18 @@
     <v t="cub.1786725356.346248974.5::f-anon:159"><vh>fn gh_pr_create</vh></v>
     <v t="cub.1786725356.346248974.5::f-anon:164"><vh>fn gh_issue_create</vh></v>
     <v t="cub.1786725356.346248974.5::f-anon:169"><vh>fn import_prs_and_issues</vh></v>
+    <v t="cub.1786725356.346248974.5::f-anon:230"><vh>fn jira_parse_headline</vh></v>
+    <v t="cub.1786725356.346248974.5::f-anon:246"><vh>fn zaira_run_json</vh></v>
+    <v t="cub.1786725356.346248974.5::f-anon:257"><vh>fn zaira_view</vh></v>
+    <v t="cub.1786725356.346248974.5::f-anon:266"><vh>fn jira_populate_children</vh></v>
+    <v t="cub.1786725356.346248974.5::f-anon:285"><vh>fn zaira_search_text</vh></v>
+    <v t="cub.1786725356.346248974.5::f-anon:301"><vh>fn jira</vh></v>
+    <v t="cub.1786725356.346248974.5::f-anon:347"><vh>fn zaira_my_list</vh></v>
+    <v t="cub.1786725356.346248974.5::f-anon:363"><vh>fn import_my_tickets</vh></v>
   </v>
 </vnodes>
 <tnodes>
-  <t tx="cub.1786725356.346248974.5">// GitHub CLI (`gh`) wrappers for cub's rhai Doc API.
+  <t tx="cub.1786725356.346248974.5">// GitHub CLI (`gh`) and Jira CLI (`zaira`) wrappers for cub's rhai Doc API.
 //
 // An outline node with headline `@import scripts/github.rhai` (path
 // resolved relative to the open .leo file's own directory) makes every
@@ -36,18 +44,21 @@
 // `gh` commands run through `sh_in(doc, ...)`, which `cd`s into the open
 // .leo file's directory first, so these assume that's inside (or
 // dominated by) a git repo with a GitHub remote and an authenticated `gh`
-// (`gh auth status`).
+// (`gh auth status`). `zaira` commands run the same way, and assume
+// `zaira init` has already set up Jira credentials -- see
+// https://github.com/vivainio/zaira.
 //
 // COMMANDS maps the functions meant to be exposed as runnable commands to
 // a one-line description of what running them does, shown alongside each
 // in the palette -- everything else here (shq, gh_repo_flag, gh_parse_url,
-// gh_view_url, and the functions needing more than `doc`/`target`) is a
-// library helper, callable from other scripts or the REPL but not listed
-// for direct invocation. Every listed function takes exactly `(doc,
-// target)` -- `target` is a `Node` for whatever was selected when the
-// command was run (the current position), with `.h`/`.b`/`.gnx`/etc.
-// straight away, no `doc.node(...)` needed first. Most below don't happen
-// to need it, but the palette always passes it regardless.
+// gh_view_url, jira_parse_headline, zaira_run_json, zaira_view, and the functions needing
+// more than `doc`/`target`) is a library helper, callable from other
+// scripts or the REPL but not listed for direct invocation. Every listed
+// function takes exactly `(doc, target)` -- `target` is a `Node` for
+// whatever was selected when the command was run (the current position),
+// with `.h`/`.b`/`.gnx`/etc. straight away, no `doc.node(...)` needed
+// first. Most below don't happen to need it, but the palette always
+// passes it regardless.
 //
 // `gh_import_url` isn't listed here -- it only makes sense when the
 // selected node's body actually is a GitHub issue/PR URL, so it's offered
@@ -55,10 +66,20 @@
 // live selection and unions with COMMANDS. `gh_import_url` itself is the
 // one exception among the always-listed ones too: it reads and overwrites
 // `target` rather than treating it as a fixed drop point like the others.
+// `jira` works the same way for the Jira side, offered instead when the
+// selected node's headline is one of three `@jira` forms (see
+// `jira_parse_headline`): `@jira KEY` -- a Jira issue key like `FOO-123`,
+// optionally followed by free text (`@jira FOO-123 investigate flaky
+// test`) -- replaces the node with that ticket's content; `@jira my` and
+// `@jira search TEXT` instead refresh the node's children with your open
+// tickets or a text search's results, one `@jira KEY: summary` child per
+// match.
 const COMMANDS = #{
     gh_pr_list: &quot;List open PRs into the output panel.&quot;,
     gh_issue_list: &quot;List open issues into the output panel.&quot;,
     import_prs_and_issues: &quot;Import open PRs and issues as outline nodes under Imports/.&quot;,
+    zaira_my_list: &quot;List your open Jira tickets into the output panel.&quot;,
+    import_my_tickets: &quot;Import your open Jira tickets as outline nodes under Imports/Jira.&quot;,
 };
 
 /// Wraps `s` in single quotes for safe interpolation into a `sh -c`
@@ -76,13 +97,24 @@ const COMMANDS = #{
 /// apply right now. Offers `gh_import_url` only when `target`'s body is
 /// already a GitHub issue/PR URL (checked via `gh_parse_url`, the same
 /// parser `gh_import_url` itself uses), since running it on anything else
-/// would just print a warning and do nothing.
+/// would just print a warning and do nothing. Offers `jira` the same
+/// way, keyed off `target`'s headline instead via `jira_parse_headline`.
 fn available_commands(doc, target) {
+    let cmds = #{};
     if gh_parse_url(target.b) != () {
-        #{ gh_import_url: &quot;Fetch the GitHub issue/PR URL in the selected node's body and replace it with that issue/PR's content.&quot; }
-    } else {
-        #{}
+        cmds.gh_import_url = &quot;Fetch the GitHub issue/PR URL in the selected node's body and replace it with that issue/PR's content.&quot;;
     }
+    let jira = jira_parse_headline(target.h);
+    if jira != () {
+        cmds.jira = if jira.kind == &quot;ticket&quot; {
+            &quot;Fetch the Jira ticket named in the selected node's headline (`@jira KEY ...`) and replace it with that ticket's content.&quot;
+        } else if jira.kind == &quot;my&quot; {
+            &quot;Refresh this node's children with your open Jira tickets (`@jira my`).&quot;
+        } else {
+            &quot;Refresh this node's children with Jira search results for \&quot;&quot; + jira.query + &quot;\&quot; (`@jira search ...`).&quot;
+        };
+    }
+    cmds
 }
 
 </t>
@@ -135,6 +167,147 @@ fn import_prs_and_issues(doc, target) {
     }
     print(&quot;imported &quot; + prs.len() + &quot; PR(s) and &quot; + issues.len() + &quot; issue(s)&quot;);
 }
+
+</t>
+  <t tx="cub.1786725356.346248974.5::f-anon:230">/// Parses a `@jira ...` node headline into what it names -- one of three
+/// forms:
+/// - `@jira KEY ...` (e.g. `@jira FOO-123 investigate flaky test`) -- a
+///   single ticket -- into `#{ kind: &quot;ticket&quot;, key: &quot;FOO-123&quot; }`.
+/// - `@jira my` (exactly, nothing after it) -- your open tickets -- into
+///   `#{ kind: &quot;my&quot; }`.
+/// - `@jira search TEXT` -- a free-text search -- into `#{ kind:
+///   &quot;search&quot;, query: &quot;TEXT&quot; }`.
+/// Returns `()` when `h` doesn't match any of these.
+fn jira_parse_headline(h) {
+    let s = h.to_string();
+    s.trim();
+    if s == &quot;@jira my&quot; {
+        return #{ kind: &quot;my&quot; };
+    }
+    let search_caps = regex_captures(&quot;^@jira\\s+search\\s+(.+)$&quot;, s);
+    if search_caps != () {
+        return #{ kind: &quot;search&quot;, query: search_caps[1] };
+    }
+    let ticket_caps = regex_captures(&quot;^@jira\\s+([A-Z][A-Z0-9]*-\\d+)&quot;, s);
+    if ticket_caps == () {
+        return ();
+    }
+    #{ kind: &quot;ticket&quot;, key: ticket_caps[1] }
+}
+
+</t>
+  <t tx="cub.1786725356.346248974.5::f-anon:246">/// Runs a `zaira ... --format json` command and parses its stdout --
+/// checking `code` first so a nonzero exit throws a clear error carrying
+/// `zaira`'s own stderr, instead of leaving `parse_json` to fail on
+/// whatever (often empty) stdout a crash left behind. Worth doing
+/// specifically for `zaira`, unlike `gh` above: `zaira search` has been
+/// observed to crash outright (a Python `AttributeError`) on tickets from
+/// a project where the Priority field is disabled, since it accesses that
+/// field unconditionally rather than checking for it first.
+fn zaira_run_json(doc, cmd) {
+    let result = sh_in(doc.dir(), cmd);
+    if result.code != 0 {
+        throw &quot;`&quot; + cmd + &quot;` failed (exit &quot; + result.code.to_string() + &quot;): &quot; + result.stderr;
+    }
+    parse_json(result.stdout)
+}
+
+</t>
+  <t tx="cub.1786725356.346248974.5::f-anon:257">/// Fetches a Jira ticket's key/summary/etc. as JSON via `zaira get KEY
+/// --format json` -- used only for the fields `jira` needs to build a
+/// node headline (`key`, `summary`). `zaira` resolves Jira
+/// credentials and the ticket's project from its own config (`zaira
+/// init`), so unlike `gh_repo_flag` there's no per-outline `--repo`-style
+/// override here.
+fn zaira_view(doc, key) {
+    zaira_run_json(doc, &quot;zaira get &quot; + shq(key) + &quot; --format json&quot;)
+}
+
+</t>
+  <t tx="cub.1786725356.346248974.5::f-anon:266">/// Ensures one child under `parent_path` per ticket in `tickets` --
+/// headlined `@jira KEY: summary` so each is individually recognized by
+/// `jira_parse_headline` (and refreshable into full content with `jira`).
+/// Shared by `import_my_tickets` and `jira`'s `@jira my` / `@jira
+/// search ...` handling.
+fn jira_populate_children(doc, parent_path, tickets) {
+    for t in tickets {
+        let n = doc.ensure(parent_path + &quot;/@jira &quot; + t.key + &quot;: &quot; + t.summary);
+        n.b = t.status + &quot; · &quot; + t.assignee;
+    }
+}
+
+</t>
+  <t tx="cub.1786725356.346248974.5::f-anon:285">/// Free-text ticket search via `zaira search TEXT --format json` -- same
+/// shape as `zaira_my_list` (prints one line per match as well as
+/// returning the parsed list), for `jira`'s `@jira search ...` handling
+/// or another script to reuse.
+fn zaira_search_text(doc, text) {
+    let tickets = zaira_run_json(doc, &quot;zaira search &quot; + shq(text) + &quot; --format json&quot;);
+    for t in tickets {
+        print(t.key + &quot; &quot; + t.summary + &quot; -- &quot; + t.status + &quot; · &quot; + t.assignee);
+    }
+    tickets
+}
+
+</t>
+  <t tx="cub.1786725356.346248974.5::f-anon:301">/// Command, dispatching on `jira_parse_headline(target.h)`:
+/// - `@jira KEY ...` -- overwrites `target`'s headline with the ticket's
+///   key/summary (the `@jira KEY` prefix is kept so the node stays
+///   recognized by this script after import) and splits its content into
+///   three children instead of one flat body: `Meta` (key/type/status/
+///   priority/assignee/reporter/dates/url), `Description` (the ticket
+///   description, `zaira`'s own markdown conversion of it), and `Comments`
+///   (one `#N author (date)` child per comment, oldest first, numbered so
+///   same-author-same-day comments don't collide as identical headlines).
+///   `target.b` itself is left empty -- it's now just a container.
+/// - `@jira my` / `@jira search TEXT` -- leaves `target` itself alone and
+///   instead refreshes its children (via `jira_populate_children`) with
+///   one `@jira KEY: summary` node per ticket assigned to you, or
+///   matching the search.
+/// Leaves `target` untouched (past a printed warning) when its headline
+/// doesn't match any `@jira` form.
+fn jira(doc, target) {
+    let parsed = jira_parse_headline(target.h);
+    if parsed == () {
+        print(&quot;jira: headline isn't '@jira KEY', '@jira my', or '@jira search ...': &quot; + target.h);
+        return;
+    }
+    if parsed.kind == &quot;ticket&quot; {
+        let item = zaira_view(doc, parsed.key);
+        target.h = &quot;@jira &quot; + item.key + &quot;: &quot; + item.summary;
+        target.b = &quot;&quot;;
+        let path = target.path();
+        let meta = doc.ensure(path + &quot;/Meta&quot;);
+        meta.b = &quot;key: &quot; + item.key + &quot;\n&quot;
+            + &quot;summary: &quot; + item.summary + &quot;\n&quot;
+            + &quot;type: &quot; + item.issuetype + &quot;\n&quot;
+            + &quot;status: &quot; + item.status + &quot;\n&quot;
+            + &quot;priority: &quot; + item.priority + &quot;\n&quot;
+            + &quot;assignee: &quot; + item.assignee + &quot;\n&quot;
+            + &quot;reporter: &quot; + item.reporter + &quot;\n&quot;
+            + &quot;created: &quot; + item.created + &quot;\n&quot;
+            + &quot;updated: &quot; + item.updated + &quot;\n&quot;
+            + &quot;url: &quot; + item.url;
+        let description = doc.ensure(path + &quot;/Description&quot;);
+        description.b = &quot;@language markdown\n&quot; + item.description;
+        let comment_count = item.comments.len();
+        for i in 0..comment_count {
+            let c = item.comments[i];
+            let label = &quot;#&quot; + (i + 1).to_string() + &quot; &quot; + c.author + &quot; (&quot; + c.created.sub_string(0, 10) + &quot;)&quot;;
+            let n = doc.ensure(path + &quot;/Comments/&quot; + label);
+            n.b = &quot;@language markdown\n&quot; + c.body;
+        }
+        return;
+    }
+    let tickets = if parsed.kind == &quot;my&quot; {
+        zaira_my_list(doc, target)
+    } else {
+        zaira_search_text(doc, parsed.query)
+    };
+    jira_populate_children(doc, target.path(), tickets);
+    print(&quot;jira: refreshed &quot; + tickets.len() + &quot; ticket(s) under \&quot;&quot; + target.h + &quot;\&quot;&quot;);
+}
+
 </t>
   <t tx="cub.1786725356.346248974.5::f-anon:33">fn shq(s) {
     let escaped = s.to_string();
@@ -142,6 +315,34 @@ fn import_prs_and_issues(doc, target) {
     &quot;'&quot; + escaped + &quot;'&quot;
 }
 
+</t>
+  <t tx="cub.1786725356.346248974.5::f-anon:347">/// Also returns the parsed list, for `import_my_tickets` (or another
+/// script) to reuse -- but a command's return value never reaches the
+/// output panel (only `print()` output does), so this prints one line per
+/// ticket itself, unlike a pure library helper, to actually show
+/// something when run directly from the palette. Uses the same JQL
+/// `zaira my` itself uses for tickets assigned to you.
+fn zaira_my_list(doc, target) {
+    let jql = &quot;assignee = currentUser() AND status NOT IN (Done, Closed, Resolved, Disposal, Rejected) ORDER BY updated DESC&quot;;
+    let tickets = zaira_run_json(doc, &quot;zaira search --jql &quot; + shq(jql) + &quot; --format json&quot;);
+    for t in tickets {
+        print(t.key + &quot; &quot; + t.summary + &quot; -- &quot; + t.status + &quot; · &quot; + t.assignee);
+    }
+    tickets
+}
+
+</t>
+  <t tx="cub.1786725356.346248974.5::f-anon:363">/// Imports your open Jira tickets into `Imports/Jira`, one node per
+/// ticket, headlined so it's immediately recognized by
+/// `jira_parse_headline` (and refreshable later with `jira`) -- same
+/// shape as `import_prs_and_issues`. `target` isn't used -- tickets
+/// always land under the same fixed path regardless of what was selected
+/// -- but every COMMANDS function still takes it (see the file header).
+fn import_my_tickets(doc, target) {
+    let tickets = zaira_my_list(doc, target);
+    jira_populate_children(doc, &quot;Imports/Jira&quot;, tickets);
+    print(&quot;imported &quot; + tickets.len() + &quot; Jira ticket(s)&quot;);
+}
 </t>
   <t tx="cub.1786725356.346248974.5::f-anon:40">/// Runs `cmd` with `dir` as its working directory -- `sh()` itself always
 /// runs relative to `cub`'s own working directory, so this is how a script
