@@ -36,6 +36,15 @@ struct Cli {
     #[cfg(feature = "tui")]
     #[arg(long, requires = "file")]
     no_derived: bool,
+    /// Append a timestamped trace of key presses, palette lookups, and
+    /// script/action runs to this file as they happen -- for diagnosing a
+    /// TUI session that looks frozen, since the raw-mode screen itself
+    /// can't show anything while stuck. `tail -f` it from another
+    /// terminal; each line is flushed immediately so the last line
+    /// written is always the last thing that actually happened.
+    #[cfg(feature = "tui")]
+    #[arg(long, requires = "file", value_name = "FILE")]
+    debug: Option<PathBuf>,
     /// Extra arguments passed to a script run via the shorthand, available
     /// to it as the ARGS array. Ignored when `file` is a `.leo` outline.
     #[cfg(feature = "tui")]
@@ -119,6 +128,11 @@ enum Command {
         /// Show only the hierarchy stored directly in the .leo XML.
         #[arg(long)]
         no_derived: bool,
+        /// Append a timestamped trace of key presses, palette lookups, and
+        /// script/action runs to this file as they happen -- see the
+        /// top-level `--debug` for why.
+        #[arg(long, value_name = "FILE")]
+        debug: Option<PathBuf>,
     },
     /// Run a Rhai script.
     #[cfg(feature = "rhai")]
@@ -329,6 +343,7 @@ fn main() -> Result<()> {
         (None, Some(file)) => Command::Tui {
             file,
             no_derived: cli.no_derived,
+            debug: cli.debug,
         },
         (None, None) => {
             Cli::command().print_help()?;
@@ -408,7 +423,11 @@ fn main() -> Result<()> {
         }
         Command::InstallSkills => install::install_skills()?,
         #[cfg(feature = "tui")]
-        Command::Tui { file, no_derived } => tui::run(file, !no_derived)?,
+        Command::Tui {
+            file,
+            no_derived,
+            debug,
+        } => tui::run(file, !no_derived, debug)?,
         #[cfg(feature = "rhai")]
         Command::Run { script, args } => rhai_run::run(&script, &args)?,
         Command::Inspect {

@@ -82,12 +82,15 @@ struct App {
     find: Option<FindInput>,
     search: Option<FindInput>,
     palette: Option<ActionPalette>,
-    command_palette: Option<CommandPalette>,
     action_output: Option<ActionOutput>,
     logs: VecDeque<String>,
     log_view: bool,
     log_scroll: usize,
     log_repl: Option<ReplInput>,
+    /// Drag-to-select state for the log pane -- same shape as
+    /// `body_selection`, kept separate since the two views are never open
+    /// at once and index into different line sources.
+    log_selection: Option<BodySelection>,
     dirty: bool,
     dirty_nodes: HashSet<NodeId>,
     updated_nodes: HashSet<NodeId>,
@@ -100,6 +103,11 @@ struct App {
     derived_nodes: HashSet<NodeId>,
     writable_external: HashMap<NodeId, WritableExternalFile>,
     original_external: OriginalExternalState,
+    /// Open handle for `--debug FILE`, written to by [`App::debug`] -- kept
+    /// as a raw `File` rather than a buffered writer so every line lands on
+    /// disk immediately, since the whole point is reading it back while the
+    /// TUI might be stuck.
+    debug_log: Option<fs::File>,
     #[cfg(feature = "syntax")]
     syntax: crate::syntax::SyntaxHighlighter,
     #[cfg(feature = "syntax")]
@@ -161,12 +169,12 @@ impl App {
             find: None,
             search: None,
             palette: None,
-            command_palette: None,
             action_output: None,
             logs: VecDeque::new(),
             log_view: false,
             log_scroll: 0,
             log_repl: None,
+            log_selection: None,
             dirty: false,
             dirty_nodes: HashSet::new(),
             updated_nodes: HashSet::new(),
@@ -179,6 +187,7 @@ impl App {
             derived_nodes,
             writable_external,
             original_external,
+            debug_log: None,
             #[cfg(feature = "syntax")]
             syntax: crate::syntax::SyntaxHighlighter::new(),
             #[cfg(feature = "syntax")]
@@ -194,6 +203,29 @@ impl App {
             #[cfg(feature = "syntax")]
             wrap_by_language: HashMap::new(),
         }
+    }
+
+    /// Sets `--debug FILE`'s already-opened handle. A separate setter
+    /// rather than another `App::new` parameter so the many test call
+    /// sites (which never pass one) don't all need updating.
+    fn with_debug_log(mut self, debug_log: Option<fs::File>) -> Self {
+        self.debug_log = debug_log;
+        self
+    }
+
+    /// Appends one timestamped line to `--debug FILE`, flushed immediately
+    /// -- a no-op when `--debug` wasn't given. Kept deliberately terse
+    /// (single `write!` call, no buffering) since it exists specifically to
+    /// survive the process getting stuck right after it's called.
+    fn debug(&mut self, msg: impl std::fmt::Display) {
+        let Some(file) = self.debug_log.as_mut() else {
+            return;
+        };
+        let elapsed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+        let _ = writeln!(file, "[{:.3}] {msg}", elapsed.as_secs_f64());
+        let _ = file.flush();
     }
 
     fn rows(&self) -> Vec<Row> {
@@ -449,13 +481,15 @@ struct ActionPalette {
     errors: Vec<String>,
 }
 
-/// One entry in the action palette (`Shift-A`): either an `@action` node in
-/// the outline, or a zero-input command an `@import`ed script's `COMMANDS`
-/// map names (see `discover_commands`). `label` is precomputed at
-/// [`palette_entries`] time so filtering/drawing never need to re-walk the
-/// outline or re-read a script per entry. `doc` is the description
-/// `COMMANDS` gave a command, shown for the active entry below the list;
-/// always `None` for an `@action` entry, which has no such description.
+/// One entry in the action palette (`a`): an `@action` node in the
+/// outline, a zero-input command an `@import`ed script's `COMMANDS` map
+/// names (see `discover_commands`), or a built-in editor command from the
+/// static `COMMANDS` array. `label` is precomputed at [`palette_entries`]
+/// time so filtering/drawing never need to re-walk the outline or re-read
+/// a script per entry. `doc` is the description `COMMANDS` gave a script
+/// command, shown for the active entry below the list; always `None` for
+/// an `@action` or built-in entry, neither of which has such a
+/// description.
 #[derive(Clone, Debug, PartialEq)]
 struct PaletteEntry {
     label: String,
@@ -467,12 +501,11 @@ struct PaletteEntry {
 enum PaletteEntryKind {
     Action(PositionId),
     Command { script: PathBuf, name: String },
-}
-
-struct CommandPalette {
-    query: String,
-    matches: Vec<usize>,
-    active: usize,
+    /// Index into the static `COMMANDS` array of built-in editor commands
+    /// (e.g. "Import new files into @path") -- these need no script or
+    /// outline node, just a check of whether they apply to the current
+    /// selection ([`CommandSpec::available`]).
+    Builtin(usize),
 }
 
 struct CommandSpec {
@@ -509,7 +542,16 @@ enum MoveDirection {
     Right,
 }
 
-fn build_app(path: PathBuf, load_derived: bool) -> Result<App> {
+fn build_app(path: PathBuf, load_derived: bool, debug_log_path: Option<PathBuf>) -> Result<App> {
+    let debug_log = debug_log_path
+        .map(|path| {
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .with_context(|| format!("open debug log {}", path.display()))
+        })
+        .transpose()?;
     let mut document = LeoDocument::open(&path)?;
     let (
         status,
@@ -562,7 +604,8 @@ fn build_app(path: PathBuf, load_derived: bool) -> Result<App> {
         writable_external,
         original_external,
         load_derived,
-    ))
+    )
+    .with_debug_log(debug_log))
 }
 
 /// Runs `body` against a real alternate-screen terminal, guaranteeing the
@@ -594,8 +637,9 @@ where
     result
 }
 
-pub fn run(path: PathBuf, load_derived: bool) -> Result<()> {
-    let mut app = build_app(path, load_derived)?;
+pub fn run(path: PathBuf, load_derived: bool, debug_log_path: Option<PathBuf>) -> Result<()> {
+    let mut app = build_app(path, load_derived, debug_log_path)?;
+    app.debug("session started");
     with_real_terminal(|terminal| event_loop(terminal, &mut app))
 }
 
@@ -620,7 +664,6 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
                 && app.find.is_none()
                 && app.search.is_none()
                 && app.palette.is_none()
-                && app.command_palette.is_none()
                 && !app.help
             {
                 handle_mouse(app, terminal.size()?.into(), mouse);
@@ -658,8 +701,6 @@ fn handle_paste(app: &mut App, text: String) {
         handle_search_input
     } else if app.palette.is_some() {
         handle_palette_input
-    } else if app.command_palette.is_some() {
-        handle_command_palette_input
     } else if app.log_repl.is_some() {
         handle_log_repl_key
     } else {
@@ -686,6 +727,7 @@ fn handle_key(
     if key.kind != KeyEventKind::Press {
         return KeyOutcome::Continue;
     }
+    app.debug(format!("key: {:?} mods={:?}", key.code, key.modifiers));
     if app.input.is_some() {
         handle_headline_input(app, key);
         return KeyOutcome::Continue;
@@ -704,10 +746,6 @@ fn handle_key(
     }
     if app.palette.is_some() {
         handle_palette_input(app, key);
-        return KeyOutcome::Continue;
-    }
-    if app.command_palette.is_some() {
-        handle_command_palette_input(app, key);
         return KeyOutcome::Continue;
     }
     if app.log_repl.is_some() {
@@ -757,7 +795,10 @@ fn handle_key(
             app.extend_selection(1);
         }
         KeyCode::Char('?') => app.help = true,
-        KeyCode::Char('l') if key.modifiers.is_empty() => app.log_view = true,
+        KeyCode::Char('l') if key.modifiers.is_empty() => {
+            app.log_view = true;
+            app.log_selection = None;
+        }
         KeyCode::Char('q') | KeyCode::Esc => {
             if !app.dirty || app.quit_armed {
                 return KeyOutcome::Quit;
@@ -800,8 +841,7 @@ fn handle_key(
         }
         KeyCode::Char('W') => app.toggle_body_wrap(),
         KeyCode::Char('/') if key.modifiers.is_empty() => start_search(app),
-        KeyCode::Char('a') if key.modifiers.is_empty() => start_command_palette(app),
-        KeyCode::Char('A') if key.modifiers == KeyModifiers::SHIFT => start_palette(app),
+        KeyCode::Char('a') if key.modifiers.is_empty() => start_palette(app),
         KeyCode::Char('i') if key.modifiers.is_empty() => insert_headline(app),
         KeyCode::Char('h') if key.modifiers.is_empty() => edit_headline(app),
         KeyCode::Char('b') if key.modifiers.is_empty() => quick_edit_body(app),
@@ -864,6 +904,14 @@ fn handle_mouse(app: &mut App, area: Rect, mouse: MouseEvent) {
     ) {
         return;
     }
+    // The log view is a full-screen overlay (see `draw_log`) with nothing
+    // in common with the outline/body split below -- route to its own
+    // handler instead of interpreting these coordinates against panes
+    // that aren't even on screen right now.
+    if app.log_view {
+        handle_log_mouse(app, area, kind, mouse);
+        return;
+    }
     let content_height = area.height.saturating_sub(1);
     let content = Rect::new(area.x, area.y, area.width, content_height);
     let columns = content_columns(content, app);
@@ -895,6 +943,10 @@ fn handle_mouse_scroll(app: &mut App, area: Rect, kind: MouseEventKind, mouse: M
     } else {
         LINES_PER_NOTCH
     };
+    if app.log_view {
+        app.log_scroll = app.log_scroll.saturating_add_signed(-delta);
+        return;
+    }
     let content_height = area.height.saturating_sub(1);
     let content = Rect::new(area.x, area.y, area.width, content_height);
     let columns = content_columns(content, app);
@@ -912,6 +964,88 @@ fn handle_mouse_scroll(app: &mut App, area: Rect, kind: MouseEventKind, mouse: M
         return;
     }
     app.scroll_body_lines(delta);
+}
+
+/// Drag-to-select log text and copy the selection to the system clipboard
+/// on release -- the log-pane counterpart of `handle_body_mouse`, using
+/// `log_view_layout`/`log_view_range` to land on the exact same
+/// coordinates `draw_log` rendered.
+fn handle_log_mouse(app: &mut App, area: Rect, kind: MouseEventKind, mouse: MouseEvent) {
+    let (log_area, input_area) = log_view_layout(area, app.log_repl.is_some());
+    if let Some(input_area) = input_area
+        && mouse.row >= input_area.y
+    {
+        return;
+    }
+    if log_area.width == 0 || log_area.height == 0 {
+        return;
+    }
+    let starting = matches!(kind, MouseEventKind::Down(MouseButton::Left));
+    if starting
+        && (mouse.column < log_area.x
+            || mouse.column >= log_area.right()
+            || mouse.row < log_area.y
+            || mouse.row >= log_area.bottom())
+    {
+        return;
+    }
+    if !starting && app.log_selection.is_none() {
+        return;
+    }
+    let (start, end) = log_view_range(&app.logs, log_area, app.log_scroll);
+    if start == end {
+        return;
+    }
+    let clamped_row = mouse
+        .row
+        .clamp(log_area.y, log_area.bottom().saturating_sub(1));
+    let clamped_column = mouse
+        .column
+        .clamp(log_area.x, log_area.right().saturating_sub(1));
+    let line_index =
+        (start + usize::from(clamped_row - log_area.y)).min(end.saturating_sub(1));
+    let line_len = app.logs.get(line_index).map_or(0, |line| line.chars().count());
+    let column_index = usize::from(clamped_column - log_area.x).min(line_len);
+    let position = (line_index, column_index);
+
+    match kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            app.log_selection = Some(BodySelection {
+                anchor: position,
+                cursor: position,
+            });
+        }
+        MouseEventKind::Drag(MouseButton::Left) => {
+            if let Some(selection) = app.log_selection.as_mut() {
+                selection.cursor = position;
+            }
+        }
+        MouseEventKind::Up(MouseButton::Left) => copy_log_selection_to_clipboard(app),
+        _ => {}
+    }
+}
+
+fn copy_log_selection_to_clipboard(app: &mut App) {
+    let Some(selection) = app.log_selection else {
+        return;
+    };
+    let lines: Vec<String> = app.logs.iter().cloned().collect();
+    let Some(text) = selected_body_text(&lines, selection) else {
+        return;
+    };
+    match execute!(
+        io::stdout(),
+        CopyToClipboard::to_clipboard_from(text.clone())
+    ) {
+        Ok(()) => {
+            let chars = text.chars().count();
+            app.status = format!(
+                "copied {chars} selected character{} to clipboard",
+                if chars == 1 { "" } else { "s" }
+            );
+        }
+        Err(error) => app.status = format!("clipboard copy failed: {error}"),
+    }
 }
 
 /// Click-to-select and click-the-expand-marker, plus drag-to-extend the
@@ -1183,6 +1317,7 @@ fn push_log(app: &mut App, text: &str) {
         if line.is_empty() {
             continue;
         }
+        app.debug(format!("log: {line}"));
         app.logs.push_back(line.to_owned());
     }
     while app.logs.len() > LOG_CAPACITY {
@@ -1207,6 +1342,7 @@ fn handle_log_view_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char('l') | KeyCode::Char('q') | KeyCode::Esc => {
             app.log_view = false;
             app.log_repl = None;
+            app.log_selection = None;
         }
         KeyCode::Enter => app.log_repl = Some(ReplInput::new("")),
         KeyCode::Up => app.log_scroll = app.log_scroll.saturating_add(1),
@@ -1441,7 +1577,7 @@ fn handle_search_input(app: &mut App, key: KeyEvent) {
 }
 
 /// An `@action` node is a runnable node: its body is executed as a script
-/// when chosen from the action palette (`Shift-A`). Any node, anywhere in the
+/// when chosen from the action palette (`a`). Any node, anywhere in the
 /// outline, can be an action; the name shown in the palette is the headline
 /// with the `@action` marker stripped.
 fn is_action_headline(headline: &str) -> bool {
@@ -1509,28 +1645,43 @@ fn import_script_paths(app: &App) -> Vec<PathBuf> {
     paths
 }
 
-/// Every entry the action palette (`Shift-A`) offers, plus any script
-/// errors hit along the way: `@action` nodes from the outline, plus
-/// commands discovered from every `@import`ed script's `COMMANDS` map,
-/// unioned with whatever its `available_commands(doc, target)` (if it
-/// defines one) returns for the current selection -- commands whose
-/// palette availability is conditional on the selected node, keyed by
-/// name against the static set so a name in both wins with
-/// `available_commands`'s (possibly different) description. No selected
-/// row (an empty outline) just skips the dynamic half; the static set
-/// still shows. A script that fails to compile or throws while loading
-/// (see `discover_commands`/`discover_available_commands`) contributes no
-/// entries and its error message instead -- `draw_palette_panel` shows
-/// these in place of the usual per-entry description line, since a script
-/// silently contributing nothing to the palette would otherwise look
+/// Every entry the action palette (`a`) offers, plus any script errors hit
+/// along the way: `@action` nodes from the outline, commands discovered
+/// from every `@import`ed script's `COMMANDS` map (unioned with whatever
+/// its `available_commands(doc, target)`, if it defines one, returns for
+/// the current selection -- commands whose palette availability is
+/// conditional on the selected node, keyed by name against the static set
+/// so a name in both wins with `available_commands`'s, possibly different,
+/// description), and finally the built-in `COMMANDS` array's own entries
+/// (editor commands with no script or outline node behind them, like
+/// "Import new files into @path") filtered by each one's own
+/// `CommandSpec::available` check. No selected row (an empty outline) just
+/// skips the dynamic script half and the built-in check both; the static
+/// `@import` set still shows. A script that fails to compile or throws
+/// while loading (see `discover_commands`/`discover_available_commands`)
+/// contributes no entries and its error message instead -- `draw_palette_panel`
+/// shows these in place of the usual per-entry description line, since a
+/// script silently contributing nothing to the palette would otherwise look
 /// identical to one that legitimately declares no commands. Recomputed on
 /// open and on every keystroke (like `action_rows` before it) rather than
 /// cached -- outlines and imported scripts are both small enough that
 /// re-scanning is cheap, and this way the palette never shows a command a
 /// script no longer declares.
+///
+/// Ordered so a command `available_commands` singled out for the current
+/// selection sorts ahead of everything that's always listed regardless of
+/// selection (`@action` nodes, a script's static `COMMANDS`, and built-ins)
+/// -- it's the most likely thing you actually want to run right now, so it
+/// shows up before typing a single filter character.
 fn palette_entries(app: &App) -> (Vec<PaletteEntry>, Vec<String>) {
     let outline = &app.document.outline;
-    let mut entries: Vec<PaletteEntry> = action_rows(outline)
+    // Split into two buckets so entries an `available_commands` singled out
+    // for the current selection -- the ones most likely to be what you
+    // actually want to run right now -- sort to the very front, ahead of
+    // everything that's always listed regardless of selection. Concatenated
+    // back into one list (`context_entries` first) just before returning.
+    let mut context_entries: Vec<PaletteEntry> = Vec::new();
+    let mut other_entries: Vec<PaletteEntry> = action_rows(outline)
         .into_iter()
         .map(|row| PaletteEntry {
             label: action_name(&outline.nodes[&row.node].headline).to_owned(),
@@ -1552,6 +1703,7 @@ fn palette_entries(app: &App) -> (Vec<PaletteEntry>, Vec<String>) {
                 continue;
             }
         };
+        let mut dynamic_names: HashSet<String> = HashSet::new();
         if let Some(target_position) = &target_position {
             match crate::rhai_run::discover_available_commands(
                 &app.document,
@@ -1561,6 +1713,7 @@ fn palette_entries(app: &App) -> (Vec<PaletteEntry>, Vec<String>) {
             ) {
                 Ok(dynamic_commands) => {
                     for dynamic in dynamic_commands {
+                        dynamic_names.insert(dynamic.name.clone());
                         match commands.iter_mut().find(|c| c.name == dynamic.name) {
                             Some(existing) => *existing = dynamic,
                             None => commands.push(dynamic),
@@ -1578,21 +1731,54 @@ fn palette_entries(app: &App) -> (Vec<PaletteEntry>, Vec<String>) {
             }
         }
         for command in commands {
-            entries.push(PaletteEntry {
+            let entry = PaletteEntry {
                 label: format!("{}  ({stem})", command.name),
                 doc: command.doc,
                 kind: PaletteEntryKind::Command {
                     script: script.clone(),
-                    name: command.name,
+                    name: command.name.clone(),
                 },
+            };
+            if dynamic_names.contains(&command.name) {
+                context_entries.push(entry);
+            } else {
+                other_entries.push(entry);
+            }
+        }
+    }
+    for (index, command) in COMMANDS.iter().enumerate() {
+        if (command.available)(app) {
+            other_entries.push(PaletteEntry {
+                label: command.name.to_owned(),
+                doc: None,
+                kind: PaletteEntryKind::Builtin(index),
             });
         }
     }
-    (entries, errors)
+    context_entries.append(&mut other_entries);
+    (context_entries, errors)
 }
 
 fn start_palette(app: &mut App) {
+    app.debug("palette: computing entries...");
     let (matches, errors) = palette_entries(app);
+    app.debug(format!(
+        "palette: {} entries, {} error(s)",
+        matches.len(),
+        errors.len()
+    ));
+    // Nothing to run and nothing to report -- opening the palette anyway
+    // would drop the user into a filter box that can never match
+    // anything, with no visible sign they're still "inside" it (every
+    // further keystroke just extends an unmatchable query instead of
+    // doing what it looks like it should). Report it on the status line
+    // instead and skip the dead end. A script error still opens the
+    // palette, since that's worth seeing even with zero runnable entries.
+    if matches.is_empty() && errors.is_empty() {
+        app.palette = None;
+        app.status = "no commands available".into();
+        return;
+    }
     app.palette = Some(ActionPalette {
         query: String::new(),
         matches,
@@ -1631,6 +1817,12 @@ fn handle_palette_input(app: &mut App, key: KeyEvent) {
                     ..
                 }) => {
                     run_command(app, &script, &name);
+                }
+                Some(PaletteEntry {
+                    kind: PaletteEntryKind::Builtin(index),
+                    ..
+                }) => {
+                    (COMMANDS[index].run)(app);
                 }
                 None => {
                     app.status = "no matching action".into();
@@ -1687,103 +1879,6 @@ fn update_palette_matches(app: &mut App) {
 
 fn cycle_palette_match(app: &mut App, delta: isize) {
     let palette = app.palette.as_mut().expect("palette input exists");
-    if palette.matches.is_empty() {
-        return;
-    }
-    let len = palette.matches.len() as isize;
-    palette.active = (palette.active as isize + delta).rem_euclid(len) as usize;
-}
-
-/// General-purpose editor commands, run by name from `a`. Unlike the
-/// `@action` palette (`Shift-A`), these aren't outline nodes; they're built-in
-/// operations such as importing new files, chosen with `available` so the
-/// list only shows commands that make sense for the current selection.
-fn start_command_palette(app: &mut App) {
-    app.command_palette = Some(CommandPalette {
-        query: String::new(),
-        matches: available_commands(app),
-        active: 0,
-    });
-    app.status = "run command: type to filter, Enter runs, Esc cancels".into();
-}
-
-fn available_commands(app: &App) -> Vec<usize> {
-    COMMANDS
-        .iter()
-        .enumerate()
-        .filter(|(_, command)| (command.available)(app))
-        .map(|(index, _)| index)
-        .collect()
-}
-
-fn handle_command_palette_input(app: &mut App, key: KeyEvent) {
-    match key.code {
-        KeyCode::Enter => {
-            let index = app
-                .command_palette
-                .as_ref()
-                .and_then(|palette| palette.matches.get(palette.active).copied());
-            app.command_palette = None;
-            if let Some(index) = index {
-                (COMMANDS[index].run)(app);
-            } else {
-                app.status = "no matching command".into();
-            }
-        }
-        KeyCode::Esc => {
-            app.command_palette = None;
-            app.status = "command palette cancelled".into();
-        }
-        KeyCode::Backspace => {
-            app.command_palette
-                .as_mut()
-                .expect("command palette input exists")
-                .query
-                .pop();
-            update_command_palette_matches(app);
-        }
-        KeyCode::Down => cycle_command_palette_match(app, 1),
-        KeyCode::Up => cycle_command_palette_match(app, -1),
-        KeyCode::Char(character)
-            if !key
-                .modifiers
-                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-        {
-            app.command_palette
-                .as_mut()
-                .expect("command palette input exists")
-                .query
-                .push(character);
-            update_command_palette_matches(app);
-        }
-        _ => {}
-    }
-}
-
-fn update_command_palette_matches(app: &mut App) {
-    let query = app
-        .command_palette
-        .as_ref()
-        .expect("command palette input exists")
-        .query
-        .to_lowercase();
-    let matches: Vec<usize> = available_commands(app)
-        .into_iter()
-        .filter(|&index| COMMANDS[index].name.to_lowercase().contains(&query))
-        .collect();
-    let palette = app
-        .command_palette
-        .as_mut()
-        .expect("command palette input exists");
-    palette.active = palette.active.min(matches.len().saturating_sub(1));
-    palette.matches = matches;
-}
-
-fn cycle_command_palette_match(app: &mut App, delta: isize) {
-    let palette = app
-        .command_palette
-        .as_mut()
-        .expect("command palette input exists");
     if palette.matches.is_empty() {
         return;
     }
@@ -2060,9 +2155,11 @@ fn run_action(app: &mut App, position: &PositionId, target: &PositionId) {
     let body = strip_language_directive(&node.body);
 
     app.status = format!("running '{name}' with rhai...");
+    app.debug(format!("action: running '{name}'..."));
     let document = std::mem::replace(&mut app.document, LeoDocument::empty());
     let outcome =
         crate::rhai_run::run_bound(document, app.path.clone(), &target_row.position, &body);
+    app.debug(format!("action: '{name}' returned status={:?}", outcome.status));
     app.document = outcome.document;
     if outcome.touched {
         mark_outline_touched(app);
@@ -2108,9 +2205,17 @@ fn run_command(app: &mut App, script: &Path, fn_name: &str) {
     let node = row.node.clone();
 
     app.status = format!("running '{fn_name}' with rhai...");
+    app.debug(format!(
+        "command: running '{fn_name}' from {}...",
+        script.display()
+    ));
     let document = std::mem::replace(&mut app.document, LeoDocument::empty());
     let outcome =
         crate::rhai_run::run_command(document, app.path.clone(), script, &row.position, fn_name);
+    app.debug(format!(
+        "command: '{fn_name}' returned status={:?}",
+        outcome.status
+    ));
     app.document = outcome.document;
     if outcome.touched {
         mark_outline_touched(app);
@@ -3249,9 +3354,6 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
     } else if let Some(palette) = app.palette.as_ref() {
         let max_visible = frame.area().height.saturating_sub(6).max(1);
         palette.matches.len().min(usize::from(max_visible)) as u16 + 1
-    } else if let Some(palette) = app.command_palette.as_ref() {
-        let max_visible = frame.area().height.saturating_sub(6).max(1);
-        palette.matches.len().min(usize::from(max_visible)) as u16 + 1
     } else {
         1
     };
@@ -3480,8 +3582,6 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
         );
     } else if let Some(palette) = &app.palette {
         draw_palette_panel(frame, areas[1], palette);
-    } else if let Some(palette) = &app.command_palette {
-        draw_command_palette_panel(frame, areas[1], palette);
     } else {
         let mut status = vec![Span::styled("[", Style::default().fg(Color::DarkGray))];
         status.push(Span::styled(
@@ -3511,23 +3611,15 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
     }
 }
 
-/// Renders the full-screen log/REPL overlay: the scrollback buffer of
-/// `@action`/REPL rhai output, windowed by `app.log_scroll` (0 = pinned to
-/// the latest line), plus a bottom input line when the REPL is active.
-fn draw_log(frame: &mut ratatui::Frame<'_>, app: &App) {
-    let area = frame.area();
-    frame.render_widget(Clear, area);
-
-    let title = if app.log_repl.is_some() {
-        " Log — Esc: back to browse  Enter: run "
-    } else {
-        " Log — l/q/Esc: close  Enter: run rhai "
-    };
-    let block = Block::default().title(title).borders(Borders::ALL);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    let (log_area, input_area) = if app.log_repl.is_some() && inner.height > 0 {
+/// The log pane's own bordered content area, plus its REPL input row when
+/// active -- shared by `draw_log` (to render) and `handle_log_mouse` (to
+/// map a click back to the same coordinates), so the two can never drift
+/// apart. Title text doesn't affect a `Block`'s `.inner()` geometry, so
+/// this builds an untitled throwaway block rather than duplicating
+/// `draw_log`'s title strings.
+fn log_view_layout(area: Rect, repl_active: bool) -> (Rect, Option<Rect>) {
+    let inner = Block::default().borders(Borders::ALL).inner(area);
+    if repl_active && inner.height > 0 {
         (
             Rect::new(
                 inner.x,
@@ -3544,19 +3636,50 @@ fn draw_log(frame: &mut ratatui::Frame<'_>, app: &App) {
         )
     } else {
         (inner, None)
-    };
+    }
+}
 
+/// The `[start, end)` range of `logs` currently windowed into `log_area`,
+/// given `log_scroll` (0 = pinned to the latest line) -- shared by
+/// `draw_log` and `handle_log_mouse` for the same reason as
+/// `log_view_layout`.
+fn log_view_range(logs: &VecDeque<String>, log_area: Rect, log_scroll: usize) -> (usize, usize) {
     let visible = log_area.height as usize;
-    let total = app.logs.len();
-    let end = total.saturating_sub(app.log_scroll.min(total));
+    let total = logs.len();
+    let end = total.saturating_sub(log_scroll.min(total));
     let start = end.saturating_sub(visible);
-    let lines: Vec<Line> = app
+    (start, end)
+}
+
+/// Renders the full-screen log/REPL overlay: the scrollback buffer of
+/// `@action`/REPL rhai output, windowed by `app.log_scroll` (0 = pinned to
+/// the latest line), plus a bottom input line when the REPL is active.
+fn draw_log(frame: &mut ratatui::Frame<'_>, app: &App) {
+    let area = frame.area();
+    frame.render_widget(Clear, area);
+
+    let title = if app.log_repl.is_some() {
+        " Log — Esc: back to browse  Enter: run "
+    } else {
+        " Log — l/q/Esc: close  Enter: run rhai "
+    };
+    let block = Block::default().title(title).borders(Borders::ALL);
+    frame.render_widget(block, area);
+
+    let (log_area, input_area) = log_view_layout(area, app.log_repl.is_some());
+    let (start, end) = log_view_range(&app.logs, log_area, app.log_scroll);
+    // Owned lines (not borrowed `&str`s) so the selection highlight below
+    // can reuse `highlight_selection_in_text`, which needs `Text<'static>`.
+    let mut lines: Vec<Line<'static>> = app
         .logs
         .iter()
         .skip(start)
         .take(end - start)
-        .map(|line| Line::from(line.as_str()))
+        .map(|line| Line::from(line.clone()))
         .collect();
+    if let Some(selection) = app.log_selection {
+        lines = highlight_log_selection(lines, start, selection);
+    }
     frame.render_widget(Paragraph::new(lines), log_area);
 
     if let (Some(input_area), Some(input)) = (input_area, app.log_repl.as_ref()) {
@@ -3617,9 +3740,10 @@ fn draw_finder_panel(
     frame.render_widget(Paragraph::new(lines), area);
 }
 
-/// Renders the docked action palette (`Shift-A`), listing `@action` node
-/// names and imported commands (labels precomputed by `palette_entries`)
-/// rather than full headlines. Laid out the same as `draw_finder_panel`,
+/// Renders the docked action palette (`a`), listing `@action` node names,
+/// imported script commands, and built-in editor commands (labels
+/// precomputed by `palette_entries`) rather than full headlines. Laid out
+/// the same as `draw_finder_panel`,
 /// plus one reserved line below the list -- always present, even when
 /// blank, so the list's height doesn't jump as the active entry changes --
 /// showing the active entry's `doc` (an imported command's `COMMANDS`
@@ -3667,41 +3791,6 @@ fn draw_palette_panel(frame: &mut ratatui::Frame<'_>, area: Rect, state: &Action
     }
     lines.push(Line::from(vec![
         Span::styled("Run action: ", Style::default().fg(Color::DarkGray)),
-        Span::raw(format!("{}▏", state.query)),
-        Span::styled(
-            format!("   {count}   ↑↓ cycle · Enter run · Esc cancel"),
-            Style::default().fg(Color::DarkGray),
-        ),
-    ]));
-    frame.render_widget(Paragraph::new(lines), area);
-}
-
-/// Renders the docked command palette (`a`), listing built-in editor
-/// commands (see `COMMANDS`). Laid out the same as `draw_palette_panel`.
-fn draw_command_palette_panel(frame: &mut ratatui::Frame<'_>, area: Rect, state: &CommandPalette) {
-    let shown = state
-        .matches
-        .len()
-        .min(usize::from(area.height.saturating_sub(1)));
-    let first = state.active.saturating_sub(shown.saturating_sub(1));
-    let mut lines: Vec<Line> = state
-        .matches
-        .iter()
-        .enumerate()
-        .skip(first)
-        .take(shown)
-        .map(|(index, &command_index)| {
-            let marker = if index == state.active { "› " } else { "  " };
-            Line::from(format!("{marker}{}", COMMANDS[command_index].name))
-        })
-        .collect();
-    let count = if state.matches.is_empty() {
-        "no matching commands".to_owned()
-    } else {
-        format!("{} of {}", state.active + 1, state.matches.len())
-    };
-    lines.push(Line::from(vec![
-        Span::styled("Run command: ", Style::default().fg(Color::DarkGray)),
         Span::raw(format!("{}▏", state.query)),
         Span::styled(
             format!("   {count}   ↑↓ cycle · Enter run · Esc cancel"),
@@ -3800,17 +3889,17 @@ fn headline_spans(headline: &str) -> Vec<Span<'_>> {
 fn controls(body_full_width: bool, outline_full_width: bool) -> &'static str {
     if body_full_width {
         #[cfg(feature = "syntax")]
-        return "? help  arrows scroll  W wrap  c/x/v/V tree  f split  F outline  s split dir  o open/edit  Ctrl-P find  / search  a commands  Shift-A actions  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  y syntax  l log  q quit";
+        return "? help  arrows scroll  W wrap  c/x/v/V tree  f split  F outline  s split dir  o open/edit  Ctrl-P find  / search  a commands/actions  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  y syntax  l log  q quit";
         #[cfg(not(feature = "syntax"))]
-        return "? help  arrows scroll  W wrap  c/x/v/V tree  f split  F outline  s split dir  o open/edit  Ctrl-P find  / search  a commands  Shift-A actions  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  l log  q quit";
+        return "? help  arrows scroll  W wrap  c/x/v/V tree  f split  F outline  s split dir  o open/edit  Ctrl-P find  / search  a commands/actions  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  l log  q quit";
     }
     if outline_full_width {
-        return "? help  arrows navigate  W wrap  c/x/v/V tree  F split view  s split dir  o open/edit  Ctrl-P find  / search  a commands  Shift-A actions  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  l log  q quit";
+        return "? help  arrows navigate  W wrap  c/x/v/V tree  F split view  s split dir  o open/edit  Ctrl-P find  / search  a commands/actions  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  l log  q quit";
     }
     #[cfg(feature = "syntax")]
-    return "? help  arrows navigate  PgUp/PgDn body  W wrap  c/x/v/V tree  f body  F outline  s split dir  o open/edit  Ctrl-P find  / search  a commands  Shift-A actions  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  y syntax  l log  q quit";
+    return "? help  arrows navigate  PgUp/PgDn body  W wrap  c/x/v/V tree  f body  F outline  s split dir  o open/edit  Ctrl-P find  / search  a commands/actions  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  y syntax  l log  q quit";
     #[cfg(not(feature = "syntax"))]
-    "? help  arrows navigate  PgUp/PgDn body  W wrap  c/x/v/V tree  f body  F outline  s split dir  o open/edit  Ctrl-P find  / search  a commands  Shift-A actions  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  l log  q quit"
+    "? help  arrows navigate  PgUp/PgDn body  W wrap  c/x/v/V tree  f body  F outline  s split dir  o open/edit  Ctrl-P find  / search  a commands/actions  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  l log  q quit"
 }
 
 fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full_width: bool) {
@@ -3839,8 +3928,7 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full
             Line::from("h                Rename the headline"),
             Line::from("Ctrl-↑↓←→        Move selected tree(s)"),
             Line::from("Ctrl-P           Find a headline"),
-            Line::from("a                Command palette"),
-            Line::from("Shift-A          Run an @action node"),
+            Line::from("a                Command/action palette"),
             Line::from("/                Search headlines and body text"),
             Line::from("Ctrl-R           Reload from disk"),
             Line::from("Ctrl-S           Save"),
@@ -3861,8 +3949,7 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full
             Line::from("c/x/v/V          Copy/cut/paste/clone"),
             Line::from("Shift-C          Copy path:line (dir for @path) to clipboard"),
             Line::from("Ctrl-P           Find a headline"),
-            Line::from("a                Command palette"),
-            Line::from("Shift-A          Run an @action node"),
+            Line::from("a                Command/action palette"),
             Line::from("/                Search headlines and body text"),
             Line::from("i                Insert a sibling"),
             Line::from("h                Rename the headline"),
@@ -3885,8 +3972,7 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full
             Line::from("PageUp/PageDown  Scroll the body pane"),
             Line::from("Shift-W          Toggle body word wrap"),
             Line::from("Ctrl-P           Find a headline"),
-            Line::from("a                Command palette"),
-            Line::from("Shift-A          Run an @action node"),
+            Line::from("a                Command/action palette"),
             Line::from("/                Search headlines and body text"),
             Line::from("i                Insert a sibling"),
             Line::from("h                Rename the headline"),
@@ -4023,6 +4109,37 @@ fn highlight_selection_in_text(text: Text<'static>, selection: BodySelection) ->
             })
             .collect::<Vec<_>>(),
     )
+}
+
+/// Applies `log_selection`'s highlight to `lines`, the already-windowed
+/// slice `draw_log` is about to render -- `selection`'s (line, column)
+/// pairs are absolute indices into the full `logs` scrollback, so they're
+/// shifted down by `start` (the window's first absolute line) before
+/// reusing `highlight_selection_in_text`, which expects indices local to
+/// the `Text` it's given.
+fn highlight_log_selection(
+    lines: Vec<Line<'static>>,
+    start: usize,
+    selection: BodySelection,
+) -> Vec<Line<'static>> {
+    let (sel_start, sel_end) = if selection.anchor <= selection.cursor {
+        (selection.anchor, selection.cursor)
+    } else {
+        (selection.cursor, selection.anchor)
+    };
+    if sel_start == sel_end || lines.is_empty() || sel_end.0 < start {
+        return lines;
+    }
+    let local_start_line = sel_start.0.saturating_sub(start);
+    if local_start_line >= lines.len() {
+        return lines;
+    }
+    let local_end_line = sel_end.0.saturating_sub(start).min(lines.len() - 1);
+    let local_selection = BodySelection {
+        anchor: (local_start_line, sel_start.1),
+        cursor: (local_end_line, sel_end.1),
+    };
+    highlight_selection_in_text(Text::from(lines), local_selection).lines
 }
 
 fn highlight_char_range_in_line(line: Line<'static>, from: usize, to: usize) -> Line<'static> {
@@ -4876,6 +4993,20 @@ mod tests {
     }
 
     #[test]
+    fn palette_skips_opening_with_nothing_to_run() {
+        // No `@action` nodes and no `@import`ed script: there is nothing
+        // the palette could ever offer, so opening it would drop the user
+        // into a filter box that can never match anything -- instead it
+        // should stay closed and just say so on the status line.
+        let mut app = editing_app();
+
+        start_palette(&mut app);
+
+        assert!(app.palette.is_none());
+        assert_eq!(app.status, "no commands available");
+    }
+
+    #[test]
     fn palette_lists_only_action_nodes_and_filters_by_name() {
         let mut app = editing_app();
         app.document
@@ -4973,6 +5104,44 @@ fn private_helper(doc, target) {
     }
 
     #[test]
+    fn debug_log_records_keys_and_palette_lookups() {
+        let path = env::temp_dir().join(format!(
+            "leo-cub-tui-debug-log-{}-{}.log",
+            std::process::id(),
+            fresh_node_id().0
+        ));
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .unwrap();
+        let mut app = editing_app().with_debug_log(Some(file));
+
+        handle_key(&mut app, KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), None);
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+            None,
+        );
+
+        let contents = fs::read_to_string(&path).unwrap();
+        assert!(
+            contents.contains("key: Char('j')"),
+            "should log the 'j' keypress: {contents}"
+        );
+        assert!(
+            contents.contains("palette: computing entries"),
+            "should log palette lookups starting: {contents}"
+        );
+        assert!(
+            contents.contains("palette: ") && contents.contains("entries, "),
+            "should log the resolved entry/error count: {contents}"
+        );
+
+        fs::remove_file(&path).ok();
+    }
+
+    #[test]
     fn palette_unions_available_commands_with_commands_and_lets_it_override_by_name() {
         let directory = env::temp_dir().join(format!(
             "leo-cub-tui-available-commands-{}-{}",
@@ -5012,7 +5181,9 @@ fn both(doc, target) {}
 
         // Selection ("a", the default) has an empty body -- `conditional`
         // stays hidden, but `both`'s dynamic description already wins
-        // over its static one from COMMANDS.
+        // over its static one from COMMANDS, and that dynamic origin also
+        // puts it ahead of `always` (unconditional, so ranked after
+        // whatever `available_commands` singled out for this selection).
         start_palette(&mut app);
         let labels: Vec<&str> = app
             .palette
@@ -5022,7 +5193,7 @@ fn both(doc, target) {}
             .iter()
             .map(|entry| entry.label.as_str())
             .collect();
-        assert_eq!(labels, vec!["always  (lib)", "both  (lib)"]);
+        assert_eq!(labels, vec!["both  (lib)", "always  (lib)"]);
         let both_doc = app
             .palette
             .as_ref()
@@ -5036,7 +5207,8 @@ fn both(doc, target) {}
         assert_eq!(both_doc, Some("dynamic doc".into()));
 
         // Give "a" a body that satisfies available_commands' condition --
-        // "conditional" should now join the union.
+        // "conditional" should now join the union, alongside "both", both
+        // ranked ahead of "always" as dynamic-origin entries.
         app.document
             .outline
             .nodes
@@ -5054,7 +5226,7 @@ fn both(doc, target) {}
             .collect();
         assert_eq!(
             labels,
-            vec!["always  (lib)", "both  (lib)", "conditional  (lib)"]
+            vec!["both  (lib)", "conditional  (lib)", "always  (lib)"]
         );
 
         fs::remove_dir_all(&directory).ok();
@@ -5106,7 +5278,7 @@ fn both(doc, target) {}
     }
 
     #[test]
-    fn command_palette_only_offers_import_on_a_path_node() {
+    fn palette_only_offers_the_builtin_import_command_on_a_path_node() {
         let mut app = editing_app();
         app.document
             .outline
@@ -5115,8 +5287,15 @@ fn both(doc, target) {}
             .unwrap()
             .headline = "@path src".into();
         app.selected = 0;
-        start_command_palette(&mut app);
-        assert_eq!(app.command_palette.as_ref().unwrap().matches.len(), 1);
+        start_palette(&mut app);
+        assert_eq!(
+            app.palette.as_ref().unwrap().matches,
+            vec![PaletteEntry {
+                label: "Import new files into @path".into(),
+                doc: None,
+                kind: PaletteEntryKind::Builtin(0),
+            }]
+        );
 
         let child_index = app
             .rows()
@@ -5124,8 +5303,11 @@ fn both(doc, target) {}
             .position(|row| row.node == NodeId::from("b"))
             .unwrap();
         app.selected = child_index;
-        start_command_palette(&mut app);
-        assert!(app.command_palette.as_ref().unwrap().matches.is_empty());
+        // Nothing available for this selection: the palette shouldn't open
+        // into a dead-end filter box (see `palette_skips_opening_with_nothing_to_run`).
+        start_palette(&mut app);
+        assert!(app.palette.is_none());
+        assert_eq!(app.status, "no commands available");
     }
 
     #[test]
@@ -6007,7 +6189,7 @@ fn both(doc, target) {}
         )
         .unwrap();
 
-        let mut app = build_app(directory.join("outline.leo"), true).unwrap();
+        let mut app = build_app(directory.join("outline.leo"), true, None).unwrap();
         app.selected = 0;
         edit_headline(&mut app);
         app.input.as_mut().unwrap().value = "@f script.rhai".into();
@@ -6034,7 +6216,7 @@ fn both(doc, target) {}
 
         // The promotion round-trips: reopening the outline re-parses
         // script.rhai as `@f` (not `@auto`) and reconstructs the same node.
-        let reopened = build_app(directory.join("outline.leo"), true).unwrap();
+        let reopened = build_app(directory.join("outline.leo"), true, None).unwrap();
         assert_eq!(
             reopened.document.outline.nodes[&NodeId::from("r")].headline,
             "@f script.rhai"
@@ -6818,6 +7000,73 @@ fn both(doc, target) {}
         // The highlight stays visible after copying, like the search match
         // highlight does, until something else changes the selected row.
         assert!(app.body_selection.is_some());
+    }
+
+    #[test]
+    fn dragging_in_the_log_view_selects_text_and_copies_it_on_release() {
+        // Regression test: mouse events used to be routed through the
+        // outline/body hit-testing even while the log view's full-screen
+        // overlay was open, so a drag there never selected or copied
+        // anything -- see `handle_log_mouse`.
+        let mut app = editing_app();
+        app.log_view = true;
+        app.logs.push_back("hello world".into());
+        app.logs.push_back("second line".into());
+        // A full-terminal area, matching what `event_loop` passes in --
+        // `log_view_layout` insets it by the log panel's 1-cell border, so
+        // content starts at (1, 1).
+        let area = Rect::new(0, 0, 80, 24);
+
+        handle_log_mouse(
+            &mut app,
+            area,
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 7, // log_area.x(1) + col 6, just after "hello "
+                row: 1,    // log_area.y(1) + line 0
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+        assert_eq!(
+            app.log_selection,
+            Some(BodySelection {
+                anchor: (0, 6),
+                cursor: (0, 6),
+            })
+        );
+
+        handle_log_mouse(
+            &mut app,
+            area,
+            MouseEventKind::Drag(MouseButton::Left),
+            MouseEvent {
+                kind: MouseEventKind::Drag(MouseButton::Left),
+                column: 7, // col 6 again, just after "second"
+                row: 2,    // line 1
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+        assert_eq!(
+            app.log_selection,
+            Some(BodySelection {
+                anchor: (0, 6),
+                cursor: (1, 6),
+            })
+        );
+
+        handle_log_mouse(
+            &mut app,
+            area,
+            MouseEventKind::Up(MouseButton::Left),
+            MouseEvent {
+                kind: MouseEventKind::Up(MouseButton::Left),
+                column: 7,
+                row: 2,
+                modifiers: KeyModifiers::NONE,
+            },
+        );
+        assert_eq!(app.status, "copied 12 selected characters to clipboard");
     }
 
     #[test]
