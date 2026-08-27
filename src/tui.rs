@@ -9,12 +9,14 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use crate::body_input::{self, BodyInput, BodyInputOutcome, BodyInputToken};
 use anyhow::{Context, Result, bail};
 use crossterm::{
     clipboard::CopyToClipboard,
     event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-        KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+        MouseEventKind,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -76,6 +78,7 @@ struct App {
     status: String,
     flash: Option<(String, Instant)>,
     input: Option<HeadlineInput>,
+    body_input: Option<BodyEdit>,
     find: Option<FindInput>,
     search: Option<FindInput>,
     palette: Option<ActionPalette>,
@@ -154,6 +157,7 @@ impl App {
             status,
             flash: None,
             input: None,
+            body_input: None,
             find: None,
             search: None,
             palette: None,
@@ -400,6 +404,19 @@ struct HeadlineInput {
     inserted_position: Option<PositionId>,
 }
 
+/// Ties the node-agnostic [`BodyInput`] text-editing state to the node it's
+/// editing, for the quick body entry (`b`). See `body_input.rs`.
+struct BodyEdit {
+    node: NodeId,
+    input: BodyInput,
+    /// Layout to restore on commit/cancel -- opening the editor forces the
+    /// body pane full-width (there's more to work with than the narrow
+    /// default split, and editing while `outline_full_width` is set would
+    /// leave the field invisible), so the prior state has to be remembered.
+    restore_body_full_width: bool,
+    restore_outline_full_width: bool,
+}
+
 struct FindInput {
     query: String,
     matches: Vec<PositionId>,
@@ -556,7 +573,12 @@ where
 {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -565,6 +587,7 @@ where
     execute!(
         terminal.backend_mut(),
         DisableMouseCapture,
+        DisableBracketedPaste,
         LeaveAlternateScreen
     )?;
     terminal.show_cursor()?;
@@ -588,6 +611,10 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
             continue;
         }
         let event = event::read()?;
+        if let Event::Paste(text) = event {
+            handle_paste(app, text);
+            continue;
+        }
         if let Event::Mouse(mouse) = event {
             if app.input.is_none()
                 && app.find.is_none()
@@ -607,6 +634,47 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
     }
 }
 
+/// Routes a bracketed-paste `Event::Paste` (a terminal-native paste, e.g.
+/// Cmd+V/Ctrl+Shift+V -- the terminal emulator delivers the clipboard text
+/// directly, so no OS clipboard access is needed here). The quick body
+/// entry (`b`) consumes a paste as one chunk via
+/// [`insert_paste_into_body`]/[`BodyInput::insert_paste`], collapsing large
+/// pastes to a placeholder. Every other text field predates bracketed paste
+/// being enabled and expects one key at a time (as an un-bracketed paste
+/// would have delivered before), so its paste is replayed character by
+/// character through the same handler a keypress would use -- identical
+/// behavior to before, just arriving as a single clean event instead of a
+/// flood of raw bytes that risked being misparsed as escape sequences.
+fn handle_paste(app: &mut App, text: String) {
+    if app.body_input.is_some() {
+        insert_paste_into_body(app, text);
+        return;
+    }
+    let replay: fn(&mut App, KeyEvent) = if app.input.is_some() {
+        handle_headline_input
+    } else if app.find.is_some() {
+        handle_find_input
+    } else if app.search.is_some() {
+        handle_search_input
+    } else if app.palette.is_some() {
+        handle_palette_input
+    } else if app.command_palette.is_some() {
+        handle_command_palette_input
+    } else if app.log_repl.is_some() {
+        handle_log_repl_key
+    } else {
+        return;
+    };
+    for character in text.chars() {
+        let code = match character {
+            '\n' | '\r' => KeyCode::Enter,
+            '\t' => KeyCode::Tab,
+            other => KeyCode::Char(other),
+        };
+        replay(app, KeyEvent::new(code, KeyModifiers::NONE));
+    }
+}
+
 /// Dispatches a single key press. `terminal` is `None` for headless/scripted
 /// runs with no real terminal to suspend into -- keys that would normally
 /// open an external editor just report that they were skipped instead.
@@ -620,6 +688,10 @@ fn handle_key(
     }
     if app.input.is_some() {
         handle_headline_input(app, key);
+        return KeyOutcome::Continue;
+    }
+    if app.body_input.is_some() {
+        handle_body_input(app, key);
         return KeyOutcome::Continue;
     }
     if app.find.is_some() {
@@ -732,6 +804,7 @@ fn handle_key(
         KeyCode::Char('A') if key.modifiers == KeyModifiers::SHIFT => start_palette(app),
         KeyCode::Char('i') if key.modifiers.is_empty() => insert_headline(app),
         KeyCode::Char('h') if key.modifiers.is_empty() => edit_headline(app),
+        KeyCode::Char('b') if key.modifiers.is_empty() => quick_edit_body(app),
         #[cfg(feature = "syntax")]
         KeyCode::Char('y') => {
             app.syntax_enabled = !app.syntax_enabled;
@@ -2373,6 +2446,100 @@ fn edit_headline(app: &mut App) {
     app.status = "editing headline: Enter accepts, Esc cancels".into();
 }
 
+/// Opens the quick body entry (`b`): an inline field, prefilled with the
+/// current body and fully selected so the first keystroke or paste
+/// replaces it, for fast one-off entry or pasting without leaving the TUI
+/// for `$EDITOR`. See [`handle_body_input`] and [`insert_paste_into_body`].
+fn quick_edit_body(app: &mut App) {
+    let Some(row) = app.selected_row() else {
+        return;
+    };
+    if !app.editable(&row) {
+        return;
+    }
+    let original = app.document.outline.nodes[&row.node].body.clone();
+    let restore_body_full_width = app.body_full_width;
+    let restore_outline_full_width = app.outline_full_width;
+    app.body_full_width = true;
+    app.outline_full_width = false;
+    app.body_input = Some(BodyEdit {
+        node: row.node,
+        input: BodyInput::new(original),
+        restore_body_full_width,
+        restore_outline_full_width,
+    });
+    app.status =
+        "quick entry: type or paste, Ctrl-D accepts, Ctrl-S accepts+saves, Esc cancels".into();
+}
+
+fn cancel_body_edit(app: &mut App) {
+    if let Some(edit) = app.body_input.take() {
+        app.body_full_width = edit.restore_body_full_width;
+        app.outline_full_width = edit.restore_outline_full_width;
+    }
+    app.status = "body edit cancelled".into();
+}
+
+/// Accepts the in-progress body edit. Unlike [`commit_headline_edit`], an
+/// empty body is valid (it just clears the node), so there's nothing to
+/// reject here -- this always succeeds once `body_input` is set.
+fn commit_body_edit(app: &mut App) -> bool {
+    let Some(edit) = app.body_input.as_ref() else {
+        return false;
+    };
+    let body = edit.input.resolve();
+    let node_id = edit.node.clone();
+    let restore_body_full_width = edit.restore_body_full_width;
+    let restore_outline_full_width = edit.restore_outline_full_width;
+    app.document
+        .outline
+        .nodes
+        .get_mut(&node_id)
+        .expect("edited node exists")
+        .body = body;
+    app.dirty_nodes.insert(node_id);
+    app.body_input = None;
+    app.body_full_width = restore_body_full_width;
+    app.outline_full_width = restore_outline_full_width;
+    app.dirty = true;
+    app.quit_armed = false;
+    #[cfg(feature = "syntax")]
+    app.highlight_cache.clear();
+    #[cfg(feature = "syntax")]
+    app.preview_cache.clear();
+    app.body_scroll = 0;
+    app.body_horizontal_scroll = 0;
+    app.status = "body changed (Ctrl-S to save)".into();
+    true
+}
+
+/// Inserts clipboard text pasted (via bracketed paste) while the quick body
+/// entry is open. See [`BodyInput::insert_paste`].
+fn insert_paste_into_body(app: &mut App, text: String) {
+    let Some(edit) = app.body_input.as_mut() else {
+        return;
+    };
+    edit.input.insert_paste(text);
+}
+
+fn handle_body_input(app: &mut App, key: KeyEvent) {
+    let Some(edit) = app.body_input.as_mut() else {
+        return;
+    };
+    match edit.input.handle_key(key.code, key.modifiers) {
+        BodyInputOutcome::Continue => {}
+        BodyInputOutcome::Commit => {
+            commit_body_edit(app);
+        }
+        BodyInputOutcome::CommitAndSave => {
+            if commit_body_edit(app) {
+                save(app);
+            }
+        }
+        BodyInputOutcome::Cancel => cancel_body_edit(app),
+    }
+}
+
 fn insert_headline(app: &mut App) {
     let Some(row) = app.selected_row() else {
         return;
@@ -3232,21 +3399,32 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
         frame.render_widget(node_block, columns[1]);
         if let Some(row) = rows.get(app.selected) {
             let wrap = app.wrap_for(Some(&row.position));
-            let mut body = if let Some((_, _, _, text)) = output_info {
+            // Owned rather than borrowed, so it doesn't hold `app.body_input`
+            // borrowed across the `body_text(app, row)` call below, which
+            // needs `app` mutably.
+            let editing_body = app
+                .body_input
+                .as_ref()
+                .is_some_and(|edit| edit.node == row.node);
+            let mut body = if editing_body {
+                body_input_text(&app.body_input.as_ref().expect("editing_body is true").input)
+            } else if let Some((_, _, _, text)) = output_info {
                 Text::from(text)
             } else {
                 body_text(app, row)
             };
-            if let Some(search) = &app.search
-                && !search.query.is_empty()
-                && let Ok(pattern) = RegexBuilder::new(&regex::escape(&search.query))
-                    .case_insensitive(true)
-                    .build()
-            {
-                body = highlight_query_in_text(body, &pattern);
-            }
-            if let Some(selection) = app.body_selection {
-                body = highlight_selection_in_text(body, selection);
+            if !editing_body {
+                if let Some(search) = &app.search
+                    && !search.query.is_empty()
+                    && let Ok(pattern) = RegexBuilder::new(&regex::escape(&search.query))
+                        .case_insensitive(true)
+                        .build()
+                {
+                    body = highlight_query_in_text(body, &pattern);
+                }
+                if let Some(selection) = app.body_selection {
+                    body = highlight_selection_in_text(body, selection);
+                }
             }
             let body_width = body.width();
             let mut paragraph = Paragraph::new(body);
@@ -3667,6 +3845,7 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full
             Line::from("Ctrl-R           Reload from disk"),
             Line::from("Ctrl-S           Save"),
             Line::from("o                Edit body, or open derived source"),
+            Line::from("b                Quick body entry (type or paste)"),
         ]
     } else if outline_full_width {
         vec![
@@ -3691,6 +3870,7 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full
             Line::from("Ctrl-R           Reload from disk"),
             Line::from("Ctrl-S           Save"),
             Line::from("o                Edit body, or open derived source"),
+            Line::from("b                Quick body entry (type or paste)"),
         ]
     } else {
         vec![
@@ -3718,6 +3898,7 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full
             Line::from("Ctrl-R           Reload from disk"),
             Line::from("Ctrl-S           Save"),
             Line::from("o                Edit body, or open derived source"),
+            Line::from("b                Quick body entry (type or paste)"),
         ]
     };
     #[cfg(feature = "syntax")]
@@ -3884,6 +4065,71 @@ fn highlight_char_range_in_line(line: Line<'static>, from: usize, to: usize) -> 
         }
     }
     Line::from(spans)
+}
+
+/// Renders a [`BodyInput`] in progress: pasted-text placeholders in a
+/// distinct style, and either a cursor marker (plain editing) or the whole
+/// value shown reversed (the initial "fully selected" state, matching how
+/// `HeadlineInput` shows a pending rename).
+fn body_input_text(input: &BodyInput) -> Text<'static> {
+    fn push_tokens(
+        lines: &mut Vec<Line<'static>>,
+        tokens: Vec<BodyInputToken<'_>>,
+        text_style: Style,
+        placeholder_style: Style,
+    ) {
+        for token in tokens {
+            let line = lines.last_mut().expect("body_input_text always has a line");
+            match token {
+                BodyInputToken::Text(text) => {
+                    line.spans.push(Span::styled(text.to_owned(), text_style));
+                }
+                BodyInputToken::Newline => lines.push(Line::default()),
+                BodyInputToken::Paste(block) => {
+                    let label = format!(
+                        "[pasted {} line{}]",
+                        block.lines,
+                        if block.lines == 1 { "" } else { "s" }
+                    );
+                    line.spans.push(Span::styled(label, placeholder_style));
+                }
+            }
+        }
+    }
+
+    let placeholder_style = Style::default().fg(Color::Black).bg(Color::Yellow);
+    let mut lines: Vec<Line<'static>> = vec![Line::default()];
+    if input.selected {
+        let reversed = Style::default().add_modifier(Modifier::REVERSED);
+        push_tokens(
+            &mut lines,
+            body_input::tokenize(&input.value, &input.pastes),
+            reversed,
+            placeholder_style.add_modifier(Modifier::REVERSED),
+        );
+    } else {
+        push_tokens(
+            &mut lines,
+            body_input::tokenize(&input.value[..input.cursor], &input.pastes),
+            Style::default(),
+            placeholder_style,
+        );
+        lines
+            .last_mut()
+            .expect("body_input_text always has a line")
+            .spans
+            .push(Span::styled(
+                "▏",
+                Style::default().add_modifier(Modifier::REVERSED),
+            ));
+        push_tokens(
+            &mut lines,
+            body_input::tokenize(&input.value[input.cursor..], &input.pastes),
+            Style::default(),
+            placeholder_style,
+        );
+    }
+    Text::from(lines)
 }
 
 fn body_text(app: &mut App, row: &Row) -> Text<'static> {
@@ -4767,7 +5013,12 @@ fn both(doc, target) {}
 
         // Give "a" a body that satisfies available_commands' condition --
         // "conditional" should now join the union.
-        app.document.outline.nodes.get_mut(&NodeId::from("a")).unwrap().body = "trigger".into();
+        app.document
+            .outline
+            .nodes
+            .get_mut(&NodeId::from("a"))
+            .unwrap()
+            .body = "trigger".into();
         start_palette(&mut app);
         let labels: Vec<&str> = app
             .palette
@@ -4777,7 +5028,10 @@ fn both(doc, target) {}
             .iter()
             .map(|entry| entry.label.as_str())
             .collect();
-        assert_eq!(labels, vec!["always  (lib)", "both  (lib)", "conditional  (lib)"]);
+        assert_eq!(
+            labels,
+            vec!["always  (lib)", "both  (lib)", "conditional  (lib)"]
+        );
 
         fs::remove_dir_all(&directory).ok();
     }
@@ -5539,6 +5793,136 @@ fn both(doc, target) {}
         assert!(path.exists());
 
         fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn quick_edit_body_prefills_selects_and_expands_the_body_pane() {
+        let mut app = editing_app();
+        app.document
+            .outline
+            .nodes
+            .get_mut(&NodeId::from("a"))
+            .unwrap()
+            .body = "existing body".into();
+        app.outline_full_width = true;
+
+        quick_edit_body(&mut app);
+
+        let edit = app.body_input.as_ref().unwrap();
+        assert_eq!(edit.input.value, "existing body");
+        assert!(edit.input.selected);
+        assert!(
+            app.body_full_width,
+            "should expand to full width while editing"
+        );
+        assert!(
+            !app.outline_full_width,
+            "outline full-width would hide the body pane being edited"
+        );
+    }
+
+    #[test]
+    fn typing_over_a_selected_body_and_committing_writes_it_to_the_node() {
+        let mut app = editing_app();
+        app.document
+            .outline
+            .nodes
+            .get_mut(&NodeId::from("a"))
+            .unwrap()
+            .body = "old".into();
+
+        quick_edit_body(&mut app);
+        handle_body_input(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('Z'), KeyModifiers::NONE),
+        );
+        handle_body_input(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+        );
+
+        assert!(app.body_input.is_none());
+        assert_eq!(app.document.outline.nodes[&NodeId::from("a")].body, "Z");
+        assert!(app.dirty);
+        assert!(app.dirty_nodes.contains(&NodeId::from("a")));
+    }
+
+    #[test]
+    fn ctrl_s_while_editing_body_commits_the_edit_and_saves() {
+        let directory = env::temp_dir().join(format!(
+            "leo-cub-tui-ctrl-s-body-{}-{}",
+            std::process::id(),
+            fresh_node_id().0
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("test.leo");
+
+        let mut app = editing_app();
+        app.path = path.clone();
+
+        quick_edit_body(&mut app);
+        handle_body_input(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('Q'), KeyModifiers::NONE),
+        );
+        handle_body_input(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+        );
+
+        assert!(app.body_input.is_none());
+        assert_eq!(app.document.outline.nodes[&NodeId::from("a")].body, "Q");
+        assert!(!app.dirty, "Ctrl-S should have saved the document");
+        assert!(path.exists());
+
+        fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn esc_cancels_body_edit_without_touching_the_node_and_restores_layout() {
+        let mut app = editing_app();
+        app.document
+            .outline
+            .nodes
+            .get_mut(&NodeId::from("a"))
+            .unwrap()
+            .body = "untouched".into();
+        app.body_full_width = false;
+        app.outline_full_width = true;
+
+        quick_edit_body(&mut app);
+        assert!(app.body_full_width, "should force full width while editing");
+        assert!(!app.outline_full_width);
+        handle_body_input(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('X'), KeyModifiers::NONE),
+        );
+        handle_body_input(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert!(app.body_input.is_none());
+        assert_eq!(
+            app.document.outline.nodes[&NodeId::from("a")].body,
+            "untouched"
+        );
+        assert!(
+            !app.body_full_width && app.outline_full_width,
+            "should restore the pre-edit layout, not just clear it"
+        );
+    }
+
+    #[test]
+    fn pasting_into_the_quick_body_entry_collapses_a_multiline_paste_and_resolves_on_commit() {
+        let mut app = editing_app();
+
+        quick_edit_body(&mut app);
+        let pasted = "line one\nline two\nline three".to_owned();
+        insert_paste_into_body(&mut app, pasted.clone());
+        handle_body_input(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+        );
+
+        assert_eq!(app.document.outline.nodes[&NodeId::from("a")].body, pasted);
     }
 
     #[test]
