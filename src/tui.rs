@@ -4123,8 +4123,7 @@ fn body_input_text(input: &BodyInput) -> Text<'static> {
         // newline, a paste marker, or the very end of the value has no
         // character to reverse-style in place, and those fall back to a
         // synthesized marker that affects only their own line.
-        match cursor_char.filter(|&character| body_input::is_plain_char(character, &input.pastes))
-        {
+        match cursor_char.filter(|&character| body_input::is_plain_char(character, &input.pastes)) {
             Some(character) => {
                 lines
                     .last_mut()

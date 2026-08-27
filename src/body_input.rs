@@ -129,7 +129,9 @@ impl BodyInput {
             .iter()
             .position(|&(start, end)| self.cursor >= start && self.cursor <= end)
             .expect("cursor lies within some line");
-        let column = self.value[lines[current_line].0..self.cursor].chars().count();
+        let column = self.value[lines[current_line].0..self.cursor]
+            .chars()
+            .count();
 
         let Some(target_line) = current_line.checked_add_signed(delta) else {
             return;
