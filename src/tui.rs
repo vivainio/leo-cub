@@ -4114,20 +4114,45 @@ fn body_input_text(input: &BodyInput) -> Text<'static> {
             Style::default(),
             placeholder_style,
         );
-        lines
-            .last_mut()
-            .expect("body_input_text always has a line")
-            .spans
-            .push(Span::styled(
-                "▏",
-                Style::default().add_modifier(Modifier::REVERSED),
-            ));
-        push_tokens(
-            &mut lines,
-            body_input::tokenize(&input.value[input.cursor..], &input.pastes),
-            Style::default(),
-            placeholder_style,
-        );
+        let reversed = Style::default().add_modifier(Modifier::REVERSED);
+        let after_cursor = &input.value[input.cursor..];
+        let cursor_char = after_cursor.chars().next();
+        // Reverse-style the character the cursor sits on in place instead of
+        // splicing in a "▏" glyph: an inserted column shifts word-wrap (and
+        // so the whole body below it) every time the cursor moves. Only a
+        // newline, a paste marker, or the very end of the value has no
+        // character to reverse-style in place, and those fall back to a
+        // synthesized marker that affects only their own line.
+        match cursor_char.filter(|&character| body_input::is_plain_char(character, &input.pastes))
+        {
+            Some(character) => {
+                lines
+                    .last_mut()
+                    .expect("body_input_text always has a line")
+                    .spans
+                    .push(Span::styled(character.to_string(), reversed));
+                let rest_start = input.cursor + character.len_utf8();
+                push_tokens(
+                    &mut lines,
+                    body_input::tokenize(&input.value[rest_start..], &input.pastes),
+                    Style::default(),
+                    placeholder_style,
+                );
+            }
+            None => {
+                lines
+                    .last_mut()
+                    .expect("body_input_text always has a line")
+                    .spans
+                    .push(Span::styled(" ", reversed));
+                push_tokens(
+                    &mut lines,
+                    body_input::tokenize(after_cursor, &input.pastes),
+                    Style::default(),
+                    placeholder_style,
+                );
+            }
+        }
     }
     Text::from(lines)
 }

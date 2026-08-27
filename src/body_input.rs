@@ -291,6 +291,18 @@ pub(crate) fn tokenize<'a>(text: &'a str, pastes: &'a [PastedBlock]) -> Vec<Body
     tokens
 }
 
+/// Whether `character` is a real, single-column glyph that the cursor can be
+/// drawn on top of in place (a reverse-styled span over the existing char)
+/// rather than by splicing in an extra one. Newlines and paste markers don't
+/// qualify -- there's nothing to reverse-style in place for either.
+pub(crate) fn is_plain_char(character: char, pastes: &[PastedBlock]) -> bool {
+    if character == '\n' {
+        return false;
+    }
+    let marker_index = (character as u32).wrapping_sub(PASTE_MARKER_BASE) as usize;
+    marker_index >= pastes.len()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
