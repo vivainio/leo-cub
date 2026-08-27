@@ -111,6 +111,38 @@ impl BodyInput {
         }
     }
 
+    /// Moves the cursor one line up (`delta < 0`) or down (`delta > 0`),
+    /// preserving its column (in chars) as closely as the target line's
+    /// length allows. A no-op at the first/last line.
+    fn move_vertical(&mut self, delta: isize) {
+        let mut lines = Vec::new();
+        let mut line_start = 0;
+        for (index, character) in self.value.char_indices() {
+            if character == '\n' {
+                lines.push((line_start, index));
+                line_start = index + 1;
+            }
+        }
+        lines.push((line_start, self.value.len()));
+
+        let current_line = lines
+            .iter()
+            .position(|&(start, end)| self.cursor >= start && self.cursor <= end)
+            .expect("cursor lies within some line");
+        let column = self.value[lines[current_line].0..self.cursor].chars().count();
+
+        let Some(target_line) = current_line.checked_add_signed(delta) else {
+            return;
+        };
+        let Some(&(target_start, target_end)) = lines.get(target_line) else {
+            return;
+        };
+        self.cursor = self.value[target_start..target_end]
+            .char_indices()
+            .nth(column)
+            .map_or(target_end, |(offset, _)| target_start + offset);
+    }
+
     pub(crate) fn handle_key(
         &mut self,
         code: KeyCode,
@@ -187,6 +219,22 @@ impl BodyInput {
                 self.cursor = self.value.len();
                 self.selected = false;
             }
+            KeyCode::Up => {
+                if self.selected {
+                    self.cursor = 0;
+                    self.selected = false;
+                } else {
+                    self.move_vertical(-1);
+                }
+            }
+            KeyCode::Down => {
+                if self.selected {
+                    self.cursor = self.value.len();
+                    self.selected = false;
+                } else {
+                    self.move_vertical(1);
+                }
+            }
             KeyCode::Char(character)
                 if !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
             {
@@ -246,6 +294,55 @@ pub(crate) fn tokenize<'a>(text: &'a str, pastes: &'a [PastedBlock]) -> Vec<Body
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn up_and_down_move_the_cursor_between_lines_preserving_column() {
+        let mut input = BodyInput::new(String::new());
+        for character in "ab\nc\nwxyz".chars() {
+            if character == '\n' {
+                input.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+            } else {
+                input.handle_key(KeyCode::Char(character), KeyModifiers::NONE);
+            }
+        }
+        // Cursor starts at the end of "wxyz" (column 4).
+        assert_eq!(input.cursor, input.value.len());
+
+        input.handle_key(KeyCode::Up, KeyModifiers::NONE);
+        // Line "c" only has 1 char, so the cursor clamps to its end.
+        assert_eq!(input.cursor, "ab\nc".len());
+
+        input.handle_key(KeyCode::Up, KeyModifiers::NONE);
+        // Back on "ab" at column 1 (clamped from column 1 carried over).
+        assert_eq!(input.cursor, 1);
+
+        // No line above the first one: no-op.
+        input.handle_key(KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(input.cursor, 1);
+
+        input.handle_key(KeyCode::Down, KeyModifiers::NONE);
+        assert_eq!(input.cursor, "ab\nc".len());
+
+        input.handle_key(KeyCode::Down, KeyModifiers::NONE);
+        assert_eq!(input.cursor, "ab\nc\nw".len());
+
+        // No line below the last one: no-op.
+        input.handle_key(KeyCode::Down, KeyModifiers::NONE);
+        assert_eq!(input.cursor, "ab\nc\nw".len());
+    }
+
+    #[test]
+    fn up_and_down_on_a_fully_selected_value_deselect_to_the_ends() {
+        let mut input = BodyInput::new("first\nsecond".into());
+        input.handle_key(KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(input.cursor, 0);
+        assert!(!input.selected);
+
+        let mut input = BodyInput::new("first\nsecond".into());
+        input.handle_key(KeyCode::Down, KeyModifiers::NONE);
+        assert_eq!(input.cursor, input.value.len());
+        assert!(!input.selected);
+    }
 
     #[test]
     fn empty_original_starts_unselected_but_nonempty_starts_fully_selected() {
