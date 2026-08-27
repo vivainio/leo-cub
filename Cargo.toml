@@ -43,11 +43,10 @@ tree-sitter-python = "0.23"
 tree-sitter-rust = "0.23"
 tree-sitter-typescript = "0.23.2"
 tree-sitter-xml = "0.7.0"
-tui-input = { version = "0.15.4", optional = true }
 
 [features]
 default = ["tui", "syntax"]
-tui = ["dep:ratatui", "dep:ratatui-textarea", "dep:crossterm", "dep:tui-input", "rhai"]
+tui = ["dep:ratatui", "dep:ratatui-textarea", "dep:crossterm", "rhai"]
 # Embedded Rhai scripting: `@action` bodies (tui feature) and the
 # standalone `cub run` test-script command.
 rhai = ["dep:rhai", "dep:rhai-fs"]

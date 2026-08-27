@@ -428,10 +428,15 @@ impl App {
 
 struct HeadlineInput {
     node: NodeId,
-    input: tui_input::Input,
+    input: ratatui_textarea::TextArea<'static>,
     original: String,
-    selected: bool,
     inserted_position: Option<PositionId>,
+}
+
+impl HeadlineInput {
+    fn value(&self) -> &str {
+        &self.input.lines()[0]
+    }
 }
 
 /// Ties a [`ratatui_textarea::TextArea`]'s text-editing state to the node
@@ -455,15 +460,18 @@ struct FindInput {
 }
 
 struct ReplInput {
-    value: String,
-    cursor: usize,
+    input: ratatui_textarea::TextArea<'static>,
 }
 
 impl ReplInput {
     fn new(value: impl Into<String>) -> Self {
-        let value = value.into();
-        let cursor = value.len();
-        Self { value, cursor }
+        let mut input = ratatui_textarea::TextArea::new(vec![value.into()]);
+        input.move_cursor(ratatui_textarea::CursorMove::End);
+        Self { input }
+    }
+
+    fn value(&self) -> &str {
+        &self.input.lines()[0]
     }
 }
 
@@ -1356,59 +1364,13 @@ fn handle_log_repl_key(app: &mut App, key: KeyEvent) {
         KeyCode::Esc => app.log_repl = None,
         KeyCode::Enter => {
             let input = app.log_repl.take().expect("repl input exists");
-            if !input.value.is_empty() {
-                run_repl_snippet(app, &input.value);
+            if !input.value().is_empty() {
+                run_repl_snippet(app, input.value());
             }
         }
-        KeyCode::Backspace => {
-            if input.cursor > 0 {
-                let previous = input.value[..input.cursor]
-                    .char_indices()
-                    .next_back()
-                    .map_or(0, |(index, _)| index);
-                input.value.drain(previous..input.cursor);
-                input.cursor = previous;
-            }
+        _ => {
+            input.input.input(key);
         }
-        KeyCode::Delete => {
-            if input.cursor < input.value.len() {
-                let next = input.cursor
-                    + input.value[input.cursor..]
-                        .chars()
-                        .next()
-                        .expect("cursor precedes a character")
-                        .len_utf8();
-                input.value.drain(input.cursor..next);
-            }
-        }
-        KeyCode::Left => {
-            if input.cursor > 0 {
-                input.cursor = input.value[..input.cursor]
-                    .char_indices()
-                    .next_back()
-                    .map_or(0, |(index, _)| index);
-            }
-        }
-        KeyCode::Right => {
-            if input.cursor < input.value.len() {
-                input.cursor += input.value[input.cursor..]
-                    .chars()
-                    .next()
-                    .expect("cursor precedes a character")
-                    .len_utf8();
-            }
-        }
-        KeyCode::Home => input.cursor = 0,
-        KeyCode::End => input.cursor = input.value.len(),
-        KeyCode::Char(character)
-            if !key
-                .modifiers
-                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-        {
-            input.value.insert(input.cursor, character);
-            input.cursor += character.len_utf8();
-        }
-        _ => {}
     }
 }
 
@@ -2377,15 +2339,17 @@ fn cancel_headline_edit(app: &mut App) {
     }
 }
 
-/// Accepts the in-progress headline edit, same as pressing Enter. Returns
-/// `false` (leaving the edit open) if the headline is empty.
-fn commit_headline_edit(app: &mut App) -> bool {
+/// Core of [`commit_headline_edit`]: validates and writes the typed
+/// headline. Returns `false` (leaving the edit open) if the headline is
+/// empty. Doesn't chain into another insert on its own -- see
+/// [`commit_headline_edit`] and [`commit_or_cancel_headline_edit`], which
+/// each decide that differently.
+fn commit_headline_edit_without_chaining(app: &mut App) -> bool {
     let Some(state) = app.input.as_ref() else {
         return false;
     };
-    let headline = state.input.value().trim().to_owned();
+    let headline = state.value().trim().to_owned();
     let node_id = state.node.clone();
-    let inserted_position = state.inserted_position.clone();
     if headline.is_empty() {
         app.status = "headline may not be empty".into();
         return false;
@@ -2417,12 +2381,43 @@ fn commit_headline_edit(app: &mut App) -> bool {
     app.highlight_cache.clear();
     #[cfg(feature = "syntax")]
     app.preview_cache.clear();
-    if inserted_position.is_some() {
+    true
+}
+
+/// Accepts the in-progress headline edit, same as pressing Enter: commits
+/// it and, if it was a freshly-inserted node, immediately starts editing
+/// the next sibling. Returns `false` (leaving the edit open) if the
+/// headline is empty.
+fn commit_headline_edit(app: &mut App) -> bool {
+    let chain = app
+        .input
+        .as_ref()
+        .is_some_and(|state| state.inserted_position.is_some());
+    if !commit_headline_edit_without_chaining(app) {
+        return false;
+    }
+    if chain {
         insert_headline(app);
     } else {
         app.status = "headline changed (Ctrl-S to save)".into();
     }
     true
+}
+
+/// Up/Down while editing a headline: commit the in-progress text and move,
+/// same as [`commit_headline_edit`] does for Enter, but without chaining
+/// into another insert -- the arrow means "move on", not "add another
+/// sibling". An empty headline can't be committed, so that case falls back
+/// to [`cancel_headline_edit`] instead: discarding a still-empty
+/// freshly-inserted node, or reverting a rename to its original text,
+/// rather than leaving the edit open and blocking navigation.
+fn commit_or_cancel_headline_edit(app: &mut App) {
+    if commit_headline_edit_without_chaining(app) {
+        app.status = "headline changed (Ctrl-S to save)".into();
+    } else {
+        cancel_headline_edit(app);
+        app.status = "headline edit cancelled".into();
+    }
 }
 
 fn handle_headline_input(app: &mut App, key: KeyEvent) {
@@ -2432,71 +2427,44 @@ fn handle_headline_input(app: &mut App, key: KeyEvent) {
     match key.code {
         KeyCode::Enter => {
             commit_headline_edit(app);
-            return;
         }
         KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             if commit_headline_edit(app) {
                 save(app);
             }
-            return;
         }
         KeyCode::Esc => {
             cancel_headline_edit(app);
             app.status = "headline edit cancelled".into();
-            return;
         }
         KeyCode::Up => {
-            cancel_headline_edit(app);
-            app.status = "headline edit cancelled".into();
+            commit_or_cancel_headline_edit(app);
             app.move_selection(-1);
-            return;
         }
         KeyCode::Down => {
-            cancel_headline_edit(app);
-            app.status = "headline edit cancelled".into();
+            commit_or_cancel_headline_edit(app);
             app.move_selection(1);
-            return;
         }
-        _ => {}
-    }
-
-    // The first keystroke over a freshly-opened, fully-selected rename
-    // replaces the whole value. `tui_input::Input` has no selection concept
-    // of its own, so this has to be layered on top: swallow the key here
-    // instead of letting it fall through to the generic `to_input_request`
-    // dispatch below.
-    if state.selected {
-        state.selected = false;
-        match key.code {
-            KeyCode::Backspace | KeyCode::Delete => {
-                state.input.reset();
-                return;
-            }
-            KeyCode::Left | KeyCode::Home => {
-                state.input.handle(tui_input::InputRequest::GoToStart);
-                return;
-            }
-            KeyCode::Right | KeyCode::End => {
-                state.input.handle(tui_input::InputRequest::GoToEnd);
-                return;
-            }
-            KeyCode::Char(character)
-                if !key
-                    .modifiers
-                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-            {
-                state.input = tui_input::Input::default();
-                state
-                    .input
-                    .handle(tui_input::InputRequest::InsertChar(character));
-                return;
-            }
-            _ => {}
+        // The initial full-value selection (`select_all` in `edit_headline`)
+        // is replaced automatically: `TextArea::insert_char`/`insert_str`
+        // delete an active selection before inserting.
+        //
+        // Left/Right are a special case: `TextArea`'s default keymap moves
+        // them one character from wherever the cursor logically sits (the
+        // end, since `select_all` leaves it there), but exiting a selection
+        // via an arrow key should collapse to the edge it points at instead.
+        // Home/End don't need this -- they're already absolute moves.
+        KeyCode::Left if state.input.is_selecting() => {
+            state.input.cancel_selection();
+            state.input.move_cursor(ratatui_textarea::CursorMove::Head);
         }
-    }
-
-    if let Some(request) = tui_input::backend::crossterm::to_input_request(&Event::Key(key)) {
-        state.input.handle(request);
+        KeyCode::Right if state.input.is_selecting() => {
+            state.input.cancel_selection();
+            state.input.move_cursor(ratatui_textarea::CursorMove::End);
+        }
+        _ => {
+            state.input.input(key);
+        }
     }
 }
 
@@ -2508,10 +2476,11 @@ fn edit_headline(app: &mut App) {
         return;
     }
     let original = app.document.outline.nodes[&row.node].headline.clone();
+    let mut input = ratatui_textarea::TextArea::new(vec![original.clone()]);
+    input.select_all();
     app.input = Some(HeadlineInput {
         node: row.node,
-        input: tui_input::Input::new(original.clone()),
-        selected: true,
+        input,
         original,
         inserted_position: None,
     });
@@ -2659,9 +2628,8 @@ fn insert_headline(app: &mut App) {
     select_position(app, &inserted);
     app.input = Some(HeadlineInput {
         node: id,
-        input: tui_input::Input::default(),
+        input: ratatui_textarea::TextArea::default(),
         original: String::new(),
-        selected: false,
         inserted_position: Some(inserted),
     });
     app.status = "new headline: type a name, Enter accepts and adds another, Esc cancels".into();
@@ -3373,31 +3341,20 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
                 !node.body.trim().is_empty(),
                 app.updated_nodes.contains(&row.node),
             ));
-            if let Some(input) = input {
-                if input.selected {
-                    spans.push(Span::styled(
-                        input.input.value().to_owned(),
-                        Style::default().add_modifier(Modifier::REVERSED),
-                    ));
-                } else {
-                    let value = input.input.value();
-                    let byte_cursor = value
-                        .char_indices()
-                        .nth(input.input.cursor())
-                        .map_or(value.len(), |(index, _)| index);
-                    spans.extend(headline_spans(&value[..byte_cursor]));
-                    spans.push(Span::raw("▏"));
-                    spans.extend(headline_spans(&value[byte_cursor..]));
-                }
-            } else {
+            // While this row is being edited, its headline and clone-count
+            // text are left off the row entirely -- the `TextArea` overlay
+            // rendered after the list (see `draw`) covers the same cells
+            // with its own real per-cell cursor, so nothing needs to be
+            // drawn underneath it.
+            if input.is_none() {
                 spans.extend(headline_spans(&node.headline));
+                spans.push(Span::styled(
+                    clone,
+                    Style::default()
+                        .fg(Color::LightMagenta)
+                        .add_modifier(Modifier::BOLD),
+                ));
             }
-            spans.push(Span::styled(
-                clone,
-                Style::default()
-                    .fg(Color::LightMagenta)
-                    .add_modifier(Modifier::BOLD),
-            ));
             let item = ListItem::new(Line::from(spans));
             if (selection_start..=selection_end).contains(&index) && index != app.selected {
                 item.style(
@@ -3438,6 +3395,35 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
         );
     }
     app.outline_scroll = state.offset();
+
+    // The headline being edited (if any) is drawn as a floating `TextArea`
+    // positioned over its outline row rather than as spans inside the
+    // `List`: a `List` only ever produces spans, and a real per-cell cursor
+    // needs an actual widget render.
+    if !app.body_full_width
+        && let Some(input) = app.input.as_ref()
+        && let Some(row_index) = rows.iter().position(|row| row.node == input.node)
+    {
+        let outline_area = columns[0];
+        let inner_height = outline_area.height.saturating_sub(2);
+        let visible_row = row_index as isize - app.outline_scroll as isize;
+        if visible_row >= 0 && visible_row < inner_height as isize {
+            let prefix_width = 2 * rows[row_index].depth as u16 + 6;
+            let inner_x = outline_area.x + 1 + prefix_width;
+            let inner_right = outline_area.x + outline_area.width.saturating_sub(1);
+            if inner_x < inner_right {
+                frame.render_widget(
+                    &input.input,
+                    Rect {
+                        x: inner_x,
+                        y: outline_area.y + 1 + visible_row as u16,
+                        width: inner_right - inner_x,
+                        height: 1,
+                    },
+                );
+            }
+        }
+    }
 
     if !app.outline_full_width {
         if let Some(row) = rows.get(app.selected)
@@ -3671,11 +3657,12 @@ fn draw_log(frame: &mut ratatui::Frame<'_>, app: &App) {
     frame.render_widget(Paragraph::new(lines), log_area);
 
     if let (Some(input_area), Some(input)) = (input_area, app.log_repl.as_ref()) {
-        let (before, after) = input.value.split_at(input.cursor);
-        frame.render_widget(
-            Paragraph::new(Line::from(format!("> {before}▏{after}"))),
-            input_area,
-        );
+        let areas = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Length(2), Constraint::Min(0)])
+            .split(input_area);
+        frame.render_widget(Paragraph::new("> "), areas[0]);
+        frame.render_widget(&input.input, areas[1]);
     }
 }
 
@@ -5402,7 +5389,7 @@ fn both(doc, target) {}
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(screen.contains("> print(1)▏"), "{screen:?}");
+        assert!(screen.contains("> print(1)"), "{screen:?}");
     }
 
     #[test]
@@ -5446,10 +5433,7 @@ fn both(doc, target) {}
             app.log_view,
             "log view must stay open while typing in the REPL"
         );
-        assert_eq!(
-            app.log_repl.as_ref().map(|input| input.value.as_str()),
-            Some("l")
-        );
+        assert_eq!(app.log_repl.as_ref().map(|input| input.value()), Some("l"));
     }
 
     #[test]
@@ -5457,7 +5441,11 @@ fn both(doc, target) {}
         let mut app = editing_app();
         app.log_view = true;
         app.log_repl = Some(ReplInput::new("ac"));
-        app.log_repl.as_mut().unwrap().cursor = 1;
+        app.log_repl
+            .as_mut()
+            .unwrap()
+            .input
+            .move_cursor(ratatui_textarea::CursorMove::Jump(0, 1));
 
         handle_key(
             &mut app,
@@ -5465,10 +5453,10 @@ fn both(doc, target) {}
             None,
         );
         assert_eq!(
-            app.log_repl.as_ref().map(|input| input.value.as_str()),
+            app.log_repl.as_ref().map(|input| input.value()),
             Some("abc")
         );
-        assert_eq!(app.log_repl.as_ref().unwrap().cursor, 2);
+        assert_eq!(app.log_repl.as_ref().unwrap().input.cursor(), (0, 2));
 
         handle_key(
             &mut app,
@@ -5480,38 +5468,35 @@ fn both(doc, target) {}
             KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
             None,
         );
-        assert_eq!(app.log_repl.as_ref().unwrap().cursor, 0);
+        assert_eq!(app.log_repl.as_ref().unwrap().input.cursor(), (0, 0));
 
         handle_key(
             &mut app,
             KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
             None,
         );
-        assert_eq!(app.log_repl.as_ref().unwrap().cursor, 1);
+        assert_eq!(app.log_repl.as_ref().unwrap().input.cursor(), (0, 1));
 
         handle_key(
             &mut app,
             KeyEvent::new(KeyCode::End, KeyModifiers::NONE),
             None,
         );
-        assert_eq!(app.log_repl.as_ref().unwrap().cursor, 3);
+        assert_eq!(app.log_repl.as_ref().unwrap().input.cursor(), (0, 3));
 
         handle_key(
             &mut app,
             KeyEvent::new(KeyCode::Home, KeyModifiers::NONE),
             None,
         );
-        assert_eq!(app.log_repl.as_ref().unwrap().cursor, 0);
+        assert_eq!(app.log_repl.as_ref().unwrap().input.cursor(), (0, 0));
 
         handle_key(
             &mut app,
             KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE),
             None,
         );
-        assert_eq!(
-            app.log_repl.as_ref().map(|input| input.value.as_str()),
-            Some("bc")
-        );
+        assert_eq!(app.log_repl.as_ref().map(|input| input.value()), Some("bc"));
     }
 
     #[test]
@@ -5855,16 +5840,16 @@ fn both(doc, target) {}
         let mut app = editing_app();
 
         edit_headline(&mut app);
-        assert!(app.input.as_ref().unwrap().selected);
+        assert!(app.input.as_ref().unwrap().input.is_selecting());
         handle_headline_input(
             &mut app,
             KeyEvent::new(KeyCode::Char('Z'), KeyModifiers::SHIFT),
         );
 
         let input = app.input.as_ref().unwrap();
-        assert_eq!(input.input.value(), "Z");
-        assert_eq!(input.input.cursor(), 1);
-        assert!(!input.selected);
+        assert_eq!(input.value(), "Z");
+        assert_eq!(input.input.cursor(), (0, 1));
+        assert!(!input.input.is_selecting());
     }
 
     #[test]
@@ -5882,7 +5867,7 @@ fn both(doc, target) {}
 
         edit_headline(&mut app);
         assert!(app.input.is_some());
-        app.input.as_mut().unwrap().input = tui_input::Input::new("Renamed".into());
+        app.input.as_mut().unwrap().input = ratatui_textarea::TextArea::new(vec!["Renamed".into()]);
         handle_headline_input(
             &mut app,
             KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
@@ -6051,7 +6036,8 @@ fn both(doc, target) {}
         );
 
         edit_headline(&mut app);
-        app.input.as_mut().unwrap().input = tui_input::Input::new("@file test.md".into());
+        app.input.as_mut().unwrap().input =
+            ratatui_textarea::TextArea::new(vec!["@file test.md".into()]);
         handle_headline_input(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
         let file = &app.writable_external[&NodeId::from("a")];
@@ -6091,7 +6077,8 @@ fn both(doc, target) {}
         let mut app = build_app(directory.join("outline.leo"), true, None).unwrap();
         app.selected = 0;
         edit_headline(&mut app);
-        app.input.as_mut().unwrap().input = tui_input::Input::new("@f script.rhai".into());
+        app.input.as_mut().unwrap().input =
+            ratatui_textarea::TextArea::new(vec!["@f script.rhai".into()]);
         handle_headline_input(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         save(&mut app);
 
@@ -6170,6 +6157,45 @@ fn both(doc, target) {}
     }
 
     #[test]
+    fn arrow_key_commits_typed_headline_text_and_moves_without_chaining() {
+        let mut app = editing_app();
+        app.selected = 1; // node "b"
+        let node = app.selected_row().unwrap().node;
+
+        edit_headline(&mut app);
+        handle_headline_input(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('Z'), KeyModifiers::NONE),
+        );
+        handle_headline_input(&mut app, KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+
+        assert!(app.input.is_none());
+        assert_eq!(app.document.outline.nodes[&node].headline, "Z");
+        assert!(app.dirty_nodes.contains(&node));
+        let row = app.selected_row().unwrap();
+        assert_eq!(app.document.outline.nodes[&row.node].headline, "C");
+
+        // Typed text in a freshly-inserted node is committed too, but
+        // doesn't chain into starting yet another insert.
+        insert_headline(&mut app);
+        handle_headline_input(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('D'), KeyModifiers::NONE),
+        );
+        handle_headline_input(&mut app, KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+
+        assert!(app.input.is_none());
+        assert_eq!(app.document.outline.nodes.len(), 4);
+        assert!(
+            app.document
+                .outline
+                .nodes
+                .values()
+                .any(|node| node.headline == "D")
+        );
+    }
+
+    #[test]
     fn accepting_a_new_headline_immediately_starts_the_next_sibling() {
         let mut app = editing_app();
 
@@ -6189,7 +6215,7 @@ fn both(doc, target) {}
         );
         let input = app.input.as_ref().expect("chained insert starts editing");
         assert!(input.inserted_position.is_some());
-        assert_eq!(input.input.value(), "");
+        assert_eq!(input.value(), "");
 
         handle_headline_input(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 
@@ -6361,9 +6387,9 @@ fn both(doc, target) {}
         handle_headline_input(&mut app, KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
 
         let input = app.input.as_ref().unwrap();
-        assert_eq!(input.input.value(), "!A");
-        assert_eq!(input.input.cursor(), 2);
-        assert!(!input.selected);
+        assert_eq!(input.value(), "!A");
+        assert_eq!(input.input.cursor(), (0, 2));
+        assert!(!input.input.is_selecting());
     }
 
     #[test]
