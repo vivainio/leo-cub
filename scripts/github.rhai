@@ -15,7 +15,7 @@
 // COMMANDS maps the functions meant to be exposed as runnable commands to
 // a one-line description of what running them does, shown alongside each
 // in the palette -- everything else here (shq, gh_repo_flag, gh_parse_url,
-// gh_view_url, jira_parse_headline, zaira_run_json, zaira_view, and the functions needing
+// gh_view_url, jira_parse_headline, zaira_run_json, zaira_get_segments, and the functions needing
 // more than `doc`/`target`) is a library helper, callable from other
 // scripts or the REPL but not listed for direct invocation. Every listed
 // function takes exactly `(doc, target)` -- `target` is a `Node` for
@@ -281,15 +281,44 @@ fn zaira_run_json(doc, cmd) {
     parse_json(result.stdout)
 }
 
-//@ fn zaira_view
-/// Fetches a Jira ticket's key/summary/etc. as JSON via `zaira get KEY
-/// --format json` -- used only for the fields `jira` needs to build a
-/// node headline (`key`, `summary`). `zaira` resolves Jira
+//@ fn zaira_get_segments
+/// Fetches a Jira ticket via `zaira get KEY --format ndjson` -- one
+/// self-describing JSON object per line (`type`: `"meta"`,
+/// `"description"`, `"paragraph"`, `"links"`, or `"comment"`), already
+/// split apart by `zaira` itself. `jira` folds these into `target.b`
+/// and its `Meta`/`Comments` children without having to pick a rendered
+/// markdown/frontmatter blob back apart by hand. `zaira` resolves Jira
 /// credentials and the ticket's project from its own config (`zaira
 /// init`), so unlike `gh_repo_flag` there's no per-outline `--repo`-style
 /// override here.
-fn zaira_view(doc, key) {
-    zaira_run_json(doc, "zaira get " + shq(key) + " --format json")
+fn zaira_get_segments(doc, key) {
+    let cmd = "zaira get " + shq(key) + " --format ndjson";
+    let result = sh_in(doc.dir(), cmd);
+    if result.code != 0 {
+        throw "`" + cmd + "` failed (exit " + result.code.to_string() + "): " + result.stderr;
+    }
+    let segments = [];
+    for line in result.stdout.split("\n") {
+        if line != "" {
+            segments.push(parse_json(line));
+        }
+    }
+    segments
+}
+
+//@ fn jira_join
+/// Joins an array of stringifiable values with `sep` -- Rhai's `Array`
+/// has no built-in `join`. "none" for an empty array, so `Meta`'s
+/// `components`/`labels` lines are never left blank.
+fn jira_join(arr, sep) {
+    if arr.len() == 0 {
+        return "none";
+    }
+    let s = arr[0].to_string();
+    for i in 1..arr.len() {
+        s += sep + arr[i].to_string();
+    }
+    s
 }
 
 //@ fn jira_populate_children
@@ -322,13 +351,15 @@ fn zaira_search_text(doc, text) {
 /// Command, dispatching on `jira_parse_headline(target.h)`:
 /// - `@jira KEY ...` -- overwrites `target`'s headline with the ticket's
 ///   key/summary (the `@jira KEY` prefix is kept so the node stays
-///   recognized by this script after import) and splits its content into
-///   three children instead of one flat body: `Meta` (key/type/status/
-///   priority/assignee/reporter/dates/url), `Description` (the ticket
-///   description, `zaira`'s own markdown conversion of it), and `Comments`
-///   (one `#N author (date)` child per comment, oldest first, numbered so
-///   same-author-same-day comments don't collide as identical headlines).
-///   `target.b` itself is left empty -- it's now just a container.
+///   recognized by this script after import), folds the `description`/
+///   `paragraph`/`links` segments from `zaira_get_segments` into
+///   `target.b` as description text followed by one `## ` section per
+///   paragraph field and a trailing `## Links` section, and splits the
+///   rest into two children: `Meta` (key/type/status/priority/assignee/
+///   reporter/dates/components/labels/parent/custom fields/url) and
+///   `Comments` (one `#N author (date)` child per `comment` segment,
+///   oldest first, numbered so same-author-same-day comments don't
+///   collide as identical headlines).
 /// - `@jira my` / `@jira search TEXT` -- leaves `target` itself alone and
 ///   instead refreshes its children (via `jira_populate_children`) with
 ///   one `@jira KEY: summary` node per ticket assigned to you, or
@@ -342,29 +373,51 @@ fn jira(doc, target) {
         return;
     }
     if parsed.kind == "ticket" {
-        let item = zaira_view(doc, parsed.key);
-        target.h = "@jira " + item.key + ": " + item.summary;
-        target.b = "";
+        let segments = zaira_get_segments(doc, parsed.key);
+        let meta = #{};
+        let body = "";
+        let comments = [];
+        for seg in segments {
+            if seg.type == "meta" {
+                meta = seg;
+            } else if seg.type == "description" {
+                body += seg.markdown;
+            } else if seg.type == "paragraph" {
+                body += "\n\n## " + seg.name + "\n\n" + seg.markdown;
+            } else if seg.type == "links" {
+                body += "\n\n## Links\n\n" + seg.markdown;
+            } else if seg.type == "comment" {
+                comments.push(seg);
+            }
+        }
+        target.h = "@jira " + meta.key + ": " + meta.summary;
+        target.b = "@language markdown\n" + body;
         let path = target.path();
-        let meta = doc.ensure(path + "/Meta");
-        meta.b = "key: " + item.key + "\n"
-            + "summary: " + item.summary + "\n"
-            + "type: " + item.issuetype + "\n"
-            + "status: " + item.status + "\n"
-            + "priority: " + item.priority + "\n"
-            + "assignee: " + item.assignee + "\n"
-            + "reporter: " + item.reporter + "\n"
-            + "created: " + item.created + "\n"
-            + "updated: " + item.updated + "\n"
-            + "url: " + item.url;
-        let description = doc.ensure(path + "/Description");
-        description.b = "@language markdown\n" + item.description;
-        let comment_count = item.comments.len();
-        for i in 0..comment_count {
-            let c = item.comments[i];
-            let label = "#" + (i + 1).to_string() + " " + c.author + " (" + c.created.sub_string(0, 10) + ")";
+        let meta_node = doc.ensure(path + "/Meta");
+        let meta_b = "key: " + meta.key + "\n"
+            + "summary: " + meta.summary + "\n"
+            + "type: " + meta.issuetype + "\n"
+            + "status: " + meta.status + "\n"
+            + "priority: " + meta.priority + "\n"
+            + "assignee: " + meta.assignee + "\n"
+            + "reporter: " + meta.reporter + "\n"
+            + "created: " + meta.created + "\n"
+            + "updated: " + meta.updated + "\n"
+            + "components: " + jira_join(meta.components, ", ") + "\n"
+            + "labels: " + jira_join(meta.labels, ", ") + "\n";
+        if meta.parent != () {
+            meta_b += "parent: " + meta.parent.to_string() + "\n";
+        }
+        for key in meta.custom_fields.keys() {
+            meta_b += key + ": " + meta.custom_fields[key] + "\n";
+        }
+        meta_b += "url: " + meta.url;
+        meta_node.b = meta_b;
+        for i in 0..comments.len() {
+            let c = comments[i];
+            let label = "#" + (i + 1).to_string() + " " + c.author + " (" + c.created + ")";
             let n = doc.ensure(path + "/Comments/" + label);
-            n.b = "@language markdown\n" + c.body;
+            n.b = "@language markdown\n" + c.markdown;
         }
         return;
     }
