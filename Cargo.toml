@@ -24,6 +24,7 @@ include_dir = "0.7"
 crossterm = { version = "0.29.0", optional = true, features = ["osc52"] }
 quick-xml = "0.41"
 ratatui = { version = "0.30.0", optional = true, features = ["unstable-rendered-line-info"] }
+ratatui-textarea = { version = "0.9.2", optional = true }
 rayon = "1.10"
 regex = "1.13"
 rhai = { version = "1", optional = true }
@@ -42,10 +43,11 @@ tree-sitter-python = "0.23"
 tree-sitter-rust = "0.23"
 tree-sitter-typescript = "0.23.2"
 tree-sitter-xml = "0.7.0"
+tui-input = { version = "0.15.4", optional = true }
 
 [features]
 default = ["tui", "syntax"]
-tui = ["dep:ratatui", "dep:crossterm", "rhai"]
+tui = ["dep:ratatui", "dep:ratatui-textarea", "dep:crossterm", "dep:tui-input", "rhai"]
 # Embedded Rhai scripting: `@action` bodies (tui feature) and the
 # standalone `cub run` test-script command.
 rhai = ["dep:rhai", "dep:rhai-fs"]

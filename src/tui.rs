@@ -9,7 +9,6 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use crate::body_input::{self, BodyInput, BodyInputOutcome, BodyInputToken};
 use anyhow::{Context, Result, bail};
 use crossterm::{
     clipboard::CopyToClipboard,
@@ -429,18 +428,17 @@ impl App {
 
 struct HeadlineInput {
     node: NodeId,
-    value: String,
+    input: tui_input::Input,
     original: String,
-    cursor: usize,
     selected: bool,
     inserted_position: Option<PositionId>,
 }
 
-/// Ties the node-agnostic [`BodyInput`] text-editing state to the node it's
-/// editing, for the quick body entry (`b`). See `body_input.rs`.
+/// Ties a [`ratatui_textarea::TextArea`]'s text-editing state to the node
+/// it's editing, for the quick body entry (`b`).
 struct BodyEdit {
     node: NodeId,
-    input: BodyInput,
+    input: ratatui_textarea::TextArea<'static>,
     /// Layout to restore on commit/cancel -- opening the editor forces the
     /// body pane full-width (there's more to work with than the narrow
     /// default split, and editing while `outline_full_width` is set would
@@ -681,9 +679,8 @@ fn event_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
 /// Cmd+V/Ctrl+Shift+V -- the terminal emulator delivers the clipboard text
 /// directly, so no OS clipboard access is needed here). The quick body
 /// entry (`b`) consumes a paste as one chunk via
-/// [`insert_paste_into_body`]/[`BodyInput::insert_paste`], collapsing large
-/// pastes to a placeholder. Every other text field predates bracketed paste
-/// being enabled and expects one key at a time (as an un-bracketed paste
+/// [`insert_paste_into_body`], inserting it as a single atomic edit. Every
+/// other text field expects one key at a time (as an un-bracketed paste
 /// would have delivered before), so its paste is replayed character by
 /// character through the same handler a keypress would use -- identical
 /// behavior to before, just arriving as a single clean event instead of a
@@ -2366,29 +2363,29 @@ fn reveal_and_select(app: &mut App, position: &PositionId) {
 }
 
 fn cancel_headline_edit(app: &mut App) {
-    let input = app.input.take().expect("input exists");
-    if let Some(position) = input.inserted_position {
+    let state = app.input.take().expect("input exists");
+    if let Some(position) = state.inserted_position {
         remove_position(&mut app.document.outline, &position);
-        app.document.outline.nodes.remove(&input.node);
+        app.document.outline.nodes.remove(&state.node);
     } else {
         app.document
             .outline
             .nodes
-            .get_mut(&input.node)
+            .get_mut(&state.node)
             .expect("node exists")
-            .headline = input.original;
+            .headline = state.original;
     }
 }
 
 /// Accepts the in-progress headline edit, same as pressing Enter. Returns
 /// `false` (leaving the edit open) if the headline is empty.
 fn commit_headline_edit(app: &mut App) -> bool {
-    let Some(input) = app.input.as_ref() else {
+    let Some(state) = app.input.as_ref() else {
         return false;
     };
-    let headline = input.value.trim().to_owned();
-    let node_id = input.node.clone();
-    let inserted_position = input.inserted_position.clone();
+    let headline = state.input.value().trim().to_owned();
+    let node_id = state.node.clone();
+    let inserted_position = state.inserted_position.clone();
     if headline.is_empty() {
         app.status = "headline may not be empty".into();
         return false;
@@ -2429,106 +2426,77 @@ fn commit_headline_edit(app: &mut App) -> bool {
 }
 
 fn handle_headline_input(app: &mut App, key: KeyEvent) {
-    let Some(input) = app.input.as_mut() else {
+    let Some(state) = app.input.as_mut() else {
         return;
     };
     match key.code {
         KeyCode::Enter => {
             commit_headline_edit(app);
+            return;
         }
         KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             if commit_headline_edit(app) {
                 save(app);
             }
+            return;
         }
         KeyCode::Esc => {
             cancel_headline_edit(app);
             app.status = "headline edit cancelled".into();
+            return;
         }
         KeyCode::Up => {
             cancel_headline_edit(app);
             app.status = "headline edit cancelled".into();
             app.move_selection(-1);
+            return;
         }
         KeyCode::Down => {
             cancel_headline_edit(app);
             app.status = "headline edit cancelled".into();
             app.move_selection(1);
-        }
-        KeyCode::Backspace => {
-            if input.selected {
-                input.value.clear();
-                input.cursor = 0;
-                input.selected = false;
-            } else if input.cursor > 0 {
-                let previous = input.value[..input.cursor]
-                    .char_indices()
-                    .next_back()
-                    .map_or(0, |(index, _)| index);
-                input.value.drain(previous..input.cursor);
-                input.cursor = previous;
-            }
-        }
-        KeyCode::Delete => {
-            if input.selected {
-                input.value.clear();
-                input.cursor = 0;
-                input.selected = false;
-            } else if input.cursor < input.value.len() {
-                let next = input.cursor
-                    + input.value[input.cursor..]
-                        .chars()
-                        .next()
-                        .expect("cursor precedes a character")
-                        .len_utf8();
-                input.value.drain(input.cursor..next);
-            }
-        }
-        KeyCode::Left => {
-            if input.selected {
-                input.cursor = 0;
-                input.selected = false;
-            } else if input.cursor > 0 {
-                input.cursor = input.value[..input.cursor]
-                    .char_indices()
-                    .next_back()
-                    .map_or(0, |(index, _)| index);
-            }
-        }
-        KeyCode::Right => {
-            if input.selected {
-                input.cursor = input.value.len();
-                input.selected = false;
-            } else if input.cursor < input.value.len() {
-                input.cursor += input.value[input.cursor..]
-                    .chars()
-                    .next()
-                    .expect("cursor precedes a character")
-                    .len_utf8();
-            }
-        }
-        KeyCode::Home => {
-            input.cursor = 0;
-            input.selected = false;
-        }
-        KeyCode::End => {
-            input.cursor = input.value.len();
-            input.selected = false;
-        }
-        KeyCode::Char(character)
-            if !key
-                .modifiers
-                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-        {
-            if input.selected {
-                input.value.clear();
-                input.cursor = 0;
-                input.selected = false;
-            }
-            input.value.insert(input.cursor, character);
-            input.cursor += character.len_utf8();
+            return;
         }
         _ => {}
+    }
+
+    // The first keystroke over a freshly-opened, fully-selected rename
+    // replaces the whole value. `tui_input::Input` has no selection concept
+    // of its own, so this has to be layered on top: swallow the key here
+    // instead of letting it fall through to the generic `to_input_request`
+    // dispatch below.
+    if state.selected {
+        state.selected = false;
+        match key.code {
+            KeyCode::Backspace | KeyCode::Delete => {
+                state.input.reset();
+                return;
+            }
+            KeyCode::Left | KeyCode::Home => {
+                state.input.handle(tui_input::InputRequest::GoToStart);
+                return;
+            }
+            KeyCode::Right | KeyCode::End => {
+                state.input.handle(tui_input::InputRequest::GoToEnd);
+                return;
+            }
+            KeyCode::Char(character)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                state.input = tui_input::Input::default();
+                state
+                    .input
+                    .handle(tui_input::InputRequest::InsertChar(character));
+                return;
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(request) = tui_input::backend::crossterm::to_input_request(&Event::Key(key)) {
+        state.input.handle(request);
     }
 }
 
@@ -2542,8 +2510,7 @@ fn edit_headline(app: &mut App) {
     let original = app.document.outline.nodes[&row.node].headline.clone();
     app.input = Some(HeadlineInput {
         node: row.node,
-        value: original.clone(),
-        cursor: original.len(),
+        input: tui_input::Input::new(original.clone()),
         selected: true,
         original,
         inserted_position: None,
@@ -2567,9 +2534,15 @@ fn quick_edit_body(app: &mut App) {
     let restore_outline_full_width = app.outline_full_width;
     app.body_full_width = true;
     app.outline_full_width = false;
+    let is_empty = original.is_empty();
+    let mut input =
+        ratatui_textarea::TextArea::new(original.split('\n').map(str::to_owned).collect());
+    if !is_empty {
+        input.select_all();
+    }
     app.body_input = Some(BodyEdit {
         node: row.node,
-        input: BodyInput::new(original),
+        input,
         restore_body_full_width,
         restore_outline_full_width,
     });
@@ -2592,7 +2565,7 @@ fn commit_body_edit(app: &mut App) -> bool {
     let Some(edit) = app.body_input.as_ref() else {
         return false;
     };
-    let body = edit.input.resolve();
+    let body = edit.input.lines().join("\n");
     let node_id = edit.node.clone();
     let restore_body_full_width = edit.restore_body_full_width;
     let restore_outline_full_width = edit.restore_outline_full_width;
@@ -2619,29 +2592,37 @@ fn commit_body_edit(app: &mut App) -> bool {
 }
 
 /// Inserts clipboard text pasted (via bracketed paste) while the quick body
-/// entry is open. See [`BodyInput::insert_paste`].
+/// entry is open, as one atomic edit (so a single Ctrl-Z / Backspace at the
+/// following char position doesn't shred it back apart character by
+/// character).
 fn insert_paste_into_body(app: &mut App, text: String) {
     let Some(edit) = app.body_input.as_mut() else {
         return;
     };
-    edit.input.insert_paste(text);
+    edit.input.insert_str(text);
 }
 
+/// `Ctrl-D`/`Ctrl-S`/`Esc` are intercepted here rather than forwarded to
+/// [`ratatui_textarea::TextArea::input`]: its own default keymap binds
+/// `Ctrl-D` to deleting the character under the cursor (an Emacs-style
+/// binding), which would collide with this app's "commit" shortcut.
 fn handle_body_input(app: &mut App, key: KeyEvent) {
     let Some(edit) = app.body_input.as_mut() else {
         return;
     };
-    match edit.input.handle_key(key.code, key.modifiers) {
-        BodyInputOutcome::Continue => {}
-        BodyInputOutcome::Commit => {
+    match key.code {
+        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             commit_body_edit(app);
         }
-        BodyInputOutcome::CommitAndSave => {
+        KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             if commit_body_edit(app) {
                 save(app);
             }
         }
-        BodyInputOutcome::Cancel => cancel_body_edit(app),
+        KeyCode::Esc => cancel_body_edit(app),
+        _ => {
+            edit.input.input(key);
+        }
     }
 }
 
@@ -2678,9 +2659,8 @@ fn insert_headline(app: &mut App) {
     select_position(app, &inserted);
     app.input = Some(HeadlineInput {
         node: id,
-        value: String::new(),
+        input: tui_input::Input::default(),
         original: String::new(),
-        cursor: 0,
         selected: false,
         inserted_position: Some(inserted),
     });
@@ -3396,13 +3376,18 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
             if let Some(input) = input {
                 if input.selected {
                     spans.push(Span::styled(
-                        input.value.as_str(),
+                        input.input.value().to_owned(),
                         Style::default().add_modifier(Modifier::REVERSED),
                     ));
                 } else {
-                    spans.extend(headline_spans(&input.value[..input.cursor]));
+                    let value = input.input.value();
+                    let byte_cursor = value
+                        .char_indices()
+                        .nth(input.input.cursor())
+                        .map_or(value.len(), |(index, _)| index);
+                    spans.extend(headline_spans(&value[..byte_cursor]));
                     spans.push(Span::raw("▏"));
-                    spans.extend(headline_spans(&input.value[input.cursor..]));
+                    spans.extend(headline_spans(&value[byte_cursor..]));
                 }
             } else {
                 spans.extend(headline_spans(&node.headline));
@@ -3501,21 +3486,24 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
         frame.render_widget(node_block, columns[1]);
         if let Some(row) = rows.get(app.selected) {
             let wrap = app.wrap_for(Some(&row.position));
-            // Owned rather than borrowed, so it doesn't hold `app.body_input`
-            // borrowed across the `body_text(app, row)` call below, which
-            // needs `app` mutably.
             let editing_body = app
                 .body_input
                 .as_ref()
                 .is_some_and(|edit| edit.node == row.node);
-            let mut body = if editing_body {
-                body_input_text(&app.body_input.as_ref().expect("editing_body is true").input)
-            } else if let Some((_, _, _, text)) = output_info {
-                Text::from(text)
+            if editing_body {
+                let edit = app.body_input.as_mut().expect("editing_body is true");
+                edit.input.set_wrap_mode(if wrap {
+                    ratatui_textarea::WrapMode::WordOrGlyph
+                } else {
+                    ratatui_textarea::WrapMode::None
+                });
+                frame.render_widget(&edit.input, node_area);
             } else {
-                body_text(app, row)
-            };
-            if !editing_body {
+                let mut body = if let Some((_, _, _, text)) = output_info {
+                    Text::from(text)
+                } else {
+                    body_text(app, row)
+                };
                 if let Some(search) = &app.search
                     && !search.query.is_empty()
                     && let Ok(pattern) = RegexBuilder::new(&regex::escape(&search.query))
@@ -3527,31 +3515,31 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
                 if let Some(selection) = app.body_selection {
                     body = highlight_selection_in_text(body, selection);
                 }
+                let body_width = body.width();
+                let mut paragraph = Paragraph::new(body);
+                if wrap {
+                    paragraph = paragraph.wrap(Wrap { trim: false });
+                }
+                app.body_page_size = usize::from(node_area.height).max(1);
+                let body_height = paragraph.line_count(node_area.width);
+                app.body_scroll_max = body_height.saturating_sub(app.body_page_size);
+                app.body_horizontal_scroll_max = if wrap {
+                    0
+                } else {
+                    body_width.saturating_sub(usize::from(node_area.width))
+                };
+                app.body_scroll = app.body_scroll.min(app.body_scroll_max);
+                app.body_horizontal_scroll = app
+                    .body_horizontal_scroll
+                    .min(app.body_horizontal_scroll_max);
+                frame.render_widget(
+                    paragraph.scroll((
+                        app.body_scroll.min(u16::MAX as usize) as u16,
+                        app.body_horizontal_scroll.min(u16::MAX as usize) as u16,
+                    )),
+                    node_area,
+                );
             }
-            let body_width = body.width();
-            let mut paragraph = Paragraph::new(body);
-            if wrap {
-                paragraph = paragraph.wrap(Wrap { trim: false });
-            }
-            app.body_page_size = usize::from(node_area.height).max(1);
-            let body_height = paragraph.line_count(node_area.width);
-            app.body_scroll_max = body_height.saturating_sub(app.body_page_size);
-            app.body_horizontal_scroll_max = if wrap {
-                0
-            } else {
-                body_width.saturating_sub(usize::from(node_area.width))
-            };
-            app.body_scroll = app.body_scroll.min(app.body_scroll_max);
-            app.body_horizontal_scroll = app
-                .body_horizontal_scroll
-                .min(app.body_horizontal_scroll_max);
-            frame.render_widget(
-                paragraph.scroll((
-                    app.body_scroll.min(u16::MAX as usize) as u16,
-                    app.body_horizontal_scroll.min(u16::MAX as usize) as u16,
-                )),
-                node_area,
-            );
         }
     }
     let flash = app
@@ -4182,95 +4170,6 @@ fn highlight_char_range_in_line(line: Line<'static>, from: usize, to: usize) -> 
         }
     }
     Line::from(spans)
-}
-
-/// Renders a [`BodyInput`] in progress: pasted-text placeholders in a
-/// distinct style, and either a cursor marker (plain editing) or the whole
-/// value shown reversed (the initial "fully selected" state, matching how
-/// `HeadlineInput` shows a pending rename).
-fn body_input_text(input: &BodyInput) -> Text<'static> {
-    fn push_tokens(
-        lines: &mut Vec<Line<'static>>,
-        tokens: Vec<BodyInputToken<'_>>,
-        text_style: Style,
-        placeholder_style: Style,
-    ) {
-        for token in tokens {
-            let line = lines.last_mut().expect("body_input_text always has a line");
-            match token {
-                BodyInputToken::Text(text) => {
-                    line.spans.push(Span::styled(text.to_owned(), text_style));
-                }
-                BodyInputToken::Newline => lines.push(Line::default()),
-                BodyInputToken::Paste(block) => {
-                    let label = format!(
-                        "[pasted {} line{}]",
-                        block.lines,
-                        if block.lines == 1 { "" } else { "s" }
-                    );
-                    line.spans.push(Span::styled(label, placeholder_style));
-                }
-            }
-        }
-    }
-
-    let placeholder_style = Style::default().fg(Color::Black).bg(Color::Yellow);
-    let mut lines: Vec<Line<'static>> = vec![Line::default()];
-    if input.selected {
-        let reversed = Style::default().add_modifier(Modifier::REVERSED);
-        push_tokens(
-            &mut lines,
-            body_input::tokenize(&input.value, &input.pastes),
-            reversed,
-            placeholder_style.add_modifier(Modifier::REVERSED),
-        );
-    } else {
-        push_tokens(
-            &mut lines,
-            body_input::tokenize(&input.value[..input.cursor], &input.pastes),
-            Style::default(),
-            placeholder_style,
-        );
-        let reversed = Style::default().add_modifier(Modifier::REVERSED);
-        let after_cursor = &input.value[input.cursor..];
-        let cursor_char = after_cursor.chars().next();
-        // Reverse-style the character the cursor sits on in place instead of
-        // splicing in a "▏" glyph: an inserted column shifts word-wrap (and
-        // so the whole body below it) every time the cursor moves. Only a
-        // newline, a paste marker, or the very end of the value has no
-        // character to reverse-style in place, and those fall back to a
-        // synthesized marker that affects only their own line.
-        match cursor_char.filter(|&character| body_input::is_plain_char(character, &input.pastes)) {
-            Some(character) => {
-                lines
-                    .last_mut()
-                    .expect("body_input_text always has a line")
-                    .spans
-                    .push(Span::styled(character.to_string(), reversed));
-                let rest_start = input.cursor + character.len_utf8();
-                push_tokens(
-                    &mut lines,
-                    body_input::tokenize(&input.value[rest_start..], &input.pastes),
-                    Style::default(),
-                    placeholder_style,
-                );
-            }
-            None => {
-                lines
-                    .last_mut()
-                    .expect("body_input_text always has a line")
-                    .spans
-                    .push(Span::styled(" ", reversed));
-                push_tokens(
-                    &mut lines,
-                    body_input::tokenize(after_cursor, &input.pastes),
-                    Style::default(),
-                    placeholder_style,
-                );
-            }
-        }
-    }
-    Text::from(lines)
 }
 
 fn body_text(app: &mut App, row: &Row) -> Text<'static> {
@@ -5963,8 +5862,8 @@ fn both(doc, target) {}
         );
 
         let input = app.input.as_ref().unwrap();
-        assert_eq!(input.value, "Z");
-        assert_eq!(input.cursor, 1);
+        assert_eq!(input.input.value(), "Z");
+        assert_eq!(input.input.cursor(), 1);
         assert!(!input.selected);
     }
 
@@ -5983,7 +5882,7 @@ fn both(doc, target) {}
 
         edit_headline(&mut app);
         assert!(app.input.is_some());
-        app.input.as_mut().unwrap().value = "Renamed".into();
+        app.input.as_mut().unwrap().input = tui_input::Input::new("Renamed".into());
         handle_headline_input(
             &mut app,
             KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
@@ -6015,8 +5914,8 @@ fn both(doc, target) {}
         quick_edit_body(&mut app);
 
         let edit = app.body_input.as_ref().unwrap();
-        assert_eq!(edit.input.value, "existing body");
-        assert!(edit.input.selected);
+        assert_eq!(edit.input.lines().join("\n"), "existing body");
+        assert!(edit.input.is_selecting());
         assert!(
             app.body_full_width,
             "should expand to full width while editing"
@@ -6117,7 +6016,7 @@ fn both(doc, target) {}
     }
 
     #[test]
-    fn pasting_into_the_quick_body_entry_collapses_a_multiline_paste_and_resolves_on_commit() {
+    fn pasting_into_the_quick_body_entry_inserts_it_and_commits_it_verbatim() {
         let mut app = editing_app();
 
         quick_edit_body(&mut app);
@@ -6152,7 +6051,7 @@ fn both(doc, target) {}
         );
 
         edit_headline(&mut app);
-        app.input.as_mut().unwrap().value = "@file test.md".into();
+        app.input.as_mut().unwrap().input = tui_input::Input::new("@file test.md".into());
         handle_headline_input(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
         let file = &app.writable_external[&NodeId::from("a")];
@@ -6192,7 +6091,7 @@ fn both(doc, target) {}
         let mut app = build_app(directory.join("outline.leo"), true, None).unwrap();
         app.selected = 0;
         edit_headline(&mut app);
-        app.input.as_mut().unwrap().value = "@f script.rhai".into();
+        app.input.as_mut().unwrap().input = tui_input::Input::new("@f script.rhai".into());
         handle_headline_input(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         save(&mut app);
 
@@ -6290,7 +6189,7 @@ fn both(doc, target) {}
         );
         let input = app.input.as_ref().expect("chained insert starts editing");
         assert!(input.inserted_position.is_some());
-        assert_eq!(input.value, "");
+        assert_eq!(input.input.value(), "");
 
         handle_headline_input(&mut app, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 
@@ -6462,8 +6361,8 @@ fn both(doc, target) {}
         handle_headline_input(&mut app, KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
 
         let input = app.input.as_ref().unwrap();
-        assert_eq!(input.value, "!A");
-        assert_eq!(input.cursor, 2);
+        assert_eq!(input.input.value(), "!A");
+        assert_eq!(input.input.cursor(), 2);
         assert!(!input.selected);
     }
 

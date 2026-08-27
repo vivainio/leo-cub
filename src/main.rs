@@ -13,8 +13,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[cfg(feature = "tui")]
-mod body_input;
 mod install;
 #[cfg(feature = "rhai")]
 mod rhai_run;
