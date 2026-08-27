@@ -403,10 +403,9 @@ impl App {
             }
         }
         self.status = format!(
-            "{} ({} node{} marked)",
+            "{} (● {})",
             if all_marked { "unmarked" } else { "marked" },
-            self.marked.len(),
-            if self.marked.len() == 1 { "" } else { "s" }
+            self.marked.len()
         );
     }
 
