@@ -62,6 +62,7 @@ struct App {
     expanded: HashSet<PositionId>,
     selected: usize,
     selection_anchor: Option<usize>,
+    marked: HashSet<PositionId>,
     outline_scroll: usize,
     body_scroll: usize,
     body_page_size: usize,
@@ -149,6 +150,7 @@ impl App {
             expanded,
             selected: 0,
             selection_anchor: None,
+            marked: HashSet::new(),
             outline_scroll: 0,
             body_scroll: 0,
             body_page_size: 1,
@@ -379,6 +381,41 @@ impl App {
         let wrap = !self.wrap_for(position.as_ref());
         self.set_wrap_for(position.as_ref(), wrap);
         self.status = format!("word wrap {}", if wrap { "enabled" } else { "disabled" });
+    }
+
+    /// Toggles the mark on every row in the current selection range (just
+    /// the current row when there's no active Shift-range). If any are
+    /// unmarked, marks all of them; if all are already marked, unmarks all
+    /// of them -- so one keypress on a range always leaves it in a single,
+    /// predictable state. `x`/`c` prefer the marked set over the row-range
+    /// selection when it's non-empty (see `selected_tree_roots`).
+    fn toggle_mark(&mut self) {
+        let rows = self.selected_rows();
+        if rows.is_empty() {
+            return;
+        }
+        let all_marked = rows.iter().all(|row| self.marked.contains(&row.position));
+        for row in &rows {
+            if all_marked {
+                self.marked.remove(&row.position);
+            } else {
+                self.marked.insert(row.position.clone());
+            }
+        }
+        self.status = format!(
+            "{} ({} node{} marked)",
+            if all_marked { "unmarked" } else { "marked" },
+            self.marked.len(),
+            if self.marked.len() == 1 { "" } else { "s" }
+        );
+    }
+
+    fn clear_marks(&mut self) {
+        if self.marked.is_empty() {
+            return;
+        }
+        self.marked.clear();
+        self.status = "all marks cleared".into();
     }
 
     fn toggle(&mut self, expand: bool) {
@@ -783,6 +820,8 @@ fn handle_key(
         KeyCode::Char('x') if key.modifiers.is_empty() => cut_selected(app),
         KeyCode::Char('v') if key.modifiers.is_empty() => paste_tree(app, false),
         KeyCode::Char('V') if key.modifiers == KeyModifiers::SHIFT => paste_tree(app, true),
+        KeyCode::Char('m') if key.modifiers.is_empty() => app.toggle_mark(),
+        KeyCode::Char('M') if key.modifiers == KeyModifiers::SHIFT => app.clear_marks(),
         KeyCode::Up if key.modifiers == KeyModifiers::SHIFT => {
             app.selection_anchor.get_or_insert(app.selected);
             app.extend_selection(-1);
@@ -851,7 +890,7 @@ fn handle_key(
             );
         }
         #[cfg(feature = "syntax")]
-        KeyCode::Char('m') => app.toggle_preview(),
+        KeyCode::Char('p') => app.toggle_preview(),
         KeyCode::Down if app.body_full_width => app.scroll_body_lines(1),
         KeyCode::Up if app.body_full_width => app.scroll_body_lines(-1),
         KeyCode::Down => app.move_selection(1),
@@ -2354,6 +2393,34 @@ fn restore_expanded_nodes(app: &mut App, nodes: HashSet<NodeId>) {
         .collect();
 }
 
+/// Captures which *nodes* (not positions) are currently marked, so mark
+/// state can survive a structural edit that shifts `PositionId` index paths
+/// out from under them -- same rationale as `snapshot_expanded_nodes`. A
+/// node cut along with its mark simply won't be found by
+/// `restore_marked_nodes` afterwards, which is what clears it.
+fn snapshot_marked_nodes(app: &App) -> HashSet<NodeId> {
+    app.marked
+        .iter()
+        .filter_map(|position| {
+            app.document
+                .outline
+                .position(position)
+                .map(|entry| entry.node.clone())
+        })
+        .collect()
+}
+
+fn restore_marked_nodes(app: &mut App, nodes: HashSet<NodeId>) {
+    if nodes.is_empty() {
+        return;
+    }
+    app.marked = all_rows(&app.document.outline)
+        .into_iter()
+        .filter(|row| nodes.contains(&row.node))
+        .map(|row| row.position)
+        .collect();
+}
+
 fn reveal_and_select(app: &mut App, position: &PositionId) {
     let components = position.0.split('/').collect::<Vec<_>>();
     for end in 1..components.len() {
@@ -2711,6 +2778,7 @@ fn cut_selected(app: &mut App) {
     copy_selected(app);
     rows.sort_by_key(|row| path_indices(&row.position));
     let expanded_nodes = snapshot_expanded_nodes(app);
+    let marked_nodes = snapshot_marked_nodes(app);
     for row in rows.iter().rev() {
         remove_position(&mut app.document.outline, &row.position);
     }
@@ -2727,6 +2795,7 @@ fn cut_selected(app: &mut App) {
     app.preview_cache.clear();
     app.source_locations.clear();
     restore_expanded_nodes(app, expanded_nodes);
+    restore_marked_nodes(app, marked_nodes);
     app.selected = app.selected.min(app.rows().len().saturating_sub(1));
     app.selection_anchor = None;
     app.status = format!(
@@ -2782,6 +2851,7 @@ fn paste_tree(app: &mut App, as_clone: bool) {
                 .or_insert_with(|| node.clone());
         }
         let expanded_nodes = snapshot_expanded_nodes(app);
+        let marked_nodes = snapshot_marked_nodes(app);
         let Some(siblings) = children_mut(&mut app.document.outline, parent.as_ref()) else {
             return;
         };
@@ -2796,6 +2866,7 @@ fn paste_tree(app: &mut App, as_clone: bool) {
         app.preview_cache.clear();
         app.source_locations.clear();
         restore_expanded_nodes(app, expanded_nodes);
+        restore_marked_nodes(app, marked_nodes);
         select_position(app, &target);
         app.status = format!("{count} tree(s) pasted as clones (Ctrl-S to save)");
         app.flash = Some((format!("PASTED {count} TREE(S) AS CLONES"), Instant::now()));
@@ -2833,6 +2904,7 @@ fn paste_tree(app: &mut App, as_clone: bool) {
         app.document.outline.nodes.insert(id, node);
     }
     let expanded_nodes = snapshot_expanded_nodes(app);
+    let marked_nodes = snapshot_marked_nodes(app);
     let Some(siblings) = children_mut(&mut app.document.outline, parent.as_ref()) else {
         return;
     };
@@ -2847,6 +2919,7 @@ fn paste_tree(app: &mut App, as_clone: bool) {
     app.preview_cache.clear();
     app.source_locations.clear();
     restore_expanded_nodes(app, expanded_nodes);
+    restore_marked_nodes(app, marked_nodes);
     select_position(app, &target);
     app.status = format!("{count} tree(s) pasted (Ctrl-S to save)");
     app.flash = Some((
@@ -2856,7 +2929,14 @@ fn paste_tree(app: &mut App, as_clone: bool) {
 }
 
 fn selected_tree_roots(app: &App) -> Vec<Row> {
-    let rows = app.selected_rows();
+    let rows = if app.marked.is_empty() {
+        app.selected_rows()
+    } else {
+        app.rows()
+            .into_iter()
+            .filter(|row| app.marked.contains(&row.position))
+            .collect()
+    };
     let selected: HashSet<_> = rows.iter().map(|row| row.position.0.clone()).collect();
     rows.into_iter()
         .filter(|row| {
@@ -2897,6 +2977,7 @@ fn move_selected(app: &mut App, direction: MoveDirection) {
         return;
     };
     let mut expanded_nodes = snapshot_expanded_nodes(app);
+    let marked_nodes = snapshot_marked_nodes(app);
     let target = match direction {
         MoveDirection::Up | MoveDirection::Down => {
             let Some(siblings) = children_mut(&mut app.document.outline, parent.as_ref()) else {
@@ -2964,6 +3045,7 @@ fn move_selected(app: &mut App, direction: MoveDirection) {
     app.preview_cache.clear();
     app.source_locations.clear();
     restore_expanded_nodes(app, expanded_nodes);
+    restore_marked_nodes(app, marked_nodes);
     select_position(app, &target);
     app.status = "node moved (Ctrl-S to save)".into();
 }
@@ -2990,6 +3072,7 @@ fn move_selected_block(app: &mut App, direction: MoveDirection, rows: Vec<Row>) 
     let start = locations[0].1;
     let count = rows.len();
     let mut expanded_nodes = snapshot_expanded_nodes(app);
+    let marked_nodes = snapshot_marked_nodes(app);
     let (first, last) = match direction {
         MoveDirection::Up => {
             let Some(insert_at) = start.checked_sub(1) else {
@@ -3064,6 +3147,7 @@ fn move_selected_block(app: &mut App, direction: MoveDirection, rows: Vec<Row>) 
     app.preview_cache.clear();
     app.source_locations.clear();
     restore_expanded_nodes(app, expanded_nodes);
+    restore_marked_nodes(app, marked_nodes);
     select_position(app, &first);
     let first_index = app.selected;
     select_position(app, &last);
@@ -3372,6 +3456,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &mut App) {
             spans.push(body_marker(
                 !node.body.trim().is_empty(),
                 app.updated_nodes.contains(&row.node),
+                app.marked.contains(&row.position),
             ));
             if let Some(input) = input {
                 if input.selected {
@@ -3796,8 +3881,10 @@ fn dirty_marker(dirty: bool) -> Span<'static> {
     }
 }
 
-fn body_marker(has_body: bool, updated: bool) -> Span<'static> {
-    if updated {
+fn body_marker(has_body: bool, updated: bool, marked: bool) -> Span<'static> {
+    if marked {
+        Span::styled("● ", Style::default().fg(Color::LightYellow))
+    } else if updated {
         Span::styled("↑ ", Style::default().fg(Color::LightGreen))
     } else if has_body {
         Span::styled("· ", Style::default().fg(Color::DarkGray))
@@ -3877,17 +3964,17 @@ fn headline_spans(headline: &str) -> Vec<Span<'_>> {
 fn controls(body_full_width: bool, outline_full_width: bool) -> &'static str {
     if body_full_width {
         #[cfg(feature = "syntax")]
-        return "? help  arrows scroll  W wrap  c/x/v/V tree  f split  F outline  s split dir  o open/edit  Ctrl-P find  / search  a commands/actions  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  y syntax  l log  q quit";
+        return "? help  arrows scroll  W wrap  c/x/v/V tree  m/M mark  f split  F outline  s split dir  o open/edit  Ctrl-P find  / search  a commands/actions  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  y syntax  p preview  l log  q quit";
         #[cfg(not(feature = "syntax"))]
-        return "? help  arrows scroll  W wrap  c/x/v/V tree  f split  F outline  s split dir  o open/edit  Ctrl-P find  / search  a commands/actions  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  l log  q quit";
+        return "? help  arrows scroll  W wrap  c/x/v/V tree  m/M mark  f split  F outline  s split dir  o open/edit  Ctrl-P find  / search  a commands/actions  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  l log  q quit";
     }
     if outline_full_width {
-        return "? help  arrows navigate  W wrap  c/x/v/V tree  F split view  s split dir  o open/edit  Ctrl-P find  / search  a commands/actions  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  l log  q quit";
+        return "? help  arrows navigate  W wrap  c/x/v/V tree  m/M mark  F split view  s split dir  o open/edit  Ctrl-P find  / search  a commands/actions  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  l log  q quit";
     }
     #[cfg(feature = "syntax")]
-    return "? help  arrows navigate  PgUp/PgDn body  W wrap  c/x/v/V tree  f body  F outline  s split dir  o open/edit  Ctrl-P find  / search  a commands/actions  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  y syntax  l log  q quit";
+    return "? help  arrows navigate  PgUp/PgDn body  W wrap  c/x/v/V tree  m/M mark  f body  F outline  s split dir  o open/edit  Ctrl-P find  / search  a commands/actions  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  y syntax  p preview  l log  q quit";
     #[cfg(not(feature = "syntax"))]
-    "? help  arrows navigate  PgUp/PgDn body  W wrap  c/x/v/V tree  f body  F outline  s split dir  o open/edit  Ctrl-P find  / search  a commands/actions  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  l log  q quit"
+    "? help  arrows navigate  PgUp/PgDn body  W wrap  c/x/v/V tree  m/M mark  f body  F outline  s split dir  o open/edit  Ctrl-P find  / search  a commands/actions  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  l log  q quit"
 }
 
 fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full_width: bool) {
@@ -3912,6 +3999,7 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full
             Line::from("c/x              Copy/cut selected trees"),
             Line::from("Shift-C          Copy path:line (dir for @path) to clipboard"),
             Line::from("v / Shift-V      Paste copy / paste clone"),
+            Line::from("m / Shift-M      Mark selected / clear all marks"),
             Line::from("i                Insert a sibling"),
             Line::from("h                Rename the headline"),
             Line::from("Ctrl-↑↓←→        Move selected tree(s)"),
@@ -3936,6 +4024,7 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full
             Line::from("Shift-W          Toggle body word wrap"),
             Line::from("c/x/v/V          Copy/cut/paste/clone"),
             Line::from("Shift-C          Copy path:line (dir for @path) to clipboard"),
+            Line::from("m / Shift-M      Mark selected / clear all marks"),
             Line::from("Ctrl-P           Find a headline"),
             Line::from("a                Command/action palette"),
             Line::from("/                Search headlines and body text"),
@@ -3968,6 +4057,7 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full
             Line::from("Shift-C          Copy path:line (dir for @path) to clipboard"),
             Line::from("x                Cut selected tree"),
             Line::from("v / Shift-V      Paste copy / paste clone"),
+            Line::from("m / Shift-M      Mark selected / clear all marks"),
             Line::from("Ctrl-↑↓←→        Move selected tree(s)"),
             Line::from("Ctrl-R           Reload from disk"),
             Line::from("Ctrl-S           Save"),
@@ -3979,7 +4069,7 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full
     lines.push(Line::from("y                Toggle syntax highlighting"));
     #[cfg(feature = "syntax")]
     lines.push(Line::from(
-        "m                Toggle rendered preview (Markdown for now)",
+        "p                Toggle rendered preview (Markdown for now)",
     ));
     lines.extend([
         Line::from("l                Toggle full-screen log / rhai REPL"),
@@ -5830,24 +5920,35 @@ fn both(doc, target) {}
 
     #[test]
     fn shows_an_arrow_for_nodes_updated_by_reload_even_with_a_body() {
-        let updated = body_marker(true, true);
+        let updated = body_marker(true, true, false);
         assert_eq!(updated.content, "↑ ");
         assert_eq!(updated.style.fg, Some(Color::LightGreen));
 
-        let updated_without_body = body_marker(false, true);
+        let updated_without_body = body_marker(false, true, false);
         assert_eq!(updated_without_body.content, "↑ ");
         assert_eq!(updated_without_body.style.fg, Some(Color::LightGreen));
     }
 
     #[test]
     fn shows_a_subtle_dot_only_for_nodes_with_body_content() {
-        let populated = body_marker(true, false);
+        let populated = body_marker(true, false, false);
         assert_eq!(populated.content, "· ");
         assert_eq!(populated.style.fg, Some(Color::DarkGray));
 
-        let empty = body_marker(false, false);
+        let empty = body_marker(false, false, false);
         assert_eq!(empty.content, "  ");
         assert_eq!(empty.style.fg, None);
+    }
+
+    #[test]
+    fn shows_a_dot_for_marked_nodes_taking_priority_over_updated_and_body() {
+        let marked = body_marker(true, true, true);
+        assert_eq!(marked.content, "● ");
+        assert_eq!(marked.style.fg, Some(Color::LightYellow));
+
+        let marked_without_body = body_marker(false, false, true);
+        assert_eq!(marked_without_body.content, "● ");
+        assert_eq!(marked_without_body.style.fg, Some(Color::LightYellow));
     }
 
     #[test]
@@ -7679,6 +7780,58 @@ fn main() {}</t><t tx="b">just notes</t></tnodes></leo_file>"#,
         paste_tree(&mut app, false);
         assert_eq!(app.document.outline.roots.len(), 1);
         assert_eq!(app.document.outline.nodes.len(), 3);
+    }
+
+    #[test]
+    fn toggle_mark_marks_then_unmarks_the_current_row() {
+        let mut app = editing_app();
+        app.selected = 1;
+        let position = app.rows()[1].position.clone();
+
+        app.toggle_mark();
+        assert!(app.marked.contains(&position));
+
+        app.toggle_mark();
+        assert!(app.marked.is_empty());
+    }
+
+    #[test]
+    fn clear_marks_empties_the_marked_set() {
+        let mut app = editing_app();
+        app.selected = 1;
+        app.toggle_mark();
+        assert_eq!(app.marked.len(), 1);
+
+        app.clear_marks();
+        assert!(app.marked.is_empty());
+    }
+
+    #[test]
+    fn cut_prefers_the_marked_set_over_the_row_under_the_cursor() {
+        let mut app = editing_app();
+        let c_position = app.rows()[2].position.clone();
+        app.marked.insert(c_position);
+        // The cursor sits on "b", which is unmarked -- without mark
+        // priority this would cut "b" instead of the marked "c".
+        app.selected = 1;
+        app.selection_anchor = None;
+
+        cut_selected(&mut app);
+
+        let remaining: Vec<_> = app
+            .document
+            .outline
+            .nodes
+            .values()
+            .map(|node| node.id.0.clone())
+            .collect();
+        assert!(remaining.contains(&"a".into()));
+        assert!(remaining.contains(&"b".into()));
+        assert!(!remaining.contains(&"c".into()));
+        assert!(
+            app.marked.is_empty(),
+            "the mark should clear once its node is cut"
+        );
     }
 
     #[test]
