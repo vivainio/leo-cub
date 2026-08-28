@@ -1,6 +1,9 @@
 //! Transient expansion of Leo `@auto` source files.
 
-use std::{collections::HashMap, path::Path};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
 use streaming_iterator::StreamingIterator;
 use thiserror::Error;
@@ -18,6 +21,8 @@ pub enum AutoError {
     Parse,
     #[error("invalid {0} outline query: {1}")]
     Query(&'static str, String),
+    #[error("{0}")]
+    Dir(String),
 }
 
 /// An in-memory `@auto` expansion. It is never serialized into the `.leo` file.
@@ -26,6 +31,11 @@ pub struct AutoFile {
     pub root: NodeId,
     /// One-based source line for each generated node.
     pub locations: HashMap<NodeId, usize>,
+    /// The on-disk file each generated node came from, when it differs from
+    /// the single file a plain `@auto` job read (`job.path`) -- set by
+    /// [`crate::auto_dir::parse_dir`], whose per-node source spans several
+    /// files rather than one. `None` for an ordinary single-file `@auto`.
+    pub file_paths: Option<HashMap<NodeId, PathBuf>>,
 }
 
 #[derive(Clone, Copy)]
@@ -188,6 +198,7 @@ impl AutoFile {
             outline,
             root,
             locations,
+            file_paths: None,
         })
     }
 
@@ -242,6 +253,7 @@ fn parse_plain(root: NodeId, source: &str) -> AutoFile {
         outline,
         root,
         locations: HashMap::new(),
+        file_paths: None,
     }
 }
 
@@ -344,6 +356,7 @@ fn parse_static(
         outline,
         root,
         locations,
+        file_paths: None,
     })
 }
 
@@ -503,6 +516,7 @@ fn parse_markdown(
         outline,
         root,
         locations,
+        file_paths: None,
     })
 }
 
@@ -732,14 +746,24 @@ fn root_preamble_end(flavor: Flavor, source: &str, blocks: &[Block]) -> usize {
     };
     let mut found_use = false;
     let mut end = 0;
+    // A multi-line `use std::{ ... };` (or Rhai's `const X = #{ ... };`)
+    // continues past its own opening line -- track brace balance so the
+    // scan doesn't stop partway through one and strand the rest of it as
+    // a stray prefix glued onto whatever the first real block turns out
+    // to be, instead of staying part of the preamble.
+    let mut brace_depth: i32 = 0;
     for (index, line) in source.lines().take(first.syntax_start).enumerate() {
         let line = line.trim();
-        if import_prefixes
+        if brace_depth > 0 {
+            brace_depth += brace_delta(line);
+            end = index + 1;
+        } else if import_prefixes
             .iter()
             .any(|prefix| line.starts_with(prefix))
         {
             found_use = true;
             end = index + 1;
+            brace_depth += brace_delta(line);
         } else if line.is_empty() || line.starts_with("//") || line.starts_with("/*") {
             if found_use || !line.is_empty() {
                 end = index + 1;
@@ -749,6 +773,14 @@ fn root_preamble_end(flavor: Flavor, source: &str, blocks: &[Block]) -> usize {
         }
     }
     if found_use { end } else { 0 }
+}
+
+fn brace_delta(line: &str) -> i32 {
+    line.chars().fold(0, |depth, ch| match ch {
+        '{' => depth + 1,
+        '}' => depth - 1,
+        _ => depth,
+    })
 }
 
 fn move_leading_blank_lines(outline: &mut Outline) {
@@ -1497,6 +1529,24 @@ mod tests {
     }
 
     #[test]
+    fn folds_multiline_const_declarations_into_the_rhai_preamble() {
+        // Same bug as `preserves_multiline_use_blocks_in_the_preamble`
+        // below, for Rhai's "preamble, not a block" role: a brace-grouped
+        // `const` continues past its own opening line.
+        let source = "const COMMANDS = #{\n    a: \"one\",\n    b: \"two\",\n};\n\nfn helper(s) {\n    s\n}\n";
+        let auto = AutoFile::parse(Path::new("x.rhai"), NodeId::from("root"), source).unwrap();
+        let root = &auto.outline.roots[0];
+        assert_eq!(
+            auto.outline.nodes[&root.children[0].node].headline,
+            "fn helper"
+        );
+        assert_eq!(
+            auto.outline.nodes[&root.node].body,
+            "const COMMANDS = #{\n    a: \"one\",\n    b: \"two\",\n};\n\n@others\n@language rhai\n@tabwidth -4\n"
+        );
+    }
+
+    #[test]
     fn expands_rust_items_and_impl_methods() {
         let source = "use std::fmt;\n\npub struct S;\n\nimpl S {\n    fn f(&self) {}\n}\n";
         let auto = AutoFile::parse(Path::new("x.rs"), NodeId::from("root"), source).unwrap();
@@ -1513,6 +1563,21 @@ mod tests {
         assert_eq!(
             auto.outline.nodes[&root.children[0].node].body,
             "pub struct S;\n\nimpl S {\n    fn f(&self) {}\n}\n"
+        );
+    }
+
+    #[test]
+    fn preserves_multiline_use_blocks_in_the_preamble() {
+        // `root_preamble_end` used to stop the preamble scan at the first
+        // line that didn't itself start with "use " -- which, for a
+        // brace-grouped `use std::{ ... };`, is its very next line. The
+        // rest of that statement then got glued onto whatever the first
+        // real block happened to be, instead of staying in the preamble.
+        let source = "use std::process::Command;\nuse std::{\n    fs,\n    path::PathBuf,\n};\n\npub fn f() {\n    let _ = 1;\n}\n\npub fn g() {\n    let _ = 2;\n}\n";
+        let auto = AutoFile::parse(Path::new("x.rs"), NodeId::from("root"), source).unwrap();
+        assert_eq!(
+            auto.outline.nodes[&auto.root].body,
+            "use std::process::Command;\nuse std::{\n    fs,\n    path::PathBuf,\n};\n\n@others\n@language rust\n@tabwidth -4\n"
         );
     }
 }

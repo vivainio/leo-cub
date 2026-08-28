@@ -3918,6 +3918,7 @@ fn headline_spans(headline: &str) -> Vec<Span<'_>> {
             directive,
             "@asis"
                 | "@auto"
+                | "@auto-dir"
                 | "@auto-md"
                 | "@auto-markdown"
                 | "@clean"
@@ -4588,7 +4589,20 @@ fn thin_filename(headline: &str) -> Option<&str> {
 }
 
 fn dynamic_source_location(app: &App, row: &Row) -> Option<SourceLocation> {
-    let filename = external_filename(&app.document.outline.nodes[&row.node].headline)?;
+    let headline = &app.document.outline.nodes[&row.node].headline;
+    // `@auto-dir`'s own argument is a directory/glob pattern, not an
+    // openable file -- unlike every other directive `external_filename`
+    // recognizes, treating it as a literal path here would build a
+    // nonexistent one (e.g. ".../src/*.rs"). Its expanded per-file
+    // children are real `@auto <path>` headlines and go through this same
+    // function normally; only the pattern-bearing root needs to fall
+    // through to `App::source_nodes`, which has nothing for it either
+    // (it isn't itself backed by one file) -- pressing `o` on it is a
+    // no-op, same as any other node with no recorded source.
+    if derived_filename(headline).is_some_and(|(_, directive, _)| directive == "@auto-dir") {
+        return None;
+    }
+    let filename = external_filename(headline)?;
     let mut path = app
         .path
         .parent()
@@ -4852,6 +4866,35 @@ mod tests {
             OriginalExternalState::default(),
             false,
         )
+    }
+
+    #[test]
+    fn dynamic_source_location_skips_auto_dir_but_not_plain_auto() {
+        // `@auto-dir`'s own argument is a glob/directory, not an openable
+        // file -- `o` on that root node must not try to open a literal
+        // "*.rs" path. A plain `@auto <path>` root is unaffected: it still
+        // resolves straight to that one real file, as it always has.
+        let mut app = editing_app();
+        let node_b = NodeId::from("b");
+        app.document
+            .outline
+            .nodes
+            .get_mut(&node_b)
+            .unwrap()
+            .headline = "@auto-dir *.rs".into();
+        let row = app.rows()[1].clone();
+        assert_eq!(row.node, node_b);
+        assert!(dynamic_source_location(&app, &row).is_none());
+
+        app.document
+            .outline
+            .nodes
+            .get_mut(&node_b)
+            .unwrap()
+            .headline = "@auto real.rs".into();
+        let row = app.rows()[1].clone();
+        let location = dynamic_source_location(&app, &row).unwrap();
+        assert_eq!(location.path, Path::new("real.rs"));
     }
 
     #[test]

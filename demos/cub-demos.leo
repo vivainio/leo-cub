@@ -10,6 +10,7 @@
   <v t="cub.1786725356.346248974.2"><vh>@auto demo.js</vh></v>
   <v t="cub.1786725356.346248974.3"><vh>@auto demo.ts</vh></v>
   <v t="cub.1786725356.346248974.4"><vh>@auto demo.go</vh></v>
+  <v t="cub.1787939431.778848431.1"><vh>@auto-dir .</vh></v>
   <v t="cub.1786725356.346248974.5"><vh>@f ../scripts/github.rhai</vh>
     <v t="cub.1786725356.346248974.5::f-anon:33"><vh>fn shq</vh></v>
     <v t="cub.1786725356.346248974.5::f-anon:40"><vh>fn sh_in</vh></v>
@@ -443,6 +444,8 @@ fn gh_view_url(doc, url) {
     item
 }
 
+</t>
+  <t tx="cub.1787939431.778848431.1">The same four files above, without naming each one: `@auto-dir` lists a directory (or glob) and expands every match as its own @auto child, live, on every load. Add a fifth demo.* file here and it shows up too, with no outline edit.
 </t>
 </tnodes>
 </leo_file>

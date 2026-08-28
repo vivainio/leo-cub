@@ -20,7 +20,7 @@
   <v t="quickstart.find"><vh>Find and search</vh>
     <v t="quickstart.find.quiet"><vh>A quiet node</vh></v>
   </v>
-  <v t="quickstart.external"><vh>External files: @clean, @auto, @file</vh>
+  <v t="quickstart.external"><vh>External files: @clean, @auto, @auto-dir, @file</vh>
     <v t="quickstart.external.greeting"><vh>@clean quickstart-files/greeting.txt</vh></v>
   </v>
   <v t="quickstart.actions"><vh>Run an action</vh>
@@ -69,15 +69,19 @@ For the complete walkthrough - insert, rename, indent, reorder, copy,
 cut, paste, and clone - see &quot;Interactive editing&quot; in the docs.</t>
   <t tx="quickstart.edit.scratch">Practice on this node.</t>
   <t tx="quickstart.external">Leo can treat a node's body as a mirror of a file on disk instead of
-freestanding text. leo-cub understands three flavors:
+freestanding text. leo-cub understands four flavors:
 
-  @clean &lt;path&gt;   The body is the file, exactly. No sentinel
+  @clean &lt;path&gt;     The body is the file, exactly. No sentinel
                         comments, no markers - what you see is what
                         gets written.
-  @auto  &lt;path&gt;   The body is reconstructed from the file's own
+  @auto  &lt;path&gt;     The body is reconstructed from the file's own
                         structure (functions, classes, ...), so
                         editing the file externally stays safe.
-  @file  &lt;path&gt;   The classic thin format: sentinel comments in
+  @auto-dir &lt;dir&gt;   Expands a directory or glob into one @auto
+                        child per matching file, kept live: add a
+                        file and it shows up next load, no outline
+                        edit needed.
+  @file  &lt;path&gt;     The classic thin format: sentinel comments in
                         the file mark where each node's text begins
                         and ends.
 

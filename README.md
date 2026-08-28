@@ -232,6 +232,16 @@ layout with `@path` nodes by default. Use `--no-paths` to put all imported
 files directly below the destination, `--parent GNX_OR_PATH` to choose that
 destination, and `--dry-run` to validate without saving.
 
+`@auto-dir <dir-or-glob>` is a directive you write directly into a headline
+rather than a mode of `import`: it expands to one `@auto` child per matching
+file, live, on every load, instead of one node per file being created once
+and left to go stale. `@auto-dir src` lists the immediate files in `src`
+(non-recursive, matching `import`'s own one-level default); `@auto-dir
+src/*.rs` glob-filters that same listing; `@auto-dir src/**/*.rs` opts into
+a recursive walk. Add a file that matches and it appears next time the
+outline is opened, with no outline edit. `leo-cub`'s own `leo-cub.leo` and
+`demos/cub-demos.leo` both use it.
+
 `inspect` uses a compact text format containing position paths, GNXs,
 headlines, and bodies. Repeated clone content is shown as `=GNX`. Use
 `--format json` for structured output in scripts.

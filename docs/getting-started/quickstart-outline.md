@@ -24,7 +24,7 @@ cub docs/quickstart.leo
   - Scratch
 - Find and search
   - A quiet node
-- External files: @clean, @auto, @file
+- External files: @clean, @auto, @auto-dir, @file
   - @clean quickstart-files/greeting.txt
 - Run an action
   - @action Say hello

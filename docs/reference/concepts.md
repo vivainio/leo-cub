@@ -17,6 +17,10 @@ Leo can represent source files through directives such as `@file`, `@thin`,
 external source distinct, then reconstructs supported external content when it
 is inspected or synchronized.
 
+`@auto-dir <dir-or-glob>` expands a directory or glob pattern into one `@auto`
+child per matching file, re-enumerated on every load -- see the README for
+the pattern syntax.
+
 The `import` command creates external-file nodes. The `sync` command reads
 changes from supported external nodes into the outline. Use `inspect-derived`
 for Leo thin-derived files.

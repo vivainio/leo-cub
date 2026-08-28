@@ -65,9 +65,15 @@ pub fn load_matching_external_files(
     let mut cache: HashMap<(PathBuf, NodeId), Option<Loaded>> = HashMap::new();
     let mut loaded = 0;
     for job in jobs {
+        // `@auto-dir`'s `job.path` is a directory/glob pattern, not a real
+        // file path, so it can never equal or end with a wanted file's
+        // path -- that comparison can only happen after expansion, inside
+        // the `@auto-dir` branch below via `AutoFile::file_paths`.
         let path_matches = match filter {
             ExternalFilter::File(wanted) => {
-                job.path == Path::new(wanted) || job.path.ends_with(wanted)
+                job.directive == "@auto-dir"
+                    || job.path == Path::new(wanted)
+                    || job.path.ends_with(wanted)
             }
             _ => true,
         };
@@ -76,55 +82,83 @@ pub fn load_matching_external_files(
         }
         let cache_key = (job.path.clone(), job.root.clone());
         if !cache.contains_key(&cache_key) {
-            let parsed = match fs::read_to_string(&job.path) {
-                Ok(source) => {
-                    let content_matches = match filter {
+            // `@auto-dir`'s `job.path` is a directory/glob pattern, not a
+            // readable file: it reads its own matched files internally, so
+            // it can't go through the single-`fs::read_to_string` path below.
+            let parsed = if job.directive == "@auto-dir" {
+                crate::auto_dir::parse_dir(&job.path, job.root.clone())
+                    .ok()
+                    .filter(|auto| match filter {
                         ExternalFilter::Search(patterns) => patterns.iter().any(|pattern| {
-                            source
-                                .lines()
-                                .any(|line| raw_line_might_match(line, pattern))
+                            auto.outline.nodes.values().any(|node| {
+                                raw_line_might_match(&node.headline, pattern)
+                                    || node
+                                        .body
+                                        .lines()
+                                        .any(|line| raw_line_might_match(line, pattern))
+                            })
                         }),
-                        ExternalFilter::Gnx(gnx) => {
-                            job.directive.starts_with("@auto") || source.contains(gnx)
+                        ExternalFilter::Gnx(_) => true,
+                        ExternalFilter::File(wanted) => {
+                            auto.file_paths.as_ref().is_some_and(|paths| {
+                                paths
+                                    .values()
+                                    .any(|path| path == Path::new(wanted) || path.ends_with(wanted))
+                            })
                         }
-                        ExternalFilter::File(_) => true,
-                    };
-                    if content_matches {
-                        if job.directive.starts_with("@auto") {
-                            Some(Loaded::Auto(
-                                AutoFile::parse_with_directive(
-                                    &job.path,
-                                    job.root.clone(),
-                                    &source,
-                                    Some(&job.directive),
-                                )
-                                .map_err(|error| {
-                                    InspectError::Auto {
+                    })
+                    .map(Loaded::Auto)
+            } else {
+                match fs::read_to_string(&job.path) {
+                    Ok(source) => {
+                        let content_matches = match filter {
+                            ExternalFilter::Search(patterns) => patterns.iter().any(|pattern| {
+                                source
+                                    .lines()
+                                    .any(|line| raw_line_might_match(line, pattern))
+                            }),
+                            ExternalFilter::Gnx(gnx) => {
+                                job.directive.starts_with("@auto") || source.contains(gnx)
+                            }
+                            ExternalFilter::File(_) => true,
+                        };
+                        if content_matches {
+                            if job.directive.starts_with("@auto") {
+                                Some(Loaded::Auto(
+                                    AutoFile::parse_with_directive(
+                                        &job.path,
+                                        job.root.clone(),
+                                        &source,
+                                        Some(&job.directive),
+                                    )
+                                    .map_err(|error| {
+                                        InspectError::Auto {
+                                            path: job.path.clone(),
+                                            message: error.to_string(),
+                                        }
+                                    })?,
+                                ))
+                            } else if job.directive == "@f" {
+                                Some(Loaded::Relative(RelativeFile::parse(&source).map_err(
+                                    |error| InspectError::Derived {
                                         path: job.path.clone(),
                                         message: error.to_string(),
-                                    }
-                                })?,
-                            ))
-                        } else if job.directive == "@f" {
-                            Some(Loaded::Relative(RelativeFile::parse(&source).map_err(
-                                |error| InspectError::Derived {
-                                    path: job.path.clone(),
-                                    message: error.to_string(),
-                                },
-                            )?))
+                                    },
+                                )?))
+                            } else {
+                                Some(Loaded::Derived(DerivedFile::parse(&source).map_err(
+                                    |error| InspectError::Derived {
+                                        path: job.path.clone(),
+                                        message: error.to_string(),
+                                    },
+                                )?))
+                            }
                         } else {
-                            Some(Loaded::Derived(DerivedFile::parse(&source).map_err(
-                                |error| InspectError::Derived {
-                                    path: job.path.clone(),
-                                    message: error.to_string(),
-                                },
-                            )?))
+                            None
                         }
-                    } else {
-                        None
                     }
+                    Err(_) => None,
                 }
-                Err(_) => None,
             };
             cache.insert(cache_key.clone(), parsed);
         }
@@ -749,6 +783,7 @@ fn external_file(headline: &str) -> Option<(&str, &str)> {
             | "@auto"
             | "@auto-md"
             | "@auto-markdown"
+            | "@auto-dir"
     )
     .then(|| (directive, strip_path_cruft(filename)))
     .filter(|(_, filename)| !filename.is_empty())

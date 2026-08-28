@@ -150,18 +150,14 @@ pub fn load_derived_jobs(outline: &mut Outline, jobs: Vec<DerivedJob>) -> LoadRe
 /// snapshots the pre-load state each job's later merge needs.
 fn prepare_job(outline: &Outline, job: DerivedJob) -> JobOutcome {
     let label = job.path.display().to_string();
-    if !job.auto && !job.path.exists() {
+    // `@auto-dir`'s `job.path` is a directory or glob pattern, not a
+    // readable file, so it must skip the generic `fs::read_to_string` below
+    // entirely -- not just the single-file `@auto` parse branch further
+    // down, which is the only other place `job.auto` is inspected.
+    let is_auto_dir = job.directive == "@auto-dir";
+    if !job.auto && !is_auto_dir && !job.path.exists() {
         return JobOutcome::Missing(job);
     }
-    let source = match fs::read_to_string(&job.path) {
-        Ok(source) => source,
-        Err(error) => {
-            return JobOutcome::Failed {
-                label,
-                error: error.to_string(),
-            };
-        }
-    };
     let Some(root_node) = outline
         .position(&job.position)
         .map(|position| position.node.clone())
@@ -185,13 +181,8 @@ fn prepare_job(outline: &Outline, job: DerivedJob) -> JobOutcome {
         .filter_map(|id| outline.nodes.get(&id).cloned().map(|node| (id, node)))
         .collect();
 
-    let parsed = if job.auto {
-        match AutoFile::parse_with_directive(
-            &job.path,
-            job.root.clone(),
-            &source,
-            Some(&job.directive),
-        ) {
+    let parsed = if is_auto_dir {
+        match crate::auto_dir::parse_dir(&job.path, job.root.clone()) {
             Ok(auto) => ParsedFile::Auto(auto),
             Err(error) => {
                 return JobOutcome::Failed {
@@ -200,24 +191,50 @@ fn prepare_job(outline: &Outline, job: DerivedJob) -> JobOutcome {
                 };
             }
         }
-    } else if job.directive == "@f" {
-        match RelativeFile::parse(&source) {
-            Ok(derived) => ParsedFile::Relative(derived),
+    } else {
+        let source = match fs::read_to_string(&job.path) {
+            Ok(source) => source,
             Err(error) => {
                 return JobOutcome::Failed {
                     label,
                     error: error.to_string(),
                 };
             }
-        }
-    } else {
-        match DerivedFile::parse(&source) {
-            Ok(derived) => ParsedFile::Derived(derived),
-            Err(error) => {
-                return JobOutcome::Failed {
-                    label,
-                    error: error.to_string(),
-                };
+        };
+        if job.auto {
+            match AutoFile::parse_with_directive(
+                &job.path,
+                job.root.clone(),
+                &source,
+                Some(&job.directive),
+            ) {
+                Ok(auto) => ParsedFile::Auto(auto),
+                Err(error) => {
+                    return JobOutcome::Failed {
+                        label,
+                        error: error.to_string(),
+                    };
+                }
+            }
+        } else if job.directive == "@f" {
+            match RelativeFile::parse(&source) {
+                Ok(derived) => ParsedFile::Relative(derived),
+                Err(error) => {
+                    return JobOutcome::Failed {
+                        label,
+                        error: error.to_string(),
+                    };
+                }
+            }
+        } else {
+            match DerivedFile::parse(&source) {
+                Ok(derived) => ParsedFile::Derived(derived),
+                Err(error) => {
+                    return JobOutcome::Failed {
+                        label,
+                        error: error.to_string(),
+                    };
+                }
             }
         }
     };
@@ -245,22 +262,40 @@ fn merge_parsed(
 ) -> Result<(), String> {
     match parsed {
         ParsedFile::Auto(auto) => {
+            // `@auto-dir`'s nodes come from several files rather than the
+            // one `job.path` names -- `auto.file_paths` carries the real
+            // per-node source in that case, so jump-to-source lands on the
+            // matched file instead of the directory/glob itself.
+            let path_for = |id: &NodeId| {
+                auto.file_paths
+                    .as_ref()
+                    .and_then(|paths| paths.get(id))
+                    .cloned()
+                    .unwrap_or_else(|| job.path.clone())
+            };
             if !auto.merge_into(outline, &job.position) {
                 return Err("auto root position disappeared".to_owned());
             }
-            report
-                .node_locations
-                .entry(auto.root.clone())
-                .or_insert(SourceLocation {
-                    path: job.path.clone(),
-                    line: 1,
-                });
+            // An `@auto-dir` root isn't backed by any single file --
+            // `job.path` is the directory/glob argument, not something `o`
+            // can open -- so unlike a plain `@auto <path>` root, it gets no
+            // location entry; opening it falls through to a body edit
+            // instead of a misleading "open failed" on a glob pattern.
+            if auto.file_paths.is_none() {
+                report
+                    .node_locations
+                    .entry(auto.root.clone())
+                    .or_insert(SourceLocation {
+                        path: path_for(&auto.root),
+                        line: 1,
+                    });
+            }
             for (id, line) in &auto.locations {
                 report
                     .node_locations
                     .entry(id.clone())
                     .or_insert(SourceLocation {
-                        path: job.path.clone(),
+                        path: path_for(id),
                         line: *line,
                     });
             }
@@ -441,7 +476,14 @@ pub fn derived_filename(headline: &str) -> Option<(bool, &str, &str)> {
     let (directive, filename) = headline.trim().split_once(char::is_whitespace)?;
     matches!(
         directive,
-        "@file" | "@thin" | "@file-thin" | "@f" | "@auto" | "@auto-md" | "@auto-markdown"
+        "@file"
+            | "@thin"
+            | "@file-thin"
+            | "@f"
+            | "@auto"
+            | "@auto-md"
+            | "@auto-markdown"
+            | "@auto-dir"
     )
     .then(|| {
         (
@@ -477,6 +519,7 @@ pub fn external_filename(headline: &str) -> Option<&str> {
             | "@auto"
             | "@auto-md"
             | "@auto-markdown"
+            | "@auto-dir"
     )
     .then(|| strip_path_cruft(filename))
     .filter(|filename| !filename.is_empty())
@@ -501,4 +544,184 @@ fn strip_path_cruft(path: &str) -> &str {
         }
     }
     path
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default();
+        let path = std::env::temp_dir().join(format!(
+            "leo-cub-derive-load-{name}-{}-{}",
+            std::process::id(),
+            now.as_nanos()
+        ));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    /// End-to-end wiring test for `@auto-dir`: `prepare_job`'s directory
+    /// branch and `merge_parsed`'s `Auto` arm have to cooperate to expand a
+    /// directory node into one child per matched file, mark every generated
+    /// node read-only (`derived_nodes`), and snapshot enough pre-load state
+    /// (`original_bodies`/`original_children`) for `sync::restore_external_state`
+    /// to later exclude it from the serialized `.leo` XML, exactly like a
+    /// plain `@auto` node.
+    #[test]
+    fn auto_dir_job_expands_matched_files_as_read_only_children() {
+        let dir = temp_dir("wiring");
+        fs::write(dir.join("a.py"), "def a():\n    pass\n").unwrap();
+        fs::write(dir.join("b.rs"), "fn b() {}\n").unwrap();
+
+        let mut outline = Outline {
+            nodes: [(
+                NodeId::from("dir-node"),
+                Node {
+                    id: NodeId::from("dir-node"),
+                    headline: format!("@auto-dir {}", dir.display()),
+                    body: String::new(),
+                    vnode_attributes: HashMap::new(),
+                    tnode_attributes: HashMap::new(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            roots: vec![Position {
+                node: NodeId::from("dir-node"),
+                children: vec![],
+            }],
+        };
+
+        let outline_path = dir.join("outline.leo");
+        let report = load_derived_files(&mut outline, &outline_path);
+
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        let children = &outline.roots[0].children;
+        assert_eq!(children.len(), 2);
+        // Headline carries the full resolved path (not just the bare
+        // filename) so `cub inspect <file>`'s suffix matching still finds
+        // it -- strip the temp dir prefix back off for a readable assert.
+        let headlines: Vec<_> = children
+            .iter()
+            .map(|position| {
+                let headline = outline.nodes[&position.node].headline.clone();
+                let path = headline.strip_prefix("@auto ").unwrap();
+                format!(
+                    "@auto {}",
+                    Path::new(path)
+                        .strip_prefix(&dir)
+                        .unwrap_or(Path::new(path))
+                        .display()
+                )
+            })
+            .collect();
+        assert_eq!(headlines, vec!["@auto a.py", "@auto b.rs"]);
+        for position in children {
+            assert!(report.derived_nodes.contains(&position.node));
+        }
+        // The `@auto-dir` root itself isn't backed by any single file --
+        // `job.path` is the directory argument, not something `o` can
+        // open -- so it must get no jump-to-source entry at all, rather
+        // than one pointing at that directory.
+        assert!(
+            !report
+                .node_locations
+                .contains_key(&NodeId::from("dir-node"))
+        );
+        assert!(
+            report
+                .original_bodies
+                .contains_key(&NodeId::from("dir-node"))
+        );
+        assert_eq!(
+            report.original_children[&NodeId::from("dir-node")],
+            Vec::<Position>::new()
+        );
+    }
+
+    /// `o` (open in editor) reads `App::source_nodes`, populated verbatim
+    /// from `report.node_locations` -- so this is the data that decides
+    /// whether opening an `@auto-dir` descendant lands on the right file
+    /// *and* the right line. Each matched file's node ids must map to
+    /// *that* file, not the directory `job.path` itself names, and each
+    /// declaration's line must be relative to its own file, not offset by
+    /// the other files aggregated alongside it.
+    #[test]
+    fn auto_dir_node_locations_point_at_the_matched_files_not_the_directory() {
+        // The Rust importer only recognizes a function whose brace is on
+        // its own line (`leo_rust_block` in auto.rs) -- a one-line `fn a()
+        // {}` body doesn't qualify -- and won't split a file with only one
+        // recognized declaration into a child at all. Two multi-line
+        // functions per file satisfies both.
+        let dir = temp_dir("locations");
+        fs::write(
+            dir.join("a.rs"),
+            "fn a() {\n    let _ = 1;\n}\nfn a2() {\n    let _ = 2;\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("b.rs"),
+            "// leading comment\nfn b() {\n    let _ = 1;\n}\nfn b2() {\n    let _ = 2;\n}\n",
+        )
+        .unwrap();
+
+        let mut outline = Outline {
+            nodes: [(
+                NodeId::from("dir-node"),
+                Node {
+                    id: NodeId::from("dir-node"),
+                    headline: format!("@auto-dir {}", dir.display()),
+                    body: String::new(),
+                    vnode_attributes: HashMap::new(),
+                    tnode_attributes: HashMap::new(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            roots: vec![Position {
+                node: NodeId::from("dir-node"),
+                children: vec![],
+            }],
+        };
+        let outline_path = dir.join("outline.leo");
+        let report = load_derived_files(&mut outline, &outline_path);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+
+        let file_children = &outline.roots[0].children;
+        assert_eq!(file_children.len(), 2);
+        for position in file_children {
+            let headline = &outline.nodes[&position.node].headline;
+            let expected_path = if headline.ends_with("a.rs") {
+                dir.join("a.rs")
+            } else {
+                dir.join("b.rs")
+            };
+            let file_root_location = report
+                .node_locations
+                .get(&position.node)
+                .unwrap_or_else(|| panic!("no location recorded for {headline}"));
+            assert_eq!(file_root_location.path, expected_path);
+            assert_eq!(file_root_location.line, 1);
+
+            // The declaration inside each file must resolve to that same
+            // file, at the line it actually appears on within it -- "fn b"
+            // sits on line 2 of b.rs, not on some line offset by a.rs's
+            // own content being aggregated into the same job.
+            let declaration = position
+                .children
+                .first()
+                .unwrap_or_else(|| panic!("{headline} produced no structural children"));
+            let declaration_location = report
+                .node_locations
+                .get(&declaration.node)
+                .unwrap_or_else(|| panic!("no location recorded for a declaration in {headline}"));
+            assert_eq!(declaration_location.path, expected_path);
+            let expected_line = if headline.ends_with("a.rs") { 1 } else { 2 };
+            assert_eq!(declaration_location.line, expected_line);
+        }
+    }
 }

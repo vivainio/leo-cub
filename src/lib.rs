@@ -1,6 +1,7 @@
 //! Clone-aware, automation-safe manipulation of Leo XML outlines.
 
 mod auto;
+mod auto_dir;
 mod clean;
 mod derive_load;
 mod derived;
