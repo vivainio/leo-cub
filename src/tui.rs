@@ -542,7 +542,10 @@ struct PaletteEntry {
 #[derive(Clone, Debug, PartialEq)]
 enum PaletteEntryKind {
     Action(PositionId),
-    Command { script: PathBuf, name: String },
+    Command {
+        script: PathBuf,
+        name: String,
+    },
     /// Index into the static `COMMANDS` array of built-in editor commands
     /// (e.g. "Import new files into @path") -- these need no script or
     /// outline node, just a check of whether they apply to the current
@@ -1045,9 +1048,11 @@ fn handle_log_mouse(app: &mut App, area: Rect, kind: MouseEventKind, mouse: Mous
     let clamped_column = mouse
         .column
         .clamp(log_area.x, log_area.right().saturating_sub(1));
-    let line_index =
-        (start + usize::from(clamped_row - log_area.y)).min(end.saturating_sub(1));
-    let line_len = app.logs.get(line_index).map_or(0, |line| line.chars().count());
+    let line_index = (start + usize::from(clamped_row - log_area.y)).min(end.saturating_sub(1));
+    let line_len = app
+        .logs
+        .get(line_index)
+        .map_or(0, |line| line.chars().count());
     let column_index = usize::from(clamped_column - log_area.x).min(line_len);
     let position = (line_index, column_index);
 
@@ -2156,7 +2161,10 @@ fn run_action(app: &mut App, position: &PositionId, target: &PositionId) {
     let document = std::mem::replace(&mut app.document, LeoDocument::empty());
     let outcome =
         crate::rhai_run::run_bound(document, app.path.clone(), &target_row.position, &body);
-    app.debug(format!("action: '{name}' returned status={:?}", outcome.status));
+    app.debug(format!(
+        "action: '{name}' returned status={:?}",
+        outcome.status
+    ));
     app.document = outcome.document;
     if outcome.touched {
         mark_outline_touched(app);
@@ -5135,7 +5143,11 @@ fn private_helper(doc, target) {
             .unwrap();
         let mut app = editing_app().with_debug_log(Some(file));
 
-        handle_key(&mut app, KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE), None);
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+            None,
+        );
         handle_key(
             &mut app,
             KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
