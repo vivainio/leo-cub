@@ -847,7 +847,7 @@ fn handle_key(
         KeyCode::Char('m') if key.modifiers.is_empty() => app.toggle_mark(),
         KeyCode::Char('M') if key.modifiers == KeyModifiers::SHIFT => app.clear_marks(),
         KeyCode::Char('n') if key.modifiers.is_empty() => cycle_clone(app, 1),
-        KeyCode::Char('N') if key.modifiers == KeyModifiers::SHIFT => cycle_clone(app, -1),
+        KeyCode::Char('N') if key.modifiers == KeyModifiers::SHIFT => cycle_marked(app),
         KeyCode::Up if key.modifiers == KeyModifiers::SHIFT => {
             app.selection_anchor.get_or_insert(app.selected);
             app.extend_selection(-1);
@@ -1552,11 +1552,28 @@ fn start_search(app: &mut App) {
         active: 0,
         original,
     });
-    app.status = "search headlines and body: type to search, Enter accepts, Esc cancels".into();
+    app.status =
+        "search headlines and body: type to search, Enter accepts, Shift-Enter marks all matches, Esc cancels"
+            .into();
 }
 
 fn handle_search_input(app: &mut App, key: KeyEvent) {
     match key.code {
+        KeyCode::Enter if key.modifiers == KeyModifiers::SHIFT => {
+            let matches = app
+                .search
+                .as_ref()
+                .expect("search input exists")
+                .matches
+                .clone();
+            let count = matches.len();
+            app.marked.extend(matches);
+            app.search = None;
+            app.status = format!(
+                "marked {count} search match{}",
+                if count == 1 { "" } else { "es" }
+            );
+        }
         KeyCode::Enter => {
             app.search = None;
             app.status = "search match selected".into();
@@ -2414,9 +2431,9 @@ fn reveal_and_select(app: &mut App, position: &PositionId) {
     select_position(app, position);
 }
 
-/// `n`/`N`: jumps to the next/previous occurrence of the selected node,
-/// wrapping around, expanding ancestors as needed so a collapsed occurrence
-/// is still reachable.
+/// `n`: jumps to the next occurrence of the selected node, wrapping around,
+/// expanding ancestors as needed so a collapsed occurrence is still
+/// reachable.
 fn cycle_clone(app: &mut App, direction: isize) {
     let Some(row) = app.selected_row() else {
         return;
@@ -2433,6 +2450,54 @@ fn cycle_clone(app: &mut App, direction: isize) {
     let next = (current as isize + direction).rem_euclid(len) as usize;
     reveal_and_select(app, &positions[next]);
     app.status = format!("clone {}/{}", next + 1, positions.len());
+}
+
+/// `Shift-N`: jumps to the next marked node after the current selection in
+/// document order, wrapping around to the first marked node.
+fn cycle_marked(app: &mut App) {
+    if app.marked.is_empty() {
+        app.status = "no marked nodes".into();
+        return;
+    }
+    let ordered = position_order(&app.document.outline);
+    let rank: HashMap<&PositionId, usize> = ordered.iter().enumerate().map(|(i, p)| (p, i)).collect();
+    let mut marked_ranks: Vec<usize> = app.marked.iter().filter_map(|p| rank.get(p).copied()).collect();
+    marked_ranks.sort_unstable();
+    if marked_ranks.is_empty() {
+        app.status = "no marked nodes".into();
+        return;
+    }
+    let current_rank = app
+        .selected_row()
+        .and_then(|row| rank.get(&row.position).copied());
+    let target_rank = current_rank
+        .and_then(|current| marked_ranks.iter().copied().find(|&r| r > current))
+        .unwrap_or(marked_ranks[0]);
+    let index = marked_ranks
+        .iter()
+        .position(|&r| r == target_rank)
+        .unwrap_or(0);
+    reveal_and_select(app, &ordered[target_rank]);
+    app.status = format!("marked {}/{}", index + 1, marked_ranks.len());
+}
+
+/// Every position in the outline, in document (pre-order) order --
+/// regardless of which ancestors are currently expanded.
+fn position_order(outline: &Outline) -> Vec<PositionId> {
+    fn walk(positions: &[Position], parent: &str, out: &mut Vec<PositionId>) {
+        for (index, position) in positions.iter().enumerate() {
+            let path = if parent.is_empty() {
+                index.to_string()
+            } else {
+                format!("{parent}/{index}")
+            };
+            out.push(PositionId(path.clone()));
+            walk(&position.children, &path, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(&outline.roots, "", &mut out);
+    out
 }
 
 fn cancel_headline_edit(app: &mut App) {
@@ -4035,17 +4100,17 @@ fn headline_spans(headline: &str) -> Vec<Span<'_>> {
 fn controls(body_full_width: bool, outline_full_width: bool) -> &'static str {
     if body_full_width {
         #[cfg(feature = "syntax")]
-        return "? help  arrows scroll  W wrap  c/x/v/V tree  m/M mark  n/N clone  f split  F outline  s split dir  o open/edit  Ctrl-P find  / search  a commands/actions  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  y syntax  p preview  l log  q quit";
+        return "? help  arrows scroll  W wrap  c/x/v/V tree  m/M mark  n clone  N next marked  f split  F outline  s split dir  o open/edit  Ctrl-P find  / search  a commands/actions  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  y syntax  p preview  l log  q quit";
         #[cfg(not(feature = "syntax"))]
-        return "? help  arrows scroll  W wrap  c/x/v/V tree  m/M mark  n/N clone  f split  F outline  s split dir  o open/edit  Ctrl-P find  / search  a commands/actions  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  l log  q quit";
+        return "? help  arrows scroll  W wrap  c/x/v/V tree  m/M mark  n clone  N next marked  f split  F outline  s split dir  o open/edit  Ctrl-P find  / search  a commands/actions  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  l log  q quit";
     }
     if outline_full_width {
-        return "? help  arrows navigate  W wrap  c/x/v/V tree  m/M mark  n/N clone  F split view  s split dir  o open/edit  Ctrl-P find  / search  a commands/actions  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  l log  q quit";
+        return "? help  arrows navigate  W wrap  c/x/v/V tree  m/M mark  n clone  N next marked  F split view  s split dir  o open/edit  Ctrl-P find  / search  a commands/actions  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  l log  q quit";
     }
     #[cfg(feature = "syntax")]
-    return "? help  arrows navigate  PgUp/PgDn body  W wrap  c/x/v/V tree  m/M mark  n/N clone  f body  F outline  s split dir  o open/edit  Ctrl-P find  / search  a commands/actions  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  y syntax  p preview  l log  q quit";
+    return "? help  arrows navigate  PgUp/PgDn body  W wrap  c/x/v/V tree  m/M mark  n clone  N next marked  f body  F outline  s split dir  o open/edit  Ctrl-P find  / search  a commands/actions  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  y syntax  p preview  l log  q quit";
     #[cfg(not(feature = "syntax"))]
-    "? help  arrows navigate  PgUp/PgDn body  W wrap  c/x/v/V tree  m/M mark  n/N clone  f body  F outline  s split dir  o open/edit  Ctrl-P find  / search  a commands/actions  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  l log  q quit"
+    "? help  arrows navigate  PgUp/PgDn body  W wrap  c/x/v/V tree  m/M mark  n clone  N next marked  f body  F outline  s split dir  o open/edit  Ctrl-P find  / search  a commands/actions  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  l log  q quit"
 }
 
 fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full_width: bool) {
@@ -4071,7 +4136,8 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full
             Line::from("Shift-C          Copy path:line (dir for @path) to clipboard"),
             Line::from("v / Shift-V      Paste copy / paste clone"),
             Line::from("m / Shift-M      Mark selected / clear all marks"),
-            Line::from("n / Shift-N      Next/previous occurrence of this node"),
+            Line::from("n                Next occurrence of this node"),
+            Line::from("Shift-N          Next marked node"),
             Line::from("i                Insert a sibling"),
             Line::from("h                Rename the headline"),
             Line::from("Ctrl-↑↓←→        Move selected tree(s)"),
@@ -4097,7 +4163,8 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full
             Line::from("c/x/v/V          Copy/cut/paste/clone"),
             Line::from("Shift-C          Copy path:line (dir for @path) to clipboard"),
             Line::from("m / Shift-M      Mark selected / clear all marks"),
-            Line::from("n / Shift-N      Next/previous occurrence of this node"),
+            Line::from("n                Next occurrence of this node"),
+            Line::from("Shift-N          Next marked node"),
             Line::from("Ctrl-P           Find a headline"),
             Line::from("a                Command/action palette"),
             Line::from("/                Search headlines and body text"),
@@ -4131,7 +4198,8 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full
             Line::from("x                Cut selected tree"),
             Line::from("v / Shift-V      Paste copy / paste clone"),
             Line::from("m / Shift-M      Mark selected / clear all marks"),
-            Line::from("n / Shift-N      Next/previous occurrence of this node"),
+            Line::from("n                Next occurrence of this node"),
+            Line::from("Shift-N          Next marked node"),
             Line::from("Ctrl-↑↓←→        Move selected tree(s)"),
             Line::from("Ctrl-R           Reload from disk"),
             Line::from("Ctrl-S           Save"),
@@ -7771,6 +7839,38 @@ fn main() {}</t><t tx="b">just notes</t></tnodes></leo_file>"#,
     }
 
     #[test]
+    fn shift_enter_marks_every_search_match_and_closes_the_dialog() {
+        let mut app = editing_app();
+        app.document
+            .outline
+            .nodes
+            .get_mut(&NodeId::from("b"))
+            .unwrap()
+            .body = "contains needle text".into();
+        app.document
+            .outline
+            .nodes
+            .get_mut(&NodeId::from("c"))
+            .unwrap()
+            .body = "another needle here".into();
+        start_search(&mut app);
+        for character in "needle".chars() {
+            handle_search_input(
+                &mut app,
+                KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+            );
+        }
+        assert_eq!(app.search.as_ref().unwrap().matches.len(), 2);
+
+        handle_search_input(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+
+        assert!(app.search.is_none());
+        assert_eq!(app.status, "marked 2 search matches");
+        assert!(app.marked.contains(&PositionId("0/0".into())));
+        assert!(app.marked.contains(&PositionId("0/1".into())));
+    }
+
+    #[test]
     fn search_scrolls_the_body_pane_to_the_matching_line() {
         let mut app = editing_app();
         app.document
@@ -8064,6 +8164,36 @@ fn main() {}</t><t tx="b">just notes</t></tnodes></leo_file>"#,
             "n wraps back around to the first occurrence"
         );
         assert_eq!(app.status, "clone 1/2");
+    }
+
+    #[test]
+    fn shift_n_cycles_to_the_next_marked_node_and_wraps() {
+        let mut app = editing_app();
+        app.selected = 0;
+        app.selection_anchor = None;
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('N'), KeyModifiers::SHIFT),
+            None,
+        );
+        assert_eq!(
+            app.status, "no marked nodes",
+            "Shift-N with nothing marked reports that instead of moving"
+        );
+
+        let root = app.rows()[0].position.clone();
+        let child = app.rows()[1].position.clone();
+        app.marked.insert(root);
+        app.marked.insert(child.clone());
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('N'), KeyModifiers::SHIFT),
+            None,
+        );
+        assert_eq!(app.selected_row().unwrap().position, child);
+        assert_eq!(app.status, "marked 2/2");
 
         handle_key(
             &mut app,
@@ -8072,10 +8202,10 @@ fn main() {}</t><t tx="b">just notes</t></tnodes></leo_file>"#,
         );
         assert_eq!(
             app.selected_row().unwrap().position,
-            PositionId("1".into()),
-            "Shift-N wraps backward to the last occurrence"
+            PositionId("0".into()),
+            "Shift-N wraps back around to the first marked node"
         );
-        assert_eq!(app.status, "clone 2/2");
+        assert_eq!(app.status, "marked 1/2");
     }
 
     #[test]
