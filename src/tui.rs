@@ -3271,20 +3271,21 @@ fn mark_updated_ancestors(
 }
 
 /// Whether cutting `position` would remove the only remaining occurrence of
-/// some read-only derived node beneath it (including `position` itself).
-/// A duplicate occurrence (its node id also appears elsewhere, e.g. because
-/// its @auto root was cloned) is safe to cut: the content survives via the
-/// other occurrence.
+/// a read-only derived node directly. Cutting an @auto root itself is always
+/// safe -- its whole subtree, root and derived children alike, leaves
+/// together, so nothing is left half-synced -- only cutting a read-only
+/// descendant on its own, while its root and siblings stay behind, orphans
+/// it. A duplicate occurrence (its node id also appears elsewhere, e.g.
+/// because its @auto root was cloned) is safe to cut either way: the content
+/// survives via the other occurrence.
 fn cut_would_orphan_derived_content(app: &App, position: &PositionId) -> bool {
-    fn walk(app: &App, position: &Position) -> bool {
-        (app.readonly_derived(&position.node)
-            && clone_count(&app.document.outline, &position.node) <= 1)
-            || position.children.iter().any(|child| walk(app, child))
-    }
     app.document
         .outline
         .position(position)
-        .is_some_and(|position| walk(app, position))
+        .is_some_and(|position| {
+            app.readonly_derived(&position.node)
+                && clone_count(&app.document.outline, &position.node) <= 1
+        })
 }
 
 fn split_position(id: &PositionId) -> Option<(Option<PositionId>, usize)> {
@@ -7683,15 +7684,30 @@ fn main() {}</t><t tx="b">just notes</t></tnodes></leo_file>"#,
     }
 
     #[test]
-    fn cutting_the_sole_auto_occurrence_is_blocked() {
+    fn cutting_a_derived_descendant_directly_is_blocked() {
         let mut app = editing_app();
         app.derived_nodes.insert(NodeId::from("b"));
         app.derived_nodes.insert(NodeId::from("c"));
 
+        app.selected = 1; // row "b", a derived descendant, not the @auto root
         cut_selected(&mut app);
 
         assert_eq!(app.document.outline.roots.len(), 1);
         assert_eq!(app.status, "@auto subtrees cannot be cut");
+    }
+
+    #[test]
+    fn cutting_the_auto_root_is_allowed_even_with_sole_derived_children() {
+        let mut app = editing_app();
+        app.derived_nodes.insert(NodeId::from("b"));
+        app.derived_nodes.insert(NodeId::from("c"));
+
+        // Row 0 ("a") is the @auto root; cutting it takes its read-only
+        // children with it in the same action, so nothing is orphaned.
+        cut_selected(&mut app);
+
+        assert_eq!(app.document.outline.roots.len(), 0);
+        assert_ne!(app.status, "@auto subtrees cannot be cut");
     }
 
     #[test]
