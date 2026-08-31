@@ -832,6 +832,8 @@ fn handle_key(
         KeyCode::Char('V') if key.modifiers == KeyModifiers::SHIFT => paste_tree(app, true),
         KeyCode::Char('m') if key.modifiers.is_empty() => app.toggle_mark(),
         KeyCode::Char('M') if key.modifiers == KeyModifiers::SHIFT => app.clear_marks(),
+        KeyCode::Char('n') if key.modifiers.is_empty() => cycle_clone(app, 1),
+        KeyCode::Char('N') if key.modifiers == KeyModifiers::SHIFT => cycle_clone(app, -1),
         KeyCode::Up if key.modifiers == KeyModifiers::SHIFT => {
             app.selection_anchor.get_or_insert(app.selected);
             app.extend_selection(-1);
@@ -2396,6 +2398,27 @@ fn reveal_and_select(app: &mut App, position: &PositionId) {
         app.expanded.insert(PositionId(components[..end].join("/")));
     }
     select_position(app, position);
+}
+
+/// `n`/`N`: jumps to the next/previous occurrence of the selected node,
+/// wrapping around, expanding ancestors as needed so a collapsed occurrence
+/// is still reachable.
+fn cycle_clone(app: &mut App, direction: isize) {
+    let Some(row) = app.selected_row() else {
+        return;
+    };
+    let positions = positions_of(&app.document.outline, &row.node);
+    if positions.len() <= 1 {
+        app.status = "node has no other occurrences".into();
+        return;
+    }
+    let Some(current) = positions.iter().position(|p| p == &row.position) else {
+        return;
+    };
+    let len = positions.len() as isize;
+    let next = (current as isize + direction).rem_euclid(len) as usize;
+    reveal_and_select(app, &positions[next]);
+    app.status = format!("clone {}/{}", next + 1, positions.len());
 }
 
 fn cancel_headline_edit(app: &mut App) {
@@ -3970,17 +3993,17 @@ fn headline_spans(headline: &str) -> Vec<Span<'_>> {
 fn controls(body_full_width: bool, outline_full_width: bool) -> &'static str {
     if body_full_width {
         #[cfg(feature = "syntax")]
-        return "? help  arrows scroll  W wrap  c/x/v/V tree  m/M mark  f split  F outline  s split dir  o open/edit  Ctrl-P find  / search  a commands/actions  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  y syntax  p preview  l log  q quit";
+        return "? help  arrows scroll  W wrap  c/x/v/V tree  m/M mark  n/N clone  f split  F outline  s split dir  o open/edit  Ctrl-P find  / search  a commands/actions  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  y syntax  p preview  l log  q quit";
         #[cfg(not(feature = "syntax"))]
-        return "? help  arrows scroll  W wrap  c/x/v/V tree  m/M mark  f split  F outline  s split dir  o open/edit  Ctrl-P find  / search  a commands/actions  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  l log  q quit";
+        return "? help  arrows scroll  W wrap  c/x/v/V tree  m/M mark  n/N clone  f split  F outline  s split dir  o open/edit  Ctrl-P find  / search  a commands/actions  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  l log  q quit";
     }
     if outline_full_width {
-        return "? help  arrows navigate  W wrap  c/x/v/V tree  m/M mark  F split view  s split dir  o open/edit  Ctrl-P find  / search  a commands/actions  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  l log  q quit";
+        return "? help  arrows navigate  W wrap  c/x/v/V tree  m/M mark  n/N clone  F split view  s split dir  o open/edit  Ctrl-P find  / search  a commands/actions  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  l log  q quit";
     }
     #[cfg(feature = "syntax")]
-    return "? help  arrows navigate  PgUp/PgDn body  W wrap  c/x/v/V tree  m/M mark  f body  F outline  s split dir  o open/edit  Ctrl-P find  / search  a commands/actions  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  y syntax  p preview  l log  q quit";
+    return "? help  arrows navigate  PgUp/PgDn body  W wrap  c/x/v/V tree  m/M mark  n/N clone  f body  F outline  s split dir  o open/edit  Ctrl-P find  / search  a commands/actions  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  y syntax  p preview  l log  q quit";
     #[cfg(not(feature = "syntax"))]
-    "? help  arrows navigate  PgUp/PgDn body  W wrap  c/x/v/V tree  m/M mark  f body  F outline  s split dir  o open/edit  Ctrl-P find  / search  a commands/actions  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  l log  q quit"
+    "? help  arrows navigate  PgUp/PgDn body  W wrap  c/x/v/V tree  m/M mark  n/N clone  f body  F outline  s split dir  o open/edit  Ctrl-P find  / search  a commands/actions  i new  h rename  Ctrl-↑↓←→ move  Ctrl-R reload  Ctrl-S save  l log  q quit"
 }
 
 fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full_width: bool) {
@@ -4006,6 +4029,7 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full
             Line::from("Shift-C          Copy path:line (dir for @path) to clipboard"),
             Line::from("v / Shift-V      Paste copy / paste clone"),
             Line::from("m / Shift-M      Mark selected / clear all marks"),
+            Line::from("n / Shift-N      Next/previous occurrence of this node"),
             Line::from("i                Insert a sibling"),
             Line::from("h                Rename the headline"),
             Line::from("Ctrl-↑↓←→        Move selected tree(s)"),
@@ -4031,6 +4055,7 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full
             Line::from("c/x/v/V          Copy/cut/paste/clone"),
             Line::from("Shift-C          Copy path:line (dir for @path) to clipboard"),
             Line::from("m / Shift-M      Mark selected / clear all marks"),
+            Line::from("n / Shift-N      Next/previous occurrence of this node"),
             Line::from("Ctrl-P           Find a headline"),
             Line::from("a                Command/action palette"),
             Line::from("/                Search headlines and body text"),
@@ -4064,6 +4089,7 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, body_full_width: bool, outline_full
             Line::from("x                Cut selected tree"),
             Line::from("v / Shift-V      Paste copy / paste clone"),
             Line::from("m / Shift-M      Mark selected / clear all marks"),
+            Line::from("n / Shift-N      Next/previous occurrence of this node"),
             Line::from("Ctrl-↑↓←→        Move selected tree(s)"),
             Line::from("Ctrl-R           Reload from disk"),
             Line::from("Ctrl-S           Save"),
@@ -4653,6 +4679,28 @@ fn clone_count(outline: &Outline, id: &NodeId) -> usize {
             .sum()
     }
     count(&outline.roots, id)
+}
+
+/// Every position where `id` occurs, in document (pre-order) order --
+/// regardless of which ancestors are currently expanded. Powers cycling
+/// between a node's clone occurrences with `n`/`N`.
+fn positions_of(outline: &Outline, id: &NodeId) -> Vec<PositionId> {
+    fn walk(positions: &[Position], parent: &str, id: &NodeId, out: &mut Vec<PositionId>) {
+        for (index, position) in positions.iter().enumerate() {
+            let path = if parent.is_empty() {
+                index.to_string()
+            } else {
+                format!("{parent}/{index}")
+            };
+            if &position.node == id {
+                out.push(PositionId(path.clone()));
+            }
+            walk(&position.children, &path, id, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(&outline.roots, "", id, &mut out);
+    out
 }
 
 /// Whether `position` is where a clone actually originates, rather than a
@@ -7780,6 +7828,67 @@ fn main() {}</t><t tx="b">just notes</t></tnodes></leo_file>"#,
         assert_eq!(app.document.outline.roots.len(), 1);
         assert_ne!(app.status, "@auto subtrees cannot be cut");
         assert_eq!(app.document.outline.roots[0].node, NodeId::from("a"));
+    }
+
+    #[test]
+    fn n_cycles_through_clone_occurrences_and_wraps() {
+        let mut app = editing_app();
+        // Clone the whole tree: "a" (and its children "b"/"c") now each
+        // occur at both root 0 and root 1.
+        copy_selected(&mut app);
+        paste_tree(&mut app, true);
+        assert_eq!(app.document.outline.roots.len(), 2);
+
+        app.selected = 0;
+        app.selection_anchor = None;
+        assert_eq!(app.selected_row().unwrap().position, PositionId("0".into()));
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE),
+            None,
+        );
+        assert_eq!(app.selected_row().unwrap().position, PositionId("1".into()));
+        assert_eq!(app.status, "clone 2/2");
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE),
+            None,
+        );
+        assert_eq!(
+            app.selected_row().unwrap().position,
+            PositionId("0".into()),
+            "n wraps back around to the first occurrence"
+        );
+        assert_eq!(app.status, "clone 1/2");
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('N'), KeyModifiers::SHIFT),
+            None,
+        );
+        assert_eq!(
+            app.selected_row().unwrap().position,
+            PositionId("1".into()),
+            "Shift-N wraps backward to the last occurrence"
+        );
+        assert_eq!(app.status, "clone 2/2");
+    }
+
+    #[test]
+    fn n_reports_no_other_occurrences_for_a_unique_node() {
+        let mut app = editing_app();
+        app.selected = 0;
+
+        handle_key(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE),
+            None,
+        );
+
+        assert_eq!(app.selected, 0);
+        assert_eq!(app.status, "node has no other occurrences");
     }
 
     #[test]
