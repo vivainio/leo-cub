@@ -23,8 +23,8 @@ use std::{
 use anyhow::{Context, Result};
 use leo::{
     LeoDocument, NodeId, Operation, OperationBatch, OriginalExternalState, Position, PositionId,
-    WritableExternalFile, external_filename, external_format, load_derived_files, save_document,
-    track_external_rename,
+    WritableExternalFile, escape_headline_path_component, external_filename, external_format,
+    load_derived_files, save_document, track_external_rename,
 };
 use regex::Regex;
 use rhai::packages::Package;
@@ -1068,6 +1068,7 @@ fn register_doc_api(engine: &mut Engine) {
     engine.register_fn("regex_captures", regex_captures);
     engine.register_fn("regex_replace", regex_replace);
     engine.register_fn("regex_replace_all", regex_replace_all);
+    engine.register_fn("escape_path_component", escape_headline_path_component);
 
     // rhai-fs: open_file/read_string/write/read_dir/create_dir/... on plain
     // path strings, global rather than `Doc`-scoped since a script may need

@@ -37,5 +37,5 @@ pub use sync::{
     render_thin, restore_external_state, save_document, sync_document, track_external_rename,
     write_external_updates,
 };
-pub use tree::{AddPathsReport, HeadlinePathError};
+pub use tree::{AddPathsReport, HeadlinePathError, escape_headline_path_component};
 pub use xml::{LeoDocument, LeoXmlError};

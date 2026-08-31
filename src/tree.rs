@@ -258,7 +258,7 @@ fn collect_preorder(position: &Position, out: &mut Vec<NodeId>) {
 
 /// Escapes a headline for use as one path component: `\` becomes `\\` and
 /// `/` becomes `\/`, the inverse of what `path_parts` unescapes.
-fn escape_headline_path_component(headline: &str) -> String {
+pub fn escape_headline_path_component(headline: &str) -> String {
     headline.replace('\\', "\\\\").replace('/', "\\/")
 }
 

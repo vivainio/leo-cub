@@ -139,14 +139,16 @@ fn gh_parse_url(url) {
 }
 
 //@ fn gh_view_url
-/// Fetches an issue or PR's full details -- including its description --
-/// straight from its GitHub URL, via `gh_parse_url`. The `repo` it parses
-/// out of the URL overrides `doc`'s `@variables` repo, so this works
-/// against a link into any repo regardless of what `sh_in`'s directory
-/// defaults to. Returns `()` (after printing a warning) when `url` isn't a
-/// GitHub issue/PR link; otherwise the returned map also carries `kind`
-/// (`"issue"` or `"pr"`) alongside the usual `number`/`title`/`author`/
-/// `state`/`url`/`body` fields `gh` returns.
+/// Fetches an issue or PR's full details -- including its description and
+/// comments -- straight from its GitHub URL, via `gh_parse_url`. The
+/// `repo` it parses out of the URL overrides `doc`'s `@variables` repo, so
+/// this works against a link into any repo regardless of what `sh_in`'s
+/// directory defaults to. Returns `()` (after printing a warning) when
+/// `url` isn't a GitHub issue/PR link; otherwise the returned map also
+/// carries `kind` (`"issue"` or `"pr"`) alongside the usual `number`/
+/// `title`/`author`/`state`/`url`/`body`/`comments` fields `gh` returns --
+/// `comments` is an array of `#{ author: #{ login }, body, createdAt, ... }`
+/// (same shape for both `gh pr view` and `gh issue view`).
 fn gh_view_url(doc, url) {
     let parsed = gh_parse_url(url);
     if parsed == () {
@@ -155,7 +157,7 @@ fn gh_view_url(doc, url) {
     }
     let repo_flag = " --repo " + shq(parsed.repo);
     let sub = if parsed.kind == "pr" { "pr" } else { "issue" };
-    let item = parse_json(sh_in(doc.dir(), "gh " + sub + " view " + parsed.number.to_string() + " --json number,title,author,state,url,body" + repo_flag).stdout);
+    let item = parse_json(sh_in(doc.dir(), "gh " + sub + " view " + parsed.number.to_string() + " --json number,title,author,state,url,body,comments" + repo_flag).stdout);
     item.kind = parsed.kind;
     item
 }
@@ -191,8 +193,10 @@ fn available_commands(doc, target) {
 /// overwrites `target` with its title (headline) and state/author/url plus
 /// full description (body) -- point a node's body at a GitHub link, run
 /// this from the action palette, and it turns into that issue/PR's
-/// content. Leaves `target` untouched (past a printed warning) when its
-/// body isn't a GitHub issue/PR URL.
+/// content -- plus a `Comments` child (one `#N author (date)` child per
+/// GitHub comment, oldest first, mirroring `jira`'s Comments handling)
+/// when there are any. Leaves `target` untouched (past a printed warning)
+/// when its body isn't a GitHub issue/PR URL.
 fn gh_import_url(doc, target) {
     let url = target.b;
     url.trim();
@@ -203,6 +207,14 @@ fn gh_import_url(doc, target) {
     let label = if item.kind == "pr" { "PR" } else { "Issue" };
     target.h = label + " #" + item.number + ": " + item.title;
     target.b = item.state + " · " + item.author.login + " · " + item.url + "\n\n" + item.body;
+    let path = target.path();
+    for i in 0..item.comments.len() {
+        let c = item.comments[i];
+        let created = c.createdAt.sub_string(0, 10) + " " + c.createdAt.sub_string(11, 5);
+        let clabel = "#" + (i + 1).to_string() + " " + c.author.login + " (" + created + ")";
+        let n = doc.ensure(path + "/Comments/" + escape_path_component(clabel));
+        n.b = "@language markdown\n" + c.body;
+    }
 }
 
 //@ fn gh_pr_create
@@ -282,17 +294,20 @@ fn zaira_run_json(doc, cmd) {
 }
 
 //@ fn zaira_get_segments
-/// Fetches a Jira ticket via `zaira get KEY --format ndjson` -- one
-/// self-describing JSON object per line (`type`: `"meta"`,
-/// `"description"`, `"paragraph"`, `"links"`, or `"comment"`), already
-/// split apart by `zaira` itself. `jira` folds these into `target.b`
-/// and its `Meta`/`Comments` children without having to pick a rendered
-/// markdown/frontmatter blob back apart by hand. `zaira` resolves Jira
-/// credentials and the ticket's project from its own config (`zaira
-/// init`), so unlike `gh_repo_flag` there's no per-outline `--repo`-style
-/// override here.
+/// Fetches a Jira ticket via `zaira get KEY --format ndjson --with-prs` --
+/// one self-describing JSON object per line (`type`: `"meta"`,
+/// `"description"`, `"paragraph"`, `"links"`, `"comment"`, or
+/// `"pull_request"`), already split apart by `zaira` itself. `jira` folds
+/// these into `target.b` and its `Meta`/`Comments`/`Pull Requests`
+/// children without having to pick a rendered markdown/frontmatter blob
+/// back apart by hand. `zaira` resolves Jira credentials and the ticket's
+/// project from its own config (`zaira init`), so unlike `gh_repo_flag`
+/// there's no per-outline `--repo`-style override here. `--with-prs` costs
+/// one extra Jira dev-status API call per ticket, but `zaira` swallows
+/// failures there (e.g. no GitHub integration) and just returns no PRs, so
+/// it's always passed rather than made optional.
 fn zaira_get_segments(doc, key) {
-    let cmd = "zaira get " + shq(key) + " --format ndjson";
+    let cmd = "zaira get " + shq(key) + " --format ndjson --with-prs";
     let result = sh_in(doc.dir(), cmd);
     if result.code != 0 {
         throw "`" + cmd + "` failed (exit " + result.code.to_string() + "): " + result.stderr;
@@ -329,7 +344,8 @@ fn jira_join(arr, sep) {
 /// search ...` handling.
 fn jira_populate_children(doc, parent_path, tickets) {
     for t in tickets {
-        let n = doc.ensure(parent_path + "/@jira " + t.key + ": " + t.summary);
+        let label = "@jira " + t.key + ": " + t.summary;
+        let n = doc.ensure(parent_path + "/" + escape_path_component(label));
         n.b = t.status + " · " + t.assignee;
     }
 }
@@ -359,7 +375,12 @@ fn zaira_search_text(doc, text) {
 ///   reporter/dates/components/labels/parent/custom fields/url) and
 ///   `Comments` (one `#N author (date)` child per `comment` segment,
 ///   oldest first, numbered so same-author-same-day comments don't
-///   collide as identical headlines).
+///   collide as identical headlines) and, when the ticket has linked
+///   GitHub PRs, `Pull Requests` (one `name (status)` child per
+///   `pull_request` segment, body the bare PR URL -- which `gh_parse_url`
+///   recognizes, so `available_commands` already offers `gh_import_url`
+///   on each one to expand it into that PR's full title/state/author/
+///   body, no extra wiring needed here).
 /// - `@jira my` / `@jira search TEXT` -- leaves `target` itself alone and
 ///   instead refreshes its children (via `jira_populate_children`) with
 ///   one `@jira KEY: summary` node per ticket assigned to you, or
@@ -377,6 +398,7 @@ fn jira(doc, target) {
         let meta = #{};
         let body = "";
         let comments = [];
+        let pull_requests = [];
         for seg in segments {
             if seg.type == "meta" {
                 meta = seg;
@@ -388,6 +410,8 @@ fn jira(doc, target) {
                 body += "\n\n## Links\n\n" + seg.markdown;
             } else if seg.type == "comment" {
                 comments.push(seg);
+            } else if seg.type == "pull_request" {
+                pull_requests.push(seg);
             }
         }
         target.h = "@jira " + meta.key + ": " + meta.summary;
@@ -416,8 +440,13 @@ fn jira(doc, target) {
         for i in 0..comments.len() {
             let c = comments[i];
             let label = "#" + (i + 1).to_string() + " " + c.author + " (" + c.created + ")";
-            let n = doc.ensure(path + "/Comments/" + label);
+            let n = doc.ensure(path + "/Comments/" + escape_path_component(label));
             n.b = "@language markdown\n" + c.markdown;
+        }
+        for pr in pull_requests {
+            let label = pr.name + " (" + pr.status + ")";
+            let n = doc.ensure(path + "/Pull Requests/" + escape_path_component(label));
+            n.b = pr.url;
         }
         return;
     }
