@@ -2506,6 +2506,21 @@ fn handle_headline_input(app: &mut App, key: KeyEvent) {
             cancel_headline_edit(app);
             app.status = "headline edit cancelled".into();
         }
+        // Ctrl-arrow reorders/(de|pro)motes the node being edited, same as
+        // outside edit mode, and stays in edit mode -- it moves the tree,
+        // not the text cursor or the selection.
+        KeyCode::Up if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            move_selected(app, MoveDirection::Up);
+        }
+        KeyCode::Down if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            move_selected(app, MoveDirection::Down);
+        }
+        KeyCode::Left if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            move_selected(app, MoveDirection::Left);
+        }
+        KeyCode::Right if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            move_selected(app, MoveDirection::Right);
+        }
         KeyCode::Up => {
             commit_or_cancel_headline_edit(app);
             app.move_selection(-1);
@@ -6001,6 +6016,45 @@ fn both(doc, target) {}
         assert_eq!(input.value(), "Z");
         assert_eq!(input.input.cursor(), (0, 1));
         assert!(!input.input.is_selecting());
+    }
+
+    #[test]
+    fn ctrl_arrow_while_editing_a_headline_moves_the_node_and_stays_in_edit_mode() {
+        let mut app = editing_app();
+        app.selected = 1; // node "b", first child of "a"
+
+        edit_headline(&mut app);
+        assert!(app.input.is_some());
+        let editing_node = app.input.as_ref().unwrap().node.clone();
+        assert_eq!(editing_node, NodeId::from("b"));
+
+        handle_headline_input(
+            &mut app,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::CONTROL),
+        );
+
+        assert!(
+            app.input.is_some(),
+            "Ctrl-Down should keep the headline editor open"
+        );
+        assert_eq!(
+            app.input.as_ref().unwrap().node,
+            editing_node,
+            "still editing the same node, now moved"
+        );
+        let root = &app.document.outline.roots[0];
+        assert_eq!(root.node, NodeId::from("a"));
+        let siblings: Vec<_> = root
+            .children
+            .iter()
+            .map(|child| child.node.clone())
+            .collect();
+        assert_eq!(
+            siblings,
+            vec![NodeId::from("c"), NodeId::from("b")],
+            "Ctrl-Down should have swapped b and c"
+        );
+        assert!(app.dirty);
     }
 
     #[test]
