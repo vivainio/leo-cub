@@ -460,6 +460,20 @@ impl App {
     fn readonly_derived(&self, node: &NodeId) -> bool {
         self.derived_nodes.contains(node) && !self.writable_derived(node)
     }
+
+    /// Whether `node` may not take a newly nested child: a read-only
+    /// derived node (an `@auto`/`@auto-dir`-produced descendant, or a thin
+    /// file's own if it isn't writable), or the root of an `@auto`-family
+    /// node itself. Both regenerate their entire child list from scratch on
+    /// every load -- unlike a writable `@file`/`@thin`/`@file-thin`/`@f`
+    /// root, which the TUI already permits structural edits under -- so
+    /// anything demoted under one here would silently vanish on the next
+    /// reload rather than round-trip.
+    fn refuses_new_children(&self, node: &NodeId) -> bool {
+        self.readonly_derived(node)
+            || derived_filename(&self.document.outline.nodes[node].headline)
+                .is_some_and(|(auto, _, _)| auto)
+    }
 }
 
 struct HeadlineInput {
@@ -3010,6 +3024,11 @@ fn move_selected(app: &mut App, direction: MoveDirection) {
                 app.status = "no previous sibling to become parent".into();
                 return;
             };
+            let previous_node = sibling_node_at(&app.document.outline, parent.as_ref(), previous);
+            if previous_node.is_some_and(|node| app.refuses_new_children(&node)) {
+                app.status = "@auto/@auto-dir nodes cannot take new children".into();
+                return;
+            }
             let Some(siblings) = children_mut(&mut app.document.outline, parent.as_ref()) else {
                 return;
             };
@@ -3114,6 +3133,11 @@ fn move_selected_block(app: &mut App, direction: MoveDirection, rows: Vec<Row>) 
                 app.status = "no previous sibling to become parent".into();
                 return;
             };
+            let previous_node = sibling_node_at(&app.document.outline, parent.as_ref(), previous);
+            if previous_node.is_some_and(|node| app.refuses_new_children(&node)) {
+                app.status = "@auto/@auto-dir nodes cannot take new children".into();
+                return;
+            }
             let siblings = children_mut(&mut app.document.outline, parent.as_ref()).unwrap();
             let block: Vec<_> = siblings.drain(start..start + count).collect();
             let child_index = siblings[previous].children.len();
@@ -3337,6 +3361,24 @@ fn split_position(id: &PositionId) -> Option<(Option<PositionId>, usize)> {
 
 fn join_position(parent: Option<&PositionId>, index: usize) -> PositionId {
     PositionId(parent.map_or_else(|| index.to_string(), |p| format!("{}/{index}", p.0)))
+}
+
+/// The node at `index` among `parent`'s children (or the roots, if
+/// `parent` is `None`), without requiring a mutable borrow of `outline` --
+/// so a caller can check it before deciding whether a subsequent
+/// `children_mut` mutation is even allowed.
+fn sibling_node_at(outline: &Outline, parent: Option<&PositionId>, index: usize) -> Option<NodeId> {
+    let Some(parent) = parent else {
+        return outline
+            .roots
+            .get(index)
+            .map(|position| position.node.clone());
+    };
+    let position = outline.position(parent)?;
+    position
+        .children
+        .get(index)
+        .map(|position| position.node.clone())
 }
 
 fn children_mut<'a>(
@@ -4665,7 +4707,8 @@ fn dynamic_source_location(app: &App, row: &Row) -> Option<SourceLocation> {
         // ancestors alone; bail and let the caller fall through to
         // `App::source_nodes`, which already has the exact path from
         // `AutoFile::file_paths` rather than a guess missing that segment.
-        if derived_filename(&node.headline).is_some_and(|(_, directive, _)| directive == "@auto-dir")
+        if derived_filename(&node.headline)
+            .is_some_and(|(_, directive, _)| directive == "@auto-dir")
         {
             return None;
         }
@@ -6956,6 +6999,124 @@ fn both(doc, target) {}
             NodeId::from("b")
         );
         assert_eq!(app.status, "@auto subtrees cannot be moved");
+    }
+
+    #[test]
+    fn demote_refuses_to_nest_a_normal_node_under_a_readonly_derived_sibling() {
+        // Demoting only checks that the *selected* node is editable, not
+        // that the previous sibling it's about to become a child of is
+        // safe to nest under -- a read-only derived node (like an
+        // @auto-dir's synthetic @path descendants) regenerates its entire
+        // child list from scratch on every load, so anything nested under
+        // it here would silently vanish on the next reload.
+        let document = LeoDocument::parse(
+            r#"<leo_file><vnodes><v t="p"><vh>P</vh><v t="b"><vh>B</vh></v><v t="c"><vh>C</vh></v></v></vnodes><tnodes><t tx="p"></t><t tx="b"></t><t tx="c"></t></tnodes></leo_file>"#,
+        )
+        .unwrap();
+        let mut app = App::new(
+            document,
+            PathBuf::from("test.leo"),
+            String::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashSet::new(),
+            HashMap::new(),
+            OriginalExternalState::default(),
+            false,
+        );
+        app.derived_nodes.insert(NodeId::from("b"));
+
+        select_position(&mut app, &PositionId("0/1".into()));
+        move_selected(&mut app, MoveDirection::Right);
+
+        assert_eq!(
+            app.document.outline.roots[0].children[1].node,
+            NodeId::from("c")
+        );
+        assert!(
+            app.document.outline.roots[0].children[1]
+                .children
+                .is_empty()
+        );
+        assert_eq!(app.status, "@auto/@auto-dir nodes cannot take new children");
+    }
+
+    #[test]
+    fn demote_refuses_to_nest_a_normal_node_under_an_auto_dir_root() {
+        // The @auto-dir root itself is deliberately excluded from
+        // derived_nodes (so it can still be cut as a whole subtree), but
+        // that must not make it look like a safe place to demote a normal
+        // node into -- its children are regenerated from scratch too.
+        let document = LeoDocument::parse(
+            r#"<leo_file><vnodes><v t="p"><vh>P</vh><v t="dir"><vh>@auto-dir *.rs</vh></v><v t="e"><vh>E</vh></v></v></vnodes><tnodes><t tx="p"></t><t tx="dir"></t><t tx="e"></t></tnodes></leo_file>"#,
+        )
+        .unwrap();
+        let mut app = App::new(
+            document,
+            PathBuf::from("test.leo"),
+            String::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashSet::new(),
+            HashMap::new(),
+            OriginalExternalState::default(),
+            false,
+        );
+
+        select_position(&mut app, &PositionId("0/1".into()));
+        move_selected(&mut app, MoveDirection::Right);
+
+        assert_eq!(
+            app.document.outline.roots[0].children[1].node,
+            NodeId::from("e")
+        );
+        assert!(
+            app.document.outline.roots[0].children[1]
+                .children
+                .is_empty()
+        );
+        assert_eq!(app.status, "@auto/@auto-dir nodes cannot take new children");
+    }
+
+    #[test]
+    fn block_demote_also_refuses_a_readonly_derived_new_parent() {
+        let document = LeoDocument::parse(
+            r#"<leo_file><vnodes><v t="p"><vh>P</vh><v t="b"><vh>B</vh></v><v t="c"><vh>C</vh></v><v t="d"><vh>D</vh></v></v></vnodes><tnodes><t tx="p"></t><t tx="b"></t><t tx="c"></t><t tx="d"></t></tnodes></leo_file>"#,
+        )
+        .unwrap();
+        let mut app = App::new(
+            document,
+            PathBuf::from("test.leo"),
+            String::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashSet::new(),
+            HashMap::new(),
+            OriginalExternalState::default(),
+            false,
+        );
+        app.derived_nodes.insert(NodeId::from("b"));
+
+        select_position(&mut app, &PositionId("0/1".into()));
+        let anchor = app.selected;
+        select_position(&mut app, &PositionId("0/2".into()));
+        app.selection_anchor = Some(anchor);
+        move_selected(&mut app, MoveDirection::Right);
+
+        assert_eq!(
+            app.document.outline.roots[0].children[1].node,
+            NodeId::from("c")
+        );
+        assert_eq!(
+            app.document.outline.roots[0].children[2].node,
+            NodeId::from("d")
+        );
+        assert!(
+            app.document.outline.roots[0].children[1]
+                .children
+                .is_empty()
+        );
+        assert_eq!(app.status, "@auto/@auto-dir nodes cannot take new children");
     }
 
     #[test]

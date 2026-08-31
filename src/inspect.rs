@@ -701,7 +701,8 @@ fn collect_file(
         // query anchored above the `@auto-dir` node can't be reconstructed
         // past it; re-anchor there instead of silently under- or
         // over-matching against a path missing that segment.
-        let child_paths = if external_file(&node.headline).is_some_and(|(directive, _)| directive == "@auto-dir")
+        let child_paths = if external_file(&node.headline)
+            .is_some_and(|(directive, _)| directive == "@auto-dir")
         {
             Vec::new()
         } else {
@@ -957,8 +958,11 @@ mod tests {
         );
         assert!(select_subtrees(&outline, InspectSelector::File("specs/nested/leaf.rs")).is_err());
         assert!(
-            select_subtrees(&outline, InspectSelector::File("outer/specs/nested/leaf.rs"))
-                .is_err()
+            select_subtrees(
+                &outline,
+                InspectSelector::File("outer/specs/nested/leaf.rs")
+            )
+            .is_err()
         );
     }
 

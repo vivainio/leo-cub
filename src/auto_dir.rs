@@ -178,7 +178,12 @@ impl DirTree {
         self.flatten_at(root, &PathBuf::new(), outline)
     }
 
-    fn flatten_at(self, root: &NodeId, dir_relative: &Path, outline: &mut Outline) -> Vec<Position> {
+    fn flatten_at(
+        self,
+        root: &NodeId,
+        dir_relative: &Path,
+        outline: &mut Outline,
+    ) -> Vec<Position> {
         self.entries
             .into_iter()
             .map(|entry| match entry {
