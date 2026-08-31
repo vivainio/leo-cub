@@ -2399,17 +2399,14 @@ fn reveal_and_select(app: &mut App, position: &PositionId) {
 }
 
 fn cancel_headline_edit(app: &mut App) {
-    let state = app.input.take().expect("input exists");
+    let Some(state) = app.input.take() else {
+        return;
+    };
     if let Some(position) = state.inserted_position {
         remove_position(&mut app.document.outline, &position);
         app.document.outline.nodes.remove(&state.node);
-    } else {
-        app.document
-            .outline
-            .nodes
-            .get_mut(&state.node)
-            .expect("node exists")
-            .headline = state.original;
+    } else if let Some(node) = app.document.outline.nodes.get_mut(&state.node) {
+        node.headline = state.original;
     }
 }
 
@@ -2428,18 +2425,16 @@ fn commit_headline_edit_without_chaining(app: &mut App) -> bool {
         app.status = "headline may not be empty".into();
         return false;
     }
-    app.document
-        .outline
-        .nodes
-        .get_mut(&node_id)
-        .expect("edited node exists")
-        .headline = headline.clone();
+    let Some(node) = app.document.outline.nodes.get_mut(&node_id) else {
+        app.status = "edited node no longer exists; edit discarded".into();
+        app.input = None;
+        return false;
+    };
+    node.headline = headline.clone();
     if let Some(row) = app.rows().iter().find(|row| row.node == node_id).cloned()
         && external_filename(&headline).is_some()
+        && let Some(path) = dynamic_source_location(app, &row).map(|location| location.path)
     {
-        let path = dynamic_source_location(app, &row)
-            .map(|location| location.path)
-            .expect("edited external node has a source path");
         track_external_rename(
             &mut app.writable_external,
             node_id.clone(),
@@ -6199,6 +6194,31 @@ fn both(doc, target) {}
         assert_eq!(file.path, PathBuf::from("test.md"));
         assert_eq!(file.start_delimiter, "#");
         assert_eq!(file.end_delimiter, "");
+    }
+
+    #[test]
+    fn committing_a_new_auto_dir_headline_does_not_panic() {
+        // Reproduces a real crash: `i` (insert_headline) starts a fresh node,
+        // typing `@auto-dir *.md` as its headline and pressing Enter used to
+        // panic in commit_headline_edit_without_chaining. `external_filename`
+        // recognizes `@auto-dir` as an external directive, but
+        // `dynamic_source_location` deliberately returns `None` for it (its
+        // argument is a glob/directory, not an openable file) -- the commit
+        // path unconditionally `.expect()`ed a location anyway.
+        let mut app = editing_app();
+        insert_headline(&mut app);
+        app.input.as_mut().unwrap().input =
+            ratatui_textarea::TextArea::new(vec!["@auto-dir *.md".into()]);
+        handle_headline_input(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        let node = app
+            .document
+            .outline
+            .nodes
+            .values()
+            .find(|node| node.headline == "@auto-dir *.md")
+            .expect("new node committed with its typed headline");
+        assert!(!app.writable_external.contains_key(&node.id));
     }
 
     #[test]
