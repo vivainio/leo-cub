@@ -1,11 +1,15 @@
 //! Live expansion of `@auto-dir <dir-or-glob>`: enumerates files under a
 //! resolved base path, tree-sitter-parses each match via [`AutoFile::parse`],
 //! and assembles the results into one synthetic [`AutoFile`] whose root is
-//! the `@auto-dir` node and whose children are one per matched file. Because
-//! `AutoFile`'s fields are all `pub` and `merge_into` only cares about their
-//! shape, this flows through the exact same merge/read-only/write-back-
-//! exclusion machinery as a plain single-file `@auto` node -- no other code
-//! needs to know `@auto-dir` produced it rather than a real single file.
+//! the `@auto-dir` node. Matches that share a subdirectory (relative to the
+//! resolved search root) are nested under synthetic `@path <name>` container
+//! nodes mirroring that directory structure, the same shape `cub import
+//! --paths` builds by hand, rather than dumped as one flat list of siblings.
+//! Because `AutoFile`'s fields are all `pub` and `merge_into` only cares
+//! about their shape, this flows through the exact same merge/read-only/
+//! write-back-exclusion machinery as a plain single-file `@auto` node -- no
+//! other code needs to know `@auto-dir` produced it rather than a real
+//! single file.
 
 use std::{
     collections::HashMap,
@@ -50,17 +54,24 @@ pub fn parse_dir(resolved: &Path, root: NodeId) -> Result<AutoFile, AutoError> {
     let mut outline = Outline::default();
     let mut locations = HashMap::new();
     let mut file_paths = HashMap::new();
-    let mut children = Vec::with_capacity(matches.len());
+    let mut tree = DirTree::default();
 
     for path in &matches {
         let relative = path.strip_prefix(&search_root).unwrap_or(path);
         let relative_display = relative.display().to_string();
-        // `path` itself (not stripped to search_root) becomes the headline:
-        // `collect_file` in inspect.rs matches `cub inspect <file>` purely
-        // by suffix-comparing headline text against the on-disk outline, so
-        // a per-file node needs the same directory context a hand-written
-        // `@auto <path>` headline would carry, not just its bare filename.
-        let path_display = path.display().to_string();
+        // Just the bare filename: directory context now comes from the
+        // synthetic `@path` ancestors built below, the same as a
+        // hand-written `@path <dir>` / `@auto <name>` pair would carry it.
+        // `collect_file` (inspect.rs) and `dynamic_source_location` (tui.rs)
+        // both know to stop trusting plain `@path`-ancestor accumulation at
+        // an `@auto-dir` boundary -- inspect.rs re-anchors there instead of
+        // reconstructing the search root's own name, and tui.rs defers
+        // entirely to `AutoFile::file_paths` (via `app.source_nodes`) rather
+        // than guess.
+        let file_name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| relative_display.clone());
         let source = fs::read_to_string(path)
             .map_err(|error| AutoError::Dir(format!("{}: {error}", path.display())))?;
         let file_id = NodeId(format!("{}::auto-dir:{relative_display}", root.0));
@@ -77,12 +88,21 @@ pub fn parse_dir(resolved: &Path, root: NodeId) -> Result<AutoFile, AutoError> {
         let file_root_position = file.outline.roots[0].clone();
         for (id, mut node) in file.outline.nodes {
             if id == file_id {
-                node.headline = format!("@auto {path_display}");
+                node.headline = format!("@auto {file_name}");
             }
             outline.nodes.insert(id, node);
         }
-        children.push(file_root_position);
+
+        let dirs: Vec<String> = relative
+            .parent()
+            .into_iter()
+            .flat_map(|parent| parent.components())
+            .map(|component| component.as_os_str().to_string_lossy().into_owned())
+            .collect();
+        tree.insert(&dirs, file_root_position);
     }
+
+    let children = tree.flatten(&root, &mut outline);
 
     outline.nodes.insert(
         root.clone(),
@@ -105,6 +125,90 @@ pub fn parse_dir(resolved: &Path, root: NodeId) -> Result<AutoFile, AutoError> {
         locations,
         file_paths: Some(file_paths),
     })
+}
+
+/// Groups per-file [`Position`]s by the subdirectory (relative to the
+/// search root) each match came from, so [`DirTree::flatten`] can turn that
+/// grouping into a nested tree of synthetic `@path <name>` nodes instead of
+/// one flat sibling list. Directories are keyed by name in `dir_index` so a
+/// later match under an already-seen subdirectory extends its existing
+/// subtree rather than creating a duplicate.
+#[derive(Default)]
+struct DirTree {
+    entries: Vec<DirEntry>,
+    dir_index: HashMap<String, usize>,
+}
+
+enum DirEntry {
+    Dir(String, DirTree),
+    File(Position),
+}
+
+impl DirTree {
+    /// `dirs` is the match's containing-directory path split into
+    /// components, relative to the search root -- empty for a file that
+    /// sits directly in the search root itself.
+    fn insert(&mut self, dirs: &[String], file: Position) {
+        let Some((first, rest)) = dirs.split_first() else {
+            self.entries.push(DirEntry::File(file));
+            return;
+        };
+        let index = match self.dir_index.get(first) {
+            Some(&index) => index,
+            None => {
+                let index = self.entries.len();
+                self.entries
+                    .push(DirEntry::Dir(first.clone(), DirTree::default()));
+                self.dir_index.insert(first.clone(), index);
+                index
+            }
+        };
+        let DirEntry::Dir(_, subtree) = &mut self.entries[index] else {
+            unreachable!("dir_index only ever indexes Dir entries");
+        };
+        subtree.insert(rest, file);
+    }
+
+    /// Consumes the tree, inserting a [`Node`] into `outline` for every
+    /// synthetic directory and returning the top-level children (a mix of
+    /// per-file positions and directory positions) in first-seen order --
+    /// which, since callers insert matches in sorted order, is the same
+    /// order a flat listing would have used.
+    fn flatten(self, root: &NodeId, outline: &mut Outline) -> Vec<Position> {
+        self.flatten_at(root, &PathBuf::new(), outline)
+    }
+
+    fn flatten_at(self, root: &NodeId, dir_relative: &Path, outline: &mut Outline) -> Vec<Position> {
+        self.entries
+            .into_iter()
+            .map(|entry| match entry {
+                DirEntry::File(position) => position,
+                DirEntry::Dir(name, subtree) => {
+                    let dir_relative = dir_relative.join(&name);
+                    let dir_id = NodeId(format!(
+                        "{}::auto-dir:path:{}",
+                        root.0,
+                        dir_relative.display()
+                    ));
+                    let children = subtree.flatten_at(root, &dir_relative, outline);
+                    outline.nodes.insert(
+                        dir_id.clone(),
+                        Node {
+                            id: dir_id.clone(),
+                            headline: format!("@path {name}"),
+                            body: String::new(),
+                            vnode_attributes: HashMap::new(),
+                            tnode_attributes: HashMap::new(),
+                        },
+                    );
+                    Position {
+                        node: dir_id,
+                        children,
+                    }
+                }
+            })
+            .collect()
+    }
 }
 
 /// Splits a resolved path into a concrete, existing search-root directory
@@ -195,25 +299,12 @@ mod tests {
         fs::write(path, contents).unwrap();
     }
 
-    /// Headlines of the top-level per-file children, with `dir` stripped
-    /// back off so assertions read as the relative path a user would
-    /// actually type -- the real headline carries the full resolved path
-    /// (see the comment at its construction site), not just the filename.
-    fn headlines(auto: &AutoFile, dir: &Path) -> Vec<String> {
+    /// Headlines of the top-level children, in order.
+    fn headlines(auto: &AutoFile) -> Vec<String> {
         auto.outline.roots[0]
             .children
             .iter()
-            .map(|position| {
-                let headline = &auto.outline.nodes[&position.node].headline;
-                let path = headline.strip_prefix("@auto ").unwrap();
-                format!(
-                    "@auto {}",
-                    Path::new(path)
-                        .strip_prefix(dir)
-                        .unwrap_or(Path::new(path))
-                        .display()
-                )
-            })
+            .map(|position| auto.outline.nodes[&position.node].headline.clone())
             .collect()
     }
 
@@ -225,7 +316,7 @@ mod tests {
         write(&dir, "nested/c.py", "def c():\n    pass\n");
 
         let auto = parse_dir(&dir, NodeId::from("root")).unwrap();
-        assert_eq!(headlines(&auto, &dir), vec!["@auto a.py", "@auto b.rs"]);
+        assert_eq!(headlines(&auto), vec!["@auto a.py", "@auto b.rs"]);
     }
 
     #[test]
@@ -235,7 +326,25 @@ mod tests {
         write(&dir, "b.rs", "fn b() {}\n");
 
         let auto = parse_dir(&dir.join("*.py"), NodeId::from("root")).unwrap();
-        assert_eq!(headlines(&auto, &dir), vec!["@auto a.py"]);
+        assert_eq!(headlines(&auto), vec!["@auto a.py"]);
+    }
+
+    /// Indented rendering of the whole tree's headlines (both `@path` and
+    /// `@auto` nodes), so nesting produced by recursive matches shows up as
+    /// indentation rather than being flattened away.
+    fn render_tree(auto: &AutoFile) -> String {
+        fn render(auto: &AutoFile, positions: &[Position], depth: usize, output: &mut String) {
+            for position in positions {
+                let headline = &auto.outline.nodes[&position.node].headline;
+                output.push_str(&"  ".repeat(depth));
+                output.push_str(headline);
+                output.push('\n');
+                render(auto, &position.children, depth + 1, output);
+            }
+        }
+        let mut output = String::new();
+        render(auto, &auto.outline.roots[0].children, 0, &mut output);
+        output
     }
 
     #[test]
@@ -247,12 +356,12 @@ mod tests {
 
         let auto = parse_dir(&dir.join("**/*.rs"), NodeId::from("root")).unwrap();
         assert_eq!(
-            headlines(&auto, &dir),
-            vec![
-                "@auto a.rs",
-                "@auto nested/b.rs",
-                "@auto nested/deeper/c.rs"
-            ]
+            render_tree(&auto),
+            "@auto a.rs\n\
+             @path nested\n\
+             \x20\x20@auto b.rs\n\
+             \x20\x20@path deeper\n\
+             \x20\x20\x20\x20@auto c.rs\n"
         );
     }
 
@@ -263,7 +372,7 @@ mod tests {
         write(&dir, "a.py", "def a():\n    pass\n");
 
         let auto = parse_dir(&dir, NodeId::from("root")).unwrap();
-        assert_eq!(headlines(&auto, &dir), vec!["@auto a.py"]);
+        assert_eq!(headlines(&auto), vec!["@auto a.py"]);
     }
 
     #[test]

@@ -695,7 +695,19 @@ fn collect_file(
                 continue;
             }
         }
-        collect_file(outline, &position.children, &paths, wanted, matches);
+        // `@auto-dir`'s own resolved directory isn't represented by any
+        // `@path` ancestor -- only its descendants' synthetic `@path` dirs
+        // (mirroring the subdirectories matched files came from) are. So a
+        // query anchored above the `@auto-dir` node can't be reconstructed
+        // past it; re-anchor there instead of silently under- or
+        // over-matching against a path missing that segment.
+        let child_paths = if external_file(&node.headline).is_some_and(|(directive, _)| directive == "@auto-dir")
+        {
+            Vec::new()
+        } else {
+            paths
+        };
+        collect_file(outline, &position.children, &child_paths, wanted, matches);
     }
 }
 
@@ -880,6 +892,74 @@ mod tests {
         assert_eq!(selected.roots.len(), 1);
         let selected = select_subtrees(&outline(), InspectSelector::File("main.rs")).unwrap();
         assert_eq!(selected.roots.len(), 2);
+    }
+
+    /// An `@auto-dir`'s own resolved directory (e.g. the `specs` in
+    /// `@auto-dir specs/**`) isn't itself a `@path` node -- only the
+    /// synthetic `@path` dirs auto_dir.rs builds *below* it are. So a query
+    /// anchored above the `@auto-dir` boundary (an ancestor `@path`, or the
+    /// `@auto-dir`'s own directory) can't be reconstructed, but one scoped
+    /// to within it still resolves via those synthetic dirs.
+    #[test]
+    fn file_matches_reset_at_an_auto_dir_boundary() {
+        let mut nodes = HashMap::new();
+        for (id, headline) in [
+            ("outer", "@path outer"),
+            ("dir", "@auto-dir specs/**"),
+            ("nested", "@path nested"),
+            ("leaf", "@auto leaf.rs"),
+        ] {
+            let id = NodeId(id.into());
+            nodes.insert(
+                id.clone(),
+                Node {
+                    id,
+                    headline: headline.into(),
+                    body: String::new(),
+                    vnode_attributes: HashMap::new(),
+                    tnode_attributes: HashMap::new(),
+                },
+            );
+        }
+        let leaf = Position {
+            node: NodeId("leaf".into()),
+            children: vec![],
+        };
+        let nested = Position {
+            node: NodeId("nested".into()),
+            children: vec![leaf],
+        };
+        let dir = Position {
+            node: NodeId("dir".into()),
+            children: vec![nested],
+        };
+        let outline = Outline {
+            nodes,
+            roots: vec![Position {
+                node: NodeId("outer".into()),
+                children: vec![dir],
+            }],
+        };
+
+        assert_eq!(
+            select_subtrees(&outline, InspectSelector::File("leaf.rs"))
+                .unwrap()
+                .roots
+                .len(),
+            1
+        );
+        assert_eq!(
+            select_subtrees(&outline, InspectSelector::File("nested/leaf.rs"))
+                .unwrap()
+                .roots
+                .len(),
+            1
+        );
+        assert!(select_subtrees(&outline, InspectSelector::File("specs/nested/leaf.rs")).is_err());
+        assert!(
+            select_subtrees(&outline, InspectSelector::File("outer/specs/nested/leaf.rs"))
+                .is_err()
+        );
     }
 
     #[test]

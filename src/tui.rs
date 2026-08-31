@@ -4638,12 +4638,9 @@ fn dynamic_source_location(app: &App, row: &Row) -> Option<SourceLocation> {
     // `@auto-dir`'s own argument is a directory/glob pattern, not an
     // openable file -- unlike every other directive `external_filename`
     // recognizes, treating it as a literal path here would build a
-    // nonexistent one (e.g. ".../src/*.rs"). Its expanded per-file
-    // children are real `@auto <path>` headlines and go through this same
-    // function normally; only the pattern-bearing root needs to fall
-    // through to `App::source_nodes`, which has nothing for it either
-    // (it isn't itself backed by one file) -- pressing `o` on it is a
-    // no-op, same as any other node with no recorded source.
+    // nonexistent one (e.g. ".../src/*.rs"). Pressing `o` on the
+    // pattern-bearing root itself is a no-op, same as any other node with
+    // no recorded source.
     if derived_filename(headline).is_some_and(|(_, directive, _)| directive == "@auto-dir") {
         return None;
     }
@@ -4661,6 +4658,17 @@ fn dynamic_source_location(app: &App, row: &Row) -> Option<SourceLocation> {
         prefix.push_str(component);
         let position = app.document.outline.position(&PositionId(prefix.clone()))?;
         let node = &app.document.outline.nodes[&position.node];
+        // An `@auto-dir` ancestor's own resolved directory isn't itself a
+        // `@path` node -- only the synthetic `@path` dirs *below* it
+        // (mirroring the subdirectories its matches came from) are. So
+        // this node's real path can't be reconstructed from `@path`
+        // ancestors alone; bail and let the caller fall through to
+        // `App::source_nodes`, which already has the exact path from
+        // `AutoFile::file_paths` rather than a guess missing that segment.
+        if derived_filename(&node.headline).is_some_and(|(_, directive, _)| directive == "@auto-dir")
+        {
+            return None;
+        }
         if let Some(directory) =
             path_directive(&node.headline).or_else(|| path_directive(&node.body))
         {
@@ -4962,6 +4970,39 @@ mod tests {
         let row = app.rows()[1].clone();
         let location = dynamic_source_location(&app, &row).unwrap();
         assert_eq!(location.path, Path::new("real.rs"));
+    }
+
+    #[test]
+    fn dynamic_source_location_also_skips_auto_dir_descendants() {
+        // A matched file nested under an `@auto-dir`'s synthetic `@path`
+        // dirs has a bare-filename headline (see auto_dir.rs) -- ancestor
+        // `@path` accumulation alone can't reconstruct its real path, since
+        // the `@auto-dir` node's own resolved directory contributes no
+        // `@path` node of its own. `o` on it must defer to
+        // `App::source_nodes` (populated from `AutoFile::file_paths`)
+        // rather than silently building a wrong path.
+        let document = LeoDocument::parse(
+            r#"<leo_file><vnodes><v t="dir"><vh>@auto-dir specs/**</vh><v t="leaf"><vh>@auto leaf.rs</vh></v></v></vnodes><tnodes><t tx="dir"></t><t tx="leaf"></t></tnodes></leo_file>"#,
+        )
+        .unwrap();
+        let app = App::new(
+            document,
+            PathBuf::from("test.leo"),
+            String::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashSet::new(),
+            HashMap::new(),
+            OriginalExternalState::default(),
+            false,
+        );
+        let row = Row {
+            position: PositionId("0/0".into()),
+            node: NodeId::from("leaf"),
+            depth: 1,
+            has_children: false,
+        };
+        assert!(dynamic_source_location(&app, &row).is_none());
     }
 
     #[test]
