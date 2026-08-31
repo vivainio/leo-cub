@@ -18,8 +18,10 @@ external source distinct, then reconstructs supported external content when it
 is inspected or synchronized.
 
 `@auto-dir <dir-or-glob>` expands a directory or glob pattern into one `@auto`
-child per matching file, re-enumerated on every load -- see the README for
-the pattern syntax.
+child per matching file, re-enumerated on every load. See
+[Files and paths](files-and-paths.md) for the full directive reference,
+including path resolution, `@auto-dir`'s pattern syntax, and how file
+selection and jump-to-source look a node's real path back up.
 
 The `import` command creates external-file nodes. The `sync` command reads
 changes from supported external nodes into the outline. Use `inspect-derived`
