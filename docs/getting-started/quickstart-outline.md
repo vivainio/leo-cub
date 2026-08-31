@@ -40,12 +40,12 @@ you press `Ctrl-S`, so there's nothing to undo by skipping around.
 ## Try an action live
 
 The two nodes under **Run an action** are `@action` nodes: any node
-headlined `@action <name>` is runnable from inside the TUI. Press `Shift-A` to
+headlined `@action <name>` is runnable from inside the TUI. Press `a` to
 open the action palette, type to filter by name, and `Enter` runs the
 selected node's body as a script. The body pane switches to the command's
 output until you select a different node.
 
-Press `Shift-A`, type `hello`, `Enter` - you'll see:
+Press `a`, type `hello`, `Enter` - you'll see:
 
 ```text
 Hello from an action!
@@ -80,10 +80,10 @@ the file untouched.
 
 ## How this differs from the other docs
 
-- [First outline](first-outline.md) and
-  [Interactive editing](interactive-editing.md) build a tree from nothing,
-  from the shell and from the TUI respectively - use those to learn the
-  editing commands in depth.
+- [First outline](first-outline.md) builds a small tree from nothing and
+  imports real files, mostly from inside the TUI.
+  [Interactive editing](interactive-editing.md) goes deeper into the same
+  TUI keys - renaming, reordering, copy/cut/paste, and clones.
 - [Tutorial outline](tutorial.md) uses a small fixture outline,
   `tutorial.leo`, to demonstrate `cub render`'s output - it's a fixture for
   *this documentation*, not something you're meant to open yourself.
