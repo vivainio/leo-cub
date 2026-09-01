@@ -2460,8 +2460,13 @@ fn cycle_marked(app: &mut App) {
         return;
     }
     let ordered = position_order(&app.document.outline);
-    let rank: HashMap<&PositionId, usize> = ordered.iter().enumerate().map(|(i, p)| (p, i)).collect();
-    let mut marked_ranks: Vec<usize> = app.marked.iter().filter_map(|p| rank.get(p).copied()).collect();
+    let rank: HashMap<&PositionId, usize> =
+        ordered.iter().enumerate().map(|(i, p)| (p, i)).collect();
+    let mut marked_ranks: Vec<usize> = app
+        .marked
+        .iter()
+        .filter_map(|p| rank.get(p).copied())
+        .collect();
     marked_ranks.sort_unstable();
     if marked_ranks.is_empty() {
         app.status = "no marked nodes".into();
@@ -6308,7 +6313,8 @@ fn both(doc, target) {}
 
         insert_headline(&mut app);
         assert!(app.input.is_some());
-        app.input.as_mut().unwrap().input = ratatui_textarea::TextArea::new(vec!["New sibling".into()]);
+        app.input.as_mut().unwrap().input =
+            ratatui_textarea::TextArea::new(vec!["New sibling".into()]);
         handle_headline_input(
             &mut app,
             KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
