@@ -12,6 +12,7 @@
   <v t="ekr.20260812053055.2"><vh>leo-cub/src</vh>
     <v t="cub.1787939083.451027836.1"><vh>@auto-dir src/*.rs</vh></v>
   </v>
+  <v t="cub.1788202452.440999926"><vh>@auto-dir docs/**</vh></v>
   <v t="cub.1786724143.313584131.1"><vh>@auto README.md</vh></v>
   <v t="cub.1787941913.781965478"><vh>extra notes</vh></v>
 </vnodes>
