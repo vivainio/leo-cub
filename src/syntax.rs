@@ -130,20 +130,24 @@ impl SyntaxHighlighter {
         // its own fenced-code scope (the fence's content gets no
         // distinguishing scope at all), so fenced code is highlighted as a
         // separate pass and spliced in by line index rather than through
-        // the scope walk below.
+        // the scope walk below. GFM tables get the same treatment: syntect
+        // styles the pipes and dashes as punctuation but has no notion of
+        // column alignment, so a block-level pass computes column widths
+        // and re-renders the rows as plain, padded text.
         let fence_lines = self.fenced_code_lines(body);
+        let table_lines = table_lines(body, &fence_lines);
         let mut parse_state = ParseState::new(syntax);
         let mut scope_stack = ScopeStack::new();
         let mut lines = Vec::new();
         for (line_index, source_line) in body.split_inclusive('\n').enumerate() {
             let Ok(ops) = parse_state.parse_line(source_line, &self.syntaxes) else {
-                match fence_lines.get(line_index) {
-                    Some(FenceLine::Hidden) => {}
-                    Some(FenceLine::Content(line)) => lines.push(line.clone()),
-                    _ => {
-                        let text = source_line.strip_suffix('\n').unwrap_or(source_line);
-                        lines.push(Line::from(text.to_owned()));
-                    }
+                let text = source_line.strip_suffix('\n').unwrap_or(source_line);
+                if let Some(line) =
+                    resolve_preview_line(&fence_lines, &table_lines, line_index, || {
+                        Line::from(text.to_owned())
+                    })
+                {
+                    lines.push(line);
                 }
                 continue;
             };
@@ -164,10 +168,10 @@ impl SyntaxHighlighter {
             if cursor < source_line.len() {
                 push_scoped_span(&mut spans, &source_line[cursor..], &scope_stack, styler);
             }
-            match fence_lines.get(line_index) {
-                Some(FenceLine::Hidden) => {}
-                Some(FenceLine::Content(line)) => lines.push(line.clone()),
-                _ => lines.push(Line::from(spans)),
+            if let Some(line) =
+                resolve_preview_line(&fence_lines, &table_lines, line_index, || Line::from(spans))
+            {
+                lines.push(line);
             }
         }
         Some(Text::from(lines))
@@ -201,6 +205,14 @@ impl SyntaxHighlighter {
                 let highlighted = self.highlight_with_language(&content, None, Some(language));
                 for (offset, line) in highlighted.lines.into_iter().enumerate() {
                     result[content_start + offset] = FenceLine::Content(line);
+                }
+            } else {
+                // Left to the normal per-line scope pass (see
+                // `resolve_preview_line`), but still marked as inside a
+                // fence so block-level passes like `table_lines` don't
+                // mistake fenced content for a table.
+                for line in result.iter_mut().take(close_index).skip(content_start) {
+                    *line = FenceLine::PlainContent;
                 }
             }
             index = close_index + 1;
@@ -244,6 +256,30 @@ impl SyntaxHighlighter {
     }
 }
 
+/// Resolves what a preview line should render as, giving block-level
+/// passes (fenced code, tables) priority over the per-line scope-styled
+/// `fallback`: hidden lines (a fence delimiter, a table's `---` separator
+/// row) are dropped, replaced lines (fenced content, a table row) are used
+/// as-is, and everything else falls back to the scope-styled spans.
+fn resolve_preview_line(
+    fence_lines: &[FenceLine],
+    table_lines: &[TableLine],
+    line_index: usize,
+    fallback: impl FnOnce() -> Line<'static>,
+) -> Option<Line<'static>> {
+    match fence_lines.get(line_index) {
+        Some(FenceLine::Hidden) => return None,
+        Some(FenceLine::Content(line)) => return Some(line.clone()),
+        Some(FenceLine::PlainContent) => return Some(fallback()),
+        _ => {}
+    }
+    match table_lines.get(line_index) {
+        Some(TableLine::Hidden) => None,
+        Some(TableLine::Content(line)) => Some(line.clone()),
+        _ => Some(fallback()),
+    }
+}
+
 /// How a source line participates in a fenced code block, per
 /// `SyntaxHighlighter::fenced_code_lines`.
 #[derive(Clone)]
@@ -255,6 +291,11 @@ enum FenceLine {
     Hidden,
     /// A line of fenced content, already highlighted for its language.
     Content(Line<'static>),
+    /// A line of fenced content with no declared language: rendered
+    /// through the normal per-line scope pass rather than replaced here,
+    /// but still inside a fence for the purposes of other block-level
+    /// passes (e.g. `table_lines` must not treat it as a table row).
+    PlainContent,
 }
 
 /// Detects a fence-opening line like "```rust" or a bare "```", returning
@@ -272,6 +313,181 @@ fn fence_open(line: &str) -> Option<&str> {
 
 fn is_fence_close(line: &str) -> bool {
     line.trim_end_matches(['\n', '\r']).trim() == "```"
+}
+
+/// How a source line participates in a GFM table, per `table_lines`.
+#[derive(Clone)]
+enum TableLine {
+    /// Not part of a (recognized) table.
+    None,
+    /// The delimiter row (e.g. `|---|:--:|`) — pure markup, hidden in
+    /// preview like a fence delimiter.
+    Hidden,
+    /// A header or data row, re-rendered with its cells padded to their
+    /// column's width.
+    Content(Line<'static>),
+}
+
+#[derive(Clone, Copy)]
+enum TableAlign {
+    Left,
+    Center,
+    Right,
+}
+
+/// Scans `body` for GFM tables (a header row immediately followed by a
+/// `|---|---|`-style delimiter row) and, for each one found, computes
+/// column widths from the header and all contiguous data rows that follow,
+/// then re-renders every row padded to those widths. Cell content is shown
+/// as plain text — no inline styling (bold, code, links) is applied within
+/// a cell.
+///
+/// Lines already claimed by a fenced code block (`fence_lines`) are never
+/// treated as part of a table, since a fence can legitimately contain
+/// pipe-delimited text that isn't meant to be rendered as one.
+fn table_lines(body: &str, fence_lines: &[FenceLine]) -> Vec<TableLine> {
+    let source_lines: Vec<&str> = body.split_inclusive('\n').collect();
+    let mut result: Vec<TableLine> = vec![TableLine::None; source_lines.len()];
+    let is_free = |i: usize| matches!(fence_lines.get(i), None | Some(FenceLine::None));
+    let mut index = 0;
+    while index < source_lines.len() {
+        if !is_free(index) {
+            index += 1;
+            continue;
+        }
+        let delim_index = index + 1;
+        let header_raw = source_lines[index].trim_end_matches(['\n', '\r']);
+        if header_raw.trim().is_empty()
+            || !header_raw.contains('|')
+            || delim_index >= source_lines.len()
+            || !is_free(delim_index)
+        {
+            index += 1;
+            continue;
+        }
+        let header_cells = split_table_row(header_raw);
+        let delim_raw = source_lines[delim_index].trim_end_matches(['\n', '\r']);
+        let delim_cells = split_table_row(delim_raw);
+        let (Some(aligns), false) = (parse_delimiter_row(&delim_cells), header_cells.is_empty())
+        else {
+            index += 1;
+            continue;
+        };
+
+        let column_count = header_cells.len();
+        let mut data_rows: Vec<Vec<String>> = Vec::new();
+        let mut cursor = delim_index + 1;
+        while cursor < source_lines.len() && is_free(cursor) {
+            let raw = source_lines[cursor].trim_end_matches(['\n', '\r']);
+            if raw.trim().is_empty() || !raw.contains('|') {
+                break;
+            }
+            data_rows.push(split_table_row(raw));
+            cursor += 1;
+        }
+
+        let mut widths: Vec<usize> = (0..column_count)
+            .map(|column| header_cells[column].chars().count())
+            .collect();
+        for row in &data_rows {
+            for (column, width) in widths.iter_mut().enumerate().take(column_count) {
+                let len = row.get(column).map_or(0, |cell| cell.chars().count());
+                *width = (*width).max(len);
+            }
+        }
+
+        result[index] = TableLine::Content(render_table_row(&header_cells, &widths, &aligns));
+        result[delim_index] = TableLine::Hidden;
+        for (offset, row) in data_rows.iter().enumerate() {
+            result[delim_index + 1 + offset] =
+                TableLine::Content(render_table_row(row, &widths, &aligns));
+        }
+        index = cursor;
+    }
+    result
+}
+
+/// Splits a table row on unescaped `|` characters (`\|` is a literal pipe,
+/// per GFM), trims each cell, and drops a leading/trailing empty cell
+/// caused by the row's own leading/trailing pipe (`| a | b |` and `a | b`
+/// both yield `["a", "b"]`).
+fn split_table_row(line: &str) -> Vec<String> {
+    let mut cells = Vec::new();
+    let mut current = String::new();
+    let mut chars = line.trim().chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' && chars.peek() == Some(&'|') {
+            current.push('|');
+            chars.next();
+        } else if c == '|' {
+            cells.push(current.trim().to_owned());
+            current.clear();
+        } else {
+            current.push(c);
+        }
+    }
+    cells.push(current.trim().to_owned());
+    if cells.first().is_some_and(String::is_empty) {
+        cells.remove(0);
+    }
+    if cells.last().is_some_and(String::is_empty) {
+        cells.pop();
+    }
+    cells
+}
+
+/// Parses a delimiter row's cells (already split by `split_table_row`)
+/// into per-column alignment, or `None` if any cell isn't a valid
+/// delimiter (`-+`, optionally flanked by `:`).
+fn parse_delimiter_row(cells: &[String]) -> Option<Vec<TableAlign>> {
+    if cells.is_empty() {
+        return None;
+    }
+    cells
+        .iter()
+        .map(|cell| {
+            let left = cell.starts_with(':');
+            let right = cell.ends_with(':');
+            let dashes = cell.trim_matches(':');
+            (!dashes.is_empty() && dashes.chars().all(|c| c == '-')).then_some(
+                match (left, right) {
+                    (true, true) => TableAlign::Center,
+                    (false, true) => TableAlign::Right,
+                    _ => TableAlign::Left,
+                },
+            )
+        })
+        .collect()
+}
+
+/// Renders one table row as plain, padded text (e.g. `"| Name  | Age |"`),
+/// aligning each cell within its column's width per `aligns`. Missing
+/// trailing cells (a short data row) render as blank padding.
+fn render_table_row(cells: &[String], widths: &[usize], aligns: &[TableAlign]) -> Line<'static> {
+    let mut text = String::from("|");
+    for (column, &width) in widths.iter().enumerate() {
+        let cell = cells.get(column).map_or("", String::as_str);
+        let pad = width.saturating_sub(cell.chars().count());
+        text.push(' ');
+        match aligns.get(column).copied().unwrap_or(TableAlign::Left) {
+            TableAlign::Left => {
+                text.push_str(cell);
+                text.push_str(&" ".repeat(pad));
+            }
+            TableAlign::Right => {
+                text.push_str(&" ".repeat(pad));
+                text.push_str(cell);
+            }
+            TableAlign::Center => {
+                let left_pad = pad / 2;
+                text.push_str(&" ".repeat(left_pad));
+                text.push_str(cell);
+                text.push_str(&" ".repeat(pad - left_pad));
+            }
+        }
+        text.push_str(" |");
+    }
+    Line::from(text)
 }
 
 /// Maps a syntect scope stack (rendered as a space-separated string, e.g.
@@ -641,6 +857,82 @@ mod tests {
         // No panic, and the fence marker line is still present since it was
         // never recognized as closed.
         assert_eq!(text.lines.len(), 2);
+    }
+
+    #[test]
+    fn markdown_preview_aligns_table_columns_and_hides_the_delimiter_row() {
+        let text = SyntaxHighlighter::new()
+            .render_preview(
+                "| Name | Age |\n|---|---|\n| Alice | 30 |\n| Bob | 5 |\n",
+                Some(Path::new("x.md")),
+                None,
+            )
+            .expect("markdown has a preview renderer");
+        let rendered: Vec<String> = text
+            .lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect();
+        // The delimiter row is gone; every cell is padded to its column's
+        // widest entry ("Alice" for column 1, "Age"/"30" for column 2).
+        assert_eq!(
+            rendered,
+            vec!["| Name  | Age |", "| Alice | 30  |", "| Bob   | 5   |"]
+        );
+    }
+
+    #[test]
+    fn markdown_preview_honors_table_column_alignment_markers() {
+        let text = SyntaxHighlighter::new()
+            .render_preview(
+                "| Left | Mid | Right |\n|:---|:---:|---:|\n| a | b | c |\n",
+                Some(Path::new("x.md")),
+                None,
+            )
+            .expect("markdown has a preview renderer");
+        let rendered: Vec<String> = text
+            .lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            rendered,
+            vec!["| Left | Mid | Right |", "| a    |  b  |     c |"]
+        );
+    }
+
+    #[test]
+    fn markdown_preview_does_not_render_pipe_text_inside_a_fence_as_a_table() {
+        let text = SyntaxHighlighter::new()
+            .render_preview(
+                "```\n| a | b |\n|---|---|\n```\n",
+                Some(Path::new("x.md")),
+                None,
+            )
+            .expect("markdown has a preview renderer");
+        let rendered: Vec<String> = text
+            .lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect()
+            })
+            .collect();
+        // Fenced content stays verbatim -- the delimiter row inside the
+        // fence must not be swallowed as if it were a real table.
+        assert_eq!(rendered, vec!["| a | b |", "|---|---|"]);
     }
 
     #[test]

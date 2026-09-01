@@ -17,18 +17,21 @@ later by `cub inspect FILE`, `cub sync FILE`, and the TUI's `o` key.
 | `@file <file>` / `@thin <file>` / `@file-thin <file>` | Writable | Leo 5 thin sentinels: absolute depth, every node keeps its GNX. |
 | `@f <file>` | Writable | leo-cub's own lighter cub-1-thin sentinels: depth relative to the preceding node, GNX omitted except for the root, clones, and UA-bearing nodes. |
 | `@clean <file>` | Writable | Plain file content with no visible sentinels; structure is reconciled against a hidden private copy with the Mulder/Ream algorithm. |
-| `@edit <file>` | Not synced | `cub import --mode edit`'s own label: the file's text is copied into the node's body once, at import time, and lives in the outline afterward like any other node. Nothing keeps it linked to the file. |
+| `@edit <file>` | Writable | A real Leo directive: the whole file is the node's flat body, no children allowed. |
 
-`@edit` is a `leo-cub` convention, not a Leo directive — Leo has no such
-headline. It exists so `cub import` can record where a one-time import came
-from without pretending the node is still connected to that file.
+`@edit` is structure-free: the file is read into the node's body on load and
+written back on save, same as real Leo's `readOneAtEditNode`/
+`writeOneAtEditNode`. Unlike real Leo, which silently deletes any children on
+read, `leo-cub` refuses to load or save an `@edit` node that has children,
+and the TUI won't let you nest one under it in the first place.
 
 The read-only/writable split matters for the TUI: it permits structural and
 headline edits inside `@file`/`@thin`/`@file-thin`/`@f` trees and writes
 changed thin files on `Ctrl-S`, and reconciles `@clean` files the same way on
 save, but `@auto`-family descendants stay read-only, because writing them
 back would require a language-specific exporter, not just a parser. Press
-`o` on one to edit its real source file directly instead.
+`o` on one to edit its real source file directly instead. `@edit` has no
+descendants to worry about, so `Ctrl-S` there is just an ordinary body save.
 
 ## How a path resolves
 

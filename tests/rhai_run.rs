@@ -590,6 +590,114 @@ fn cub_run_promotes_an_auto_node_to_at_f_by_renaming_and_saving() {
 }
 
 #[test]
+fn cub_run_edit_node_reads_on_open_and_writes_back_on_save() {
+    // Real Leo's `@edit` is bidirectional: the whole file is the node's
+    // flat body, re-read on open and written back on save (leoAtFile.py's
+    // readOneAtEditNode/writeOneAtEditNode). `cub import --mode edit` only
+    // copies the file once; this checks the live open/save cycle actually
+    // round-trips through the file, not just the initial import.
+    let dir = temp_path("rhai_run_edit_dir");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("notes.txt"), "line one\nline two\n").unwrap();
+    let leo_path = dir.join("outline.leo");
+    fs::write(
+        &leo_path,
+        r#"<leo_file><vnodes><v t="r"><vh>@edit notes.txt</vh></v></vnodes><tnodes><t tx="r">stale placeholder</t></tnodes></leo_file>"#,
+    )
+    .unwrap();
+
+    let script_path = dir.join("edit.rhai");
+    let escaped_path = leo_path.display().to_string().replace('\\', "\\\\");
+    fs::write(
+        &script_path,
+        format!(
+            r#"
+            let doc = open("{escaped_path}");
+            let n = doc.node("r");
+            assert_eq(n.b, "line one\nline two\n");
+            n.b = n.b + "line three\n";
+            doc.save();
+            print("saved");
+            "#
+        ),
+    )
+    .unwrap();
+
+    let output = run_cub(&["run", script_path.to_str().unwrap()]);
+    assert!(
+        output.status.success(),
+        "cub run failed:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("saved"));
+
+    let rewritten = fs::read_to_string(dir.join("notes.txt")).unwrap();
+    assert_eq!(rewritten, "line one\nline two\nline three\n");
+
+    // The real content lives in notes.txt: the .leo file keeps whatever
+    // placeholder body it had before the load-time merge, same as
+    // @auto/@file/@f roots.
+    let saved = LeoDocument::open(&leo_path).unwrap();
+    assert_eq!(
+        saved.outline.nodes[&leo::NodeId::from("r")].body,
+        "stale placeholder"
+    );
+
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn cub_run_edit_node_with_children_refuses_to_save() {
+    let dir = temp_path("rhai_run_edit_children_dir");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("notes.txt"), "content\n").unwrap();
+    let leo_path = dir.join("outline.leo");
+    fs::write(
+        &leo_path,
+        r#"<leo_file><vnodes><v t="r"><vh>@edit notes.txt</vh></v></vnodes><tnodes><t tx="r">content</t></tnodes></leo_file>"#,
+    )
+    .unwrap();
+
+    let script_path = dir.join("edit_children.rhai");
+    let escaped_path = leo_path.display().to_string().replace('\\', "\\\\");
+    fs::write(
+        &script_path,
+        format!(
+            r#"
+            let doc = open("{escaped_path}");
+            let batch = #{{
+                operations: [
+                    #{{ op: "insert-tree", parent: "r",
+                       tree: #{{ "sneaky child": #{{}} }} }}
+                ]
+            }};
+            doc.apply(batch.to_json());
+            doc.save();
+            "#
+        ),
+    )
+    .unwrap();
+
+    let output = run_cub(&["run", script_path.to_str().unwrap()]);
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("must not have children"),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // Neither file should have been touched by the failed save.
+    assert_eq!(
+        fs::read_to_string(dir.join("notes.txt")).unwrap(),
+        "content\n"
+    );
+
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
 fn cub_run_warns_instead_of_silently_swallowing_a_derived_load_failure() {
     // Two different .leo outlines can legitimately share a gnx for the
     // same external file -- leo-editor's own LeoPyRef.leo does this for

@@ -76,6 +76,10 @@ enum ParsedFile {
     Auto(AutoFile),
     Relative(RelativeFile),
     Derived(DerivedFile),
+    /// An `@edit` file's raw content: no sentinels, no structure, and (like
+    /// real Leo's `readOneAtEditNode`) no children -- the whole file is the
+    /// node's body verbatim.
+    Edit(String),
 }
 
 /// What [`load_derived_jobs`] reads from `outline` before a job's own merge
@@ -226,6 +230,8 @@ fn prepare_job(outline: &Outline, job: DerivedJob) -> JobOutcome {
                     };
                 }
             }
+        } else if job.directive == "@edit" {
+            ParsedFile::Edit(source)
         } else {
             match DerivedFile::parse(&source) {
                 Ok(derived) => ParsedFile::Derived(derived),
@@ -405,6 +411,39 @@ fn merge_parsed(
                     .cloned(),
             );
         }
+        ParsedFile::Edit(source) => {
+            // Matches real Leo's `readOneAtEditNode`/`writeOneAtEditNode`
+            // (leoAtFile.py): an `@edit` node is a flat body with no
+            // children. Unlike real Leo, which silently deletes any
+            // children on read, this refuses to load instead -- consistent
+            // with how cub already refuses other structurally-invalid
+            // states rather than discarding a user's work.
+            let has_children = outline
+                .position(&job.position)
+                .is_some_and(|position| !position.children.is_empty());
+            if has_children {
+                return Err("@edit nodes must not have children".to_owned());
+            }
+            let node = outline
+                .nodes
+                .get_mut(&job.root)
+                .ok_or_else(|| "edit root node disappeared".to_owned())?;
+            node.body = source;
+            let original = external_snapshot_at(outline, &job.position)
+                .map(|(_, snapshot)| snapshot)
+                .ok_or_else(|| "merged external root disappeared".to_owned())?;
+            let (start_delimiter, end_delimiter) = comment_delimiters(&job.path);
+            report.writable_external.insert(
+                job.root.clone(),
+                WritableExternalFile {
+                    path: job.path.clone(),
+                    start_delimiter: start_delimiter.to_owned(),
+                    end_delimiter: end_delimiter.to_owned(),
+                    original,
+                    format: ExternalFormat::Edit,
+                },
+            );
+        }
     }
     report
         .original_children
@@ -480,6 +519,8 @@ pub fn derived_filename(headline: &str) -> Option<(bool, &str, &str)> {
             | "@thin"
             | "@file-thin"
             | "@f"
+            | "@clean"
+            | "@edit"
             | "@auto"
             | "@auto-md"
             | "@auto-markdown"
@@ -516,6 +557,7 @@ pub fn external_filename(headline: &str) -> Option<&str> {
             | "@file-thin"
             | "@f"
             | "@clean"
+            | "@edit"
             | "@auto"
             | "@auto-md"
             | "@auto-markdown"

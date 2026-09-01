@@ -26,6 +26,8 @@ pub enum SyncError {
     },
     #[error("unsupported @clean expansion in node {gnx}: {directive}")]
     UnsupportedExpansion { gnx: String, directive: String },
+    #[error("@edit node {gnx} must not have children")]
+    EditHasChildren { gnx: String },
     #[error("no external node matches {0:?}")]
     NoMatch(String),
     #[error("no external node has GNX {0}")]
@@ -112,6 +114,27 @@ pub fn sync_document(
             // current tree (see RelativeFile::merge_into).
             let parsed = RelativeFile::parse(&source)?;
             parsed.merge_into(&mut next.outline, &job.position)?;
+        } else if job.directive == "@edit" {
+            // No sentinels, no structure: the file's raw text is the node's
+            // whole body, same as `derive_load::merge_parsed`'s load-time
+            // handling.
+            let has_children = next
+                .outline
+                .position(&job.position)
+                .is_some_and(|position| !position.children.is_empty());
+            if has_children {
+                return Err(SyncError::EditHasChildren {
+                    gnx: job.gnx.0.clone(),
+                });
+            }
+            let target_node = next
+                .outline
+                .position(&job.position)
+                .map(|target| target.node.clone())
+                .ok_or_else(|| crate::SentinelError::PositionNotFound(job.position.0.clone()))?;
+            if let Some(node) = next.outline.nodes.get_mut(&target_node) {
+                node.body = source;
+            }
         } else {
             // Leo reconstructs @file trees in memory, but their content remains
             // exclusively in the thin derived file. Validate the derived file and
@@ -275,7 +298,7 @@ fn external_filename(headline: &str) -> Option<(&str, &str)> {
     let (directive, filename) = headline.trim().split_once(char::is_whitespace)?;
     matches!(
         directive,
-        "@file" | "@thin" | "@file-thin" | "@clean" | "@f"
+        "@file" | "@thin" | "@file-thin" | "@clean" | "@f" | "@edit"
     )
     .then(|| (directive, strip_path_cruft(filename)))
     .filter(|(_, filename)| !filename.is_empty())
@@ -339,11 +362,16 @@ pub enum ExternalFormat {
     /// official Leo version): depth relative to the preceding node, gnx
     /// omitted except for the root, clones, and UA-bearing nodes.
     Relative,
+    /// `@edit`: no sentinels at all, just the node's raw body written
+    /// verbatim -- matching real Leo's `writeOneAtEditNode`.
+    Edit,
 }
 
 pub fn format_for_directive(directive: &str) -> ExternalFormat {
     if directive == "@f" {
         ExternalFormat::Relative
+    } else if directive == "@edit" {
+        ExternalFormat::Edit
     } else {
         ExternalFormat::Thin
     }
@@ -617,6 +645,18 @@ fn render_update(
                 source: error,
             })?;
             rendered
+        }
+        ExternalFormat::Edit => {
+            if snapshot
+                .roots
+                .first()
+                .is_some_and(|position| !position.children.is_empty())
+            {
+                return Err(SyncError::EditHasChildren {
+                    gnx: root.0.clone(),
+                });
+            }
+            outline.nodes[root].body.clone()
         }
     };
     Ok(Some(ExternalUpdate {

@@ -238,6 +238,7 @@ fn external_jobs(outline: &Outline, outline_path: &Path) -> Vec<ExternalJob> {
             }
             if let Some((directive, filename)) = external_file(&node.headline)
                 && directive != "@clean"
+                && directive != "@edit"
             {
                 let mut path = base.to_path_buf();
                 for component in inherited_paths {
@@ -793,6 +794,7 @@ fn external_file(headline: &str) -> Option<(&str, &str)> {
             | "@file-thin"
             | "@f"
             | "@clean"
+            | "@edit"
             | "@auto"
             | "@auto-md"
             | "@auto-markdown"

@@ -463,16 +463,18 @@ impl App {
 
     /// Whether `node` may not take a newly nested child: a read-only
     /// derived node (an `@auto`/`@auto-dir`-produced descendant, or a thin
-    /// file's own if it isn't writable), or the root of an `@auto`-family
-    /// node itself. Both regenerate their entire child list from scratch on
-    /// every load -- unlike a writable `@file`/`@thin`/`@file-thin`/`@f`
-    /// root, which the TUI already permits structural edits under -- so
-    /// anything demoted under one here would silently vanish on the next
-    /// reload rather than round-trip.
+    /// file's own if it isn't writable), the root of an `@auto`-family node
+    /// itself, or an `@edit` root. The `@auto` family regenerates its entire
+    /// child list from scratch on every load -- unlike a writable
+    /// `@file`/`@thin`/`@file-thin`/`@f` root, which the TUI already
+    /// permits structural edits under -- so anything demoted under one here
+    /// would silently vanish on the next reload rather than round-trip.
+    /// `@edit`, like real Leo, is a flat body with no structure at all: a
+    /// child under it would make the next load/save refuse the node outright.
     fn refuses_new_children(&self, node: &NodeId) -> bool {
         self.readonly_derived(node)
             || derived_filename(&self.document.outline.nodes[node].headline)
-                .is_some_and(|(auto, _, _)| auto)
+                .is_some_and(|(auto, directive, _)| auto || directive == "@edit")
     }
 }
 
@@ -3099,7 +3101,7 @@ fn move_selected(app: &mut App, direction: MoveDirection) {
             };
             let previous_node = sibling_node_at(&app.document.outline, parent.as_ref(), previous);
             if previous_node.is_some_and(|node| app.refuses_new_children(&node)) {
-                app.status = "@auto/@auto-dir nodes cannot take new children".into();
+                app.status = "this node cannot take new children".into();
                 return;
             }
             let Some(siblings) = children_mut(&mut app.document.outline, parent.as_ref()) else {
@@ -3208,7 +3210,7 @@ fn move_selected_block(app: &mut App, direction: MoveDirection, rows: Vec<Row>) 
             };
             let previous_node = sibling_node_at(&app.document.outline, parent.as_ref(), previous);
             if previous_node.is_some_and(|node| app.refuses_new_children(&node)) {
-                app.status = "@auto/@auto-dir nodes cannot take new children".into();
+                app.status = "this node cannot take new children".into();
                 return;
             }
             let siblings = children_mut(&mut app.document.outline, parent.as_ref()).unwrap();
@@ -4746,11 +4748,6 @@ fn run_editor(location: &SourceLocation) -> Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
-fn thin_filename(headline: &str) -> Option<&str> {
-    derived_filename(headline).and_then(|(auto, _, filename)| (!auto).then_some(filename))
-}
-
 fn dynamic_source_location(app: &App, row: &Row) -> Option<SourceLocation> {
     let headline = &app.document.outline.nodes[&row.node].headline;
     // `@auto-dir`'s own argument is a directory/glob pattern, not an
@@ -6146,14 +6143,6 @@ fn both(doc, target) {}
     }
 
     #[test]
-    fn recognizes_only_sentinelled_file_headlines() {
-        assert_eq!(thin_filename("@file src/main.rs"), Some("src/main.rs"));
-        assert_eq!(thin_filename("@file \"src/main.rs\""), Some("src/main.rs"));
-        assert_eq!(thin_filename("@clean src/main.rs"), None);
-        assert_eq!(thin_filename("ordinary"), None);
-    }
-
-    #[test]
     fn highlights_headline_directives_and_filenames() {
         let spans = headline_spans("@auto src/main.rs");
         assert_eq!(spans.len(), 3);
@@ -6988,6 +6977,23 @@ fn both(doc, target) {}
     }
 
     #[test]
+    fn recognizes_edit_and_clean_as_loadable_and_writable_external_files() {
+        // `derived_filename` drives the load-time job list (see
+        // `derive_load::derived_jobs`) -- both directives must be in it, or
+        // opening a `.leo` file that already has one of these nodes leaves
+        // it a bare, unsynced headline forever.
+        assert_eq!(
+            derived_filename("@edit notes.txt"),
+            Some((false, "@edit", "notes.txt"))
+        );
+        assert_eq!(
+            derived_filename("@clean src/main.rs"),
+            Some((false, "@clean", "src/main.rs"))
+        );
+        assert_eq!(external_filename("@edit notes.txt"), Some("notes.txt"));
+    }
+
+    #[test]
     fn inherits_syntax_context_from_clean_file_ancestor() {
         let document = LeoDocument::parse(
             r#"<leo_file><vnodes><v t="a"><vh>@clean src/main.rs</vh><v t="b"><vh>child</vh></v></v></vnodes><tnodes><t tx="a">@language rust</t><t tx="b">fn child() {}</t></tnodes></leo_file>"#,
@@ -7145,7 +7151,7 @@ fn both(doc, target) {}
                 .children
                 .is_empty()
         );
-        assert_eq!(app.status, "@auto/@auto-dir nodes cannot take new children");
+        assert_eq!(app.status, "this node cannot take new children");
     }
 
     #[test]
@@ -7182,7 +7188,7 @@ fn both(doc, target) {}
                 .children
                 .is_empty()
         );
-        assert_eq!(app.status, "@auto/@auto-dir nodes cannot take new children");
+        assert_eq!(app.status, "this node cannot take new children");
     }
 
     #[test]
@@ -7223,7 +7229,43 @@ fn both(doc, target) {}
                 .children
                 .is_empty()
         );
-        assert_eq!(app.status, "@auto/@auto-dir nodes cannot take new children");
+        assert_eq!(app.status, "this node cannot take new children");
+    }
+
+    #[test]
+    fn block_demote_refuses_an_edit_node_new_parent() {
+        // `@edit`, like real Leo, is a flat body with no children -- unlike
+        // the writable @file/@thin/@file-thin/@f family, which the TUI
+        // permits structural edits under.
+        let document = LeoDocument::parse(
+            r#"<leo_file><vnodes><v t="p"><vh>P</vh><v t="e"><vh>@edit notes.txt</vh></v><v t="d"><vh>D</vh></v></v></vnodes><tnodes><t tx="p"></t><t tx="e">content</t><t tx="d"></t></tnodes></leo_file>"#,
+        )
+        .unwrap();
+        let mut app = App::new(
+            document,
+            PathBuf::from("test.leo"),
+            String::new(),
+            HashMap::new(),
+            HashMap::new(),
+            HashSet::new(),
+            HashMap::new(),
+            OriginalExternalState::default(),
+            false,
+        );
+
+        select_position(&mut app, &PositionId("0/1".into()));
+        move_selected(&mut app, MoveDirection::Right);
+
+        assert_eq!(
+            app.document.outline.roots[0].children[1].node,
+            NodeId::from("d")
+        );
+        assert!(
+            app.document.outline.roots[0].children[1]
+                .children
+                .is_empty()
+        );
+        assert_eq!(app.status, "this node cannot take new children");
     }
 
     #[test]
