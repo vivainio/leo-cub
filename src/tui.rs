@@ -2600,7 +2600,10 @@ fn handle_headline_input(app: &mut App, key: KeyEvent) {
             commit_headline_edit(app);
         }
         KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            if commit_headline_edit(app) {
+            // Unlike Enter, Ctrl-S always exits edit mode -- it never
+            // chains into inserting another sibling, even for a
+            // freshly-inserted node.
+            if commit_headline_edit_without_chaining(app) {
                 save(app);
             }
         }
@@ -6286,6 +6289,36 @@ fn both(doc, target) {}
         assert!(!app.dirty, "Ctrl-S should have saved the document");
         assert!(app.status.starts_with("saved"), "{}", app.status);
         assert!(path.exists());
+
+        fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn ctrl_s_on_a_freshly_inserted_headline_exits_instead_of_chaining() {
+        let directory = env::temp_dir().join(format!(
+            "leo-cub-tui-ctrl-s-insert-{}-{}",
+            std::process::id(),
+            fresh_node_id().0
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("test.leo");
+
+        let mut app = editing_app();
+        app.path = path.clone();
+
+        insert_headline(&mut app);
+        assert!(app.input.is_some());
+        app.input.as_mut().unwrap().input = ratatui_textarea::TextArea::new(vec!["New sibling".into()]);
+        handle_headline_input(
+            &mut app,
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+        );
+
+        assert!(
+            app.input.is_none(),
+            "Ctrl-S should exit edit mode instead of chaining into another insert"
+        );
+        assert!(!app.dirty, "Ctrl-S should have saved the document");
 
         fs::remove_dir_all(&directory).unwrap();
     }
