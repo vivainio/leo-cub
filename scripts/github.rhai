@@ -315,7 +315,17 @@ fn zaira_get_segments(doc, key) {
     let segments = [];
     for line in result.stdout.split("\n") {
         if line != "" {
-            segments.push(parse_json(line));
+            try {
+                segments.push(parse_json(line));
+            } catch (err) {
+                // `zaira` has been observed to exit 0 while printing a
+                // plain-text error (bad key, no permission, expired API
+                // token) on stdout instead of stderr, so `result.code != 0`
+                // above doesn't catch it and this line isn't real ndjson --
+                // surface the offending line itself rather than a bare
+                // parser exception, since that's what actually explains it.
+                throw "`" + cmd + "` produced a non-JSON line, most likely a `zaira` error printed to stdout: " + line;
+            }
         }
     }
     segments

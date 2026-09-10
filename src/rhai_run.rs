@@ -1239,7 +1239,7 @@ pub(crate) fn run_bound(
             touched,
             status: Some(1),
             stdout: output.borrow().clone(),
-            stderr: error.to_string(),
+            stderr: format!("{}: {error}", path.display()),
         },
     }
 }
@@ -1445,7 +1445,7 @@ pub(crate) fn run_command(
             touched: false,
             status: Some(1),
             stdout: output.borrow().clone(),
-            stderr: error.to_string(),
+            stderr: format!("{}: {error}", script_path.display()),
         };
     }
 
@@ -1479,7 +1479,7 @@ pub(crate) fn run_command(
             touched,
             status: Some(1),
             stdout: output.borrow().clone(),
-            stderr: error.to_string(),
+            stderr: format!("{}: {error}", script_path.display()),
         },
     }
 }
