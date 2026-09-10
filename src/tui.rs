@@ -14,11 +14,15 @@ use crossterm::{
     clipboard::CopyToClipboard,
     event::{
         self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
-        MouseEventKind,
+        Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
+        MouseButton, MouseEvent, MouseEventKind, PopKeyboardEnhancementFlags,
+        PushKeyboardEnhancementFlags,
     },
     execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+    terminal::{
+        EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+        supports_keyboard_enhancement,
+    },
 };
 use leo::{
     DerivedJob, LeoDocument, NodeId, OriginalExternalState, Outline, Position, PositionId,
@@ -683,10 +687,24 @@ where
         EnableMouseCapture,
         EnableBracketedPaste
     )?;
+    // Kitty's keyboard protocol is what lets Ctrl-Enter arrive as a key
+    // distinct from plain Enter; without it most terminals report the same
+    // byte for both. Only push it where the terminal actually understands
+    // it, and only pop it again if we did.
+    let keyboard_enhanced = supports_keyboard_enhancement().unwrap_or(false);
+    if keyboard_enhanced {
+        execute!(
+            stdout,
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        )?;
+    }
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
     let result = body(&mut terminal);
+    if keyboard_enhanced {
+        execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags)?;
+    }
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
@@ -2519,11 +2537,11 @@ fn cancel_headline_edit(app: &mut App) {
     }
 }
 
-/// Core of [`commit_headline_edit`]: validates and writes the typed
-/// headline. Returns `false` (leaving the edit open) if the headline is
-/// empty. Doesn't chain into another insert on its own -- see
-/// [`commit_headline_edit`] and [`commit_or_cancel_headline_edit`], which
-/// each decide that differently.
+/// Core of [`commit_headline_edit_and_chain`]: validates and writes the
+/// typed headline. Returns `false` (leaving the edit open) if the headline
+/// is empty. Doesn't chain into another insert on its own -- see
+/// [`commit_headline_edit_and_chain`] and [`commit_or_cancel_headline_edit`],
+/// which each decide that differently.
 fn commit_headline_edit_without_chaining(app: &mut App) -> bool {
     let Some(state) = app.input.as_ref() else {
         return false;
@@ -2562,33 +2580,24 @@ fn commit_headline_edit_without_chaining(app: &mut App) -> bool {
     true
 }
 
-/// Accepts the in-progress headline edit, same as pressing Enter: commits
-/// it and, if it was a freshly-inserted node, immediately starts editing
-/// the next sibling. Returns `false` (leaving the edit open) if the
-/// headline is empty.
-fn commit_headline_edit(app: &mut App) -> bool {
-    let chain = app
-        .input
-        .as_ref()
-        .is_some_and(|state| state.inserted_position.is_some());
+/// Accepts the in-progress headline edit and immediately starts editing a
+/// new sibling headline, same as pressing Ctrl-Enter. Returns `false`
+/// (leaving the edit open) if the headline is empty.
+fn commit_headline_edit_and_chain(app: &mut App) -> bool {
     if !commit_headline_edit_without_chaining(app) {
         return false;
     }
-    if chain {
-        insert_headline(app);
-    } else {
-        app.status = "headline changed (Ctrl-S to save)".into();
-    }
+    insert_headline(app);
     true
 }
 
 /// Up/Down while editing a headline: commit the in-progress text and move,
-/// same as [`commit_headline_edit`] does for Enter, but without chaining
-/// into another insert -- the arrow means "move on", not "add another
-/// sibling". An empty headline can't be committed, so that case falls back
-/// to [`cancel_headline_edit`] instead: discarding a still-empty
-/// freshly-inserted node, or reverting a rename to its original text,
-/// rather than leaving the edit open and blocking navigation.
+/// same as plain Enter, but without chaining into another insert -- the
+/// arrow means "move on", not "add another sibling". An empty headline
+/// can't be committed, so that case falls back to [`cancel_headline_edit`]
+/// instead: discarding a still-empty freshly-inserted node, or reverting a
+/// rename to its original text, rather than leaving the edit open and
+/// blocking navigation.
 fn commit_or_cancel_headline_edit(app: &mut App) {
     if commit_headline_edit_without_chaining(app) {
         app.status = "headline changed (Ctrl-S to save)".into();
@@ -2603,8 +2612,16 @@ fn handle_headline_input(app: &mut App, key: KeyEvent) {
         return;
     };
     match key.code {
+        // Ctrl-Enter commits and immediately starts editing a new sibling
+        // headline; plain Enter just commits and exits edit mode -- see
+        // insert_headline's status message.
+        KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            commit_headline_edit_and_chain(app);
+        }
         KeyCode::Enter => {
-            commit_headline_edit(app);
+            if commit_headline_edit_without_chaining(app) {
+                app.status = "headline changed (Ctrl-S to save)".into();
+            }
         }
         KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             // Unlike Enter, Ctrl-S always exits edit mode -- it never
@@ -2723,9 +2740,10 @@ fn cancel_body_edit(app: &mut App) {
     app.status = "body edit cancelled".into();
 }
 
-/// Accepts the in-progress body edit. Unlike [`commit_headline_edit`], an
-/// empty body is valid (it just clears the node), so there's nothing to
-/// reject here -- this always succeeds once `body_input` is set.
+/// Accepts the in-progress body edit. Unlike
+/// [`commit_headline_edit_without_chaining`], an empty body is valid (it
+/// just clears the node), so there's nothing to reject here -- this always
+/// succeeds once `body_input` is set.
 fn commit_body_edit(app: &mut App) -> bool {
     let Some(edit) = app.body_input.as_ref() else {
         return false;
@@ -2828,7 +2846,8 @@ fn insert_headline(app: &mut App) {
         original: String::new(),
         inserted_position: Some(inserted),
     });
-    app.status = "new headline: type a name, Enter accepts and adds another, Esc cancels".into();
+    app.status =
+        "new headline: type a name, Enter accepts, Ctrl-Enter adds another, Esc cancels".into();
 }
 
 fn copy_selected(app: &mut App) {
@@ -6654,7 +6673,7 @@ fn both(doc, target) {}
     }
 
     #[test]
-    fn accepting_a_new_headline_immediately_starts_the_next_sibling() {
+    fn accepting_a_new_headline_with_plain_enter_does_not_chain() {
         let mut app = editing_app();
 
         insert_headline(&mut app);
@@ -6665,6 +6684,30 @@ fn both(doc, target) {}
             );
         }
         handle_headline_input(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(app.document.outline.roots.len(), 2);
+        assert_eq!(
+            app.document.outline.nodes[&app.document.outline.roots[1].node].headline,
+            "First"
+        );
+        assert!(app.input.is_none());
+    }
+
+    #[test]
+    fn ctrl_enter_accepts_a_new_headline_and_immediately_starts_the_next_sibling() {
+        let mut app = editing_app();
+
+        insert_headline(&mut app);
+        for character in "First".chars() {
+            handle_headline_input(
+                &mut app,
+                KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+            );
+        }
+        handle_headline_input(
+            &mut app,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL),
+        );
 
         assert_eq!(app.document.outline.roots.len(), 3);
         assert_eq!(
