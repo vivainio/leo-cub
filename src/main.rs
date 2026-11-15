@@ -20,6 +20,8 @@ mod rhai_run;
 mod syntax;
 #[cfg(feature = "tui")]
 mod tui;
+#[cfg(feature = "gui")]
+mod gui;
 
 #[derive(Parser)]
 #[command(name = "cub", version, about, args_conflicts_with_subcommands = true)]
@@ -131,6 +133,14 @@ enum Command {
         /// top-level `--debug` for why.
         #[arg(long, value_name = "FILE")]
         debug: Option<PathBuf>,
+    },
+    /// Edit an outline in a native desktop window (GPUI).
+    #[cfg(feature = "gui")]
+    Gui {
+        file: PathBuf,
+        /// Show only the hierarchy stored directly in the .leo XML.
+        #[arg(long)]
+        no_derived: bool,
     },
     /// Run a Rhai script.
     #[cfg(feature = "rhai")]
@@ -426,6 +436,8 @@ fn main() -> Result<()> {
             no_derived,
             debug,
         } => tui::run(file, !no_derived, debug)?,
+        #[cfg(feature = "gui")]
+        Command::Gui { file, no_derived } => gui::run(file, !no_derived)?,
         #[cfg(feature = "rhai")]
         Command::Run { script, args } => rhai_run::run(&script, &args)?,
         Command::Inspect {

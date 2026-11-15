@@ -45,6 +45,7 @@ tree-sitter-rust = "0.23"
 tree-sitter-typescript = "0.23.2"
 tree-sitter-xml = "0.7.0"
 walkdir = "2.5"
+gpui-kit = { version = "0.9.1", optional = true }
 
 [features]
 default = ["tui", "syntax"]
@@ -53,3 +54,6 @@ tui = ["dep:ratatui", "dep:ratatui-textarea", "dep:crossterm", "rhai"]
 # standalone `cub run` test-script command.
 rhai = ["dep:rhai", "dep:rhai-fs"]
 syntax = ["dep:syntect"]
+# Native GPUI desktop frontend (`cub gui`). Not in `default`: GPUI is a heavy build.
+gui = ["dep:gpui-kit", "rhai", "syntax"]
+gpui-kit = ["dep:gpui-kit"]
