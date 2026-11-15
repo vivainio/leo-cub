@@ -1,23 +1,17 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - "v*.*.*"
-  # Release without pushing a tag by hand: the publish job creates it.
-  workflow_dispatch:
-    inputs:
-      version:
-        description: "Version to release, e.g. 0.1.0"
-        required: true
-        type: string
+  # Runs when a GitHub release is published (UI or `gh release create`),
+  # which also creates the tag -- no manual tag push.
+  release:
+    types: [published]
 
 permissions:
   contents: read
 
 env:
   CARGO_TERM_COLOR: always
-  VERSION: ${{ inputs.version || github.ref_name }}
+  VERSION: ${{ github.event.release.tag_name }}
 
 jobs:
   build:
@@ -126,18 +120,12 @@ jobs:
           pattern: cub-*
           merge-multiple: true
 
-      - name: Compute tag
-        id: tag
-        run: echo "name=v${VERSION#v}" >> "$GITHUB_OUTPUT"
-
       - name: Publish release artifacts
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.tag.outputs.name }}
-          target_commitish: ${{ github.sha }}
+          tag_name: ${{ github.event.release.tag_name }}
           files: artifacts/*
           fail_on_unmatched_files: true
-          generate_release_notes: true
 
   build-wheels:
     name: Build wheel (${{ matrix.target }})
