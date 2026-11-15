@@ -749,15 +749,41 @@ impl Render for GuiApp {
             .flex()
             .flex_col()
             .child(
-                div().px_6().pt_4().pb_2().child(
-                    gpui_kit::component::input::Input::new(&self.headline)
-                        .large()
-                        .appearance(false)
-                        .bordered(false)
-                        .text_2xl()
-                        .font_semibold()
-                        .readonly(read_only),
-                ),
+                div()
+                    .px_6()
+                    .pt_4()
+                    .pb_2()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        div().flex_1().min_w_0().child(
+                            gpui_kit::component::input::Input::new(&self.headline)
+                                .large()
+                                .appearance(false)
+                                .bordered(false)
+                                .text_2xl()
+                                .font_semibold()
+                                .readonly(read_only),
+                        ),
+                    )
+                    .when(read_only, |header| {
+                        header.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1p5()
+                                .px_2()
+                                .py_0p5()
+                                .rounded_full()
+                                .border_1()
+                                .border_color(border)
+                                .text_xs()
+                                .text_color(muted)
+                                .child(Icon::new(IconName::Eye).size_3().text_color(muted))
+                                .child("Read-only · derived"),
+                        )
+                    }),
             )
             .child(div().mx_6().h(px(1.)).bg(border))
             .child(
