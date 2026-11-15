@@ -101,8 +101,8 @@ jobs:
         run: scripts/bundle-macos.sh
       - uses: actions/upload-artifact@v6
         with:
-          name: cub-macos-app
-          path: target/bundle/cub-macos.zip
+          name: cub-app-macos-arm64
+          path: target/bundle/cub-app-macos-arm64.zip
           if-no-files-found: error
 
   publish:

@@ -45,5 +45,5 @@ PLIST
 
 # Ad-hoc sign so Gatekeeper treats it as a coherent (if unnotarized) bundle.
 codesign --force --deep --sign - "$APP"
-(cd target/bundle && ditto -c -k --keepParent "Cub.app" cub-macos.zip)
-echo "target/bundle/cub-macos.zip"
+(cd target/bundle && ditto -c -k --keepParent "Cub.app" cub-app-macos-arm64.zip)
+echo "target/bundle/cub-app-macos-arm64.zip"
