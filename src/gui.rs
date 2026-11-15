@@ -174,7 +174,7 @@ impl GuiApp {
             }
         }));
 
-        Self {
+        let this = Self {
             document,
             path,
             writable_external,
@@ -193,7 +193,13 @@ impl GuiApp {
             search_cursor: 0,
             body,
             _subscriptions: subscriptions,
+        };
+        // Open with the first node selected so the editors aren't blank.
+        if !this.document.outline.roots.is_empty() {
+            this.tree
+                .update(cx, |state, cx| state.set_selected_index(Some(0), cx));
         }
+        this
     }
 
     fn sync_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -712,10 +718,11 @@ impl Render for GuiApp {
                                     .readonly(read_only),
                             )
                             .child(
-                                div()
-                                    .flex_1()
-                                    .min_h_0()
-                                    .child(Textarea::new(&self.body).readonly(read_only)),
+                                div().flex_1().min_h_0().child(
+                                    Textarea::new(&self.body)
+                                        .h(relative(1.))
+                                        .readonly(read_only),
+                                ),
                             ),
                     ),
             )
