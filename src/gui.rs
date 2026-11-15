@@ -6,13 +6,17 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use anyhow::Result;
 use gpui_kit::component::highlighter::{LanguageConfig, LanguageRegistry};
 use gpui_kit::component::input::{Editor, EditorState, InputEvent, InputState};
 use gpui_kit::component::list::ListItem;
+use gpui_kit::component::resizable::{h_resizable, resizable_panel};
 use gpui_kit::component::tree::{TreeItem, TreeState, tree};
-use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, Theme, TitleBar};
+use gpui_kit::component::{
+    ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, Theme, TitleBar,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use leo::{
@@ -55,6 +59,9 @@ struct GuiApp {
     /// Nodes the user has expanded (by node, not position, so the state
     /// survives inserts and deletes that shift position paths).
     expanded: HashSet<NodeId>,
+    /// Tree rows whose node also appears elsewhere (clones). Cached so the
+    /// row renderer needn't walk the outline on every frame.
+    clone_paths: Rc<HashSet<String>>,
     selected: Option<PositionId>,
     tree: Entity<TreeState>,
     headline: Entity<InputState>,
@@ -114,6 +121,7 @@ impl GuiApp {
     ) -> Self {
         let expanded = HashSet::new();
         let items = build_items(&document.outline, &expanded);
+        let clone_paths = Rc::new(find_clone_paths(&document.outline));
         let tree = cx.new(|cx| TreeState::new(cx).items(items));
         let headline = cx.new(|cx| InputState::new(window, cx));
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Find (Cmd-F)"));
@@ -193,6 +201,7 @@ impl GuiApp {
             quit_armed: false,
             status,
             expanded,
+            clone_paths,
             selected: None,
             tree,
             headline,
@@ -234,6 +243,7 @@ impl GuiApp {
             .update(cx, |state, cx| state.set_value(headline, window, cx));
         self.body.update(cx, |state, cx| {
             state.set_highlighter(language, cx);
+            state.set_line_number(language != "text", window, cx);
             state.set_value(body, window, cx);
         });
         cx.notify();
@@ -281,6 +291,7 @@ impl GuiApp {
     /// new selection (or `None`), which the observer then loads.
     fn refresh_tree(&mut self, select: Option<PositionId>, cx: &mut Context<Self>) {
         let items = build_items(&self.document.outline, &self.expanded);
+        self.clone_paths = Rc::new(find_clone_paths(&self.document.outline));
         self.tree.update(cx, |state, cx| {
             state.set_items(items, cx);
             if let Some(id) = select {
@@ -671,14 +682,13 @@ impl Render for GuiApp {
                 }),
         );
 
+        let clone_paths = self.clone_paths.clone();
+        let accent = theme.primary;
         let sidebar = div()
-            .w(px(300.))
-            .h_full()
+            .size_full()
             .flex()
             .flex_col()
             .bg(sidebar_bg)
-            .border_r_1()
-            .border_color(border)
             .child(
                 div().p_2().child(
                     gpui_kit::component::input::Input::new(&self.search)
@@ -689,6 +699,7 @@ impl Render for GuiApp {
             .child(div().flex_1().min_h_0().px_1().child(tree(
                 &self.tree,
                 move |ix, entry, selected, _, _| {
+                    let item = entry.item();
                     let chevron = if entry.is_folder() {
                         let name = if entry.is_expanded() {
                             IconName::ChevronDown
@@ -702,6 +713,16 @@ impl Render for GuiApp {
                     } else {
                         div().w(px(12.)).into_any_element()
                     };
+                    let kind = if entry.is_folder() {
+                        if entry.is_expanded() {
+                            IconName::FolderOpen
+                        } else {
+                            IconName::FolderClosed
+                        }
+                    } else {
+                        IconName::File
+                    };
+                    let is_clone = clone_paths.contains(item.id.as_ref());
                     ListItem::new(ix)
                         .selected(selected)
                         .rounded_md()
@@ -714,15 +735,17 @@ impl Render for GuiApp {
                                 .gap_1p5()
                                 .text_sm()
                                 .child(chevron)
-                                .child(entry.item().label.clone()),
+                                .child(Icon::new(kind).size_4().text_color(muted))
+                                .child(item.label.clone())
+                                .when(is_clone, |row| {
+                                    row.child(Icon::new(IconName::Copy).size_3().text_color(accent))
+                                }),
                         )
                 },
             )));
 
         let main = div()
-            .flex_1()
-            .min_w_0()
-            .h_full()
+            .size_full()
             .flex()
             .flex_col()
             .child(
@@ -731,6 +754,8 @@ impl Render for GuiApp {
                         .large()
                         .appearance(false)
                         .bordered(false)
+                        .text_2xl()
+                        .font_semibold()
                         .readonly(read_only),
                 ),
             )
@@ -744,6 +769,15 @@ impl Render for GuiApp {
                         .readonly(read_only),
                 ),
             );
+
+        let split = h_resizable("main-split")
+            .child(
+                resizable_panel()
+                    .size(px(300.))
+                    .size_range(px(200.)..px(520.))
+                    .child(sidebar),
+            )
+            .child(resizable_panel().child(main));
 
         let status_bar = div()
             .h(px(26.))
@@ -779,17 +813,39 @@ impl Render for GuiApp {
             .bg(theme.background)
             .text_color(theme.foreground)
             .child(title_bar)
-            .child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .flex_1()
-                    .min_h_0()
-                    .child(sidebar)
-                    .child(main),
-            )
+            .child(div().flex_1().min_h_0().child(split))
             .child(status_bar)
     }
+}
+
+/// Paths of every row whose node is referenced by more than one position.
+fn find_clone_paths(outline: &Outline) -> HashSet<String> {
+    fn count(positions: &[Position], counts: &mut HashMap<NodeId, usize>) {
+        for position in positions {
+            *counts.entry(position.node.clone()).or_default() += 1;
+            count(&position.children, counts);
+        }
+    }
+    fn collect(
+        position: &Position,
+        path: String,
+        counts: &HashMap<NodeId, usize>,
+        found: &mut HashSet<String>,
+    ) {
+        if counts.get(&position.node).is_some_and(|n| *n > 1) {
+            found.insert(path.clone());
+        }
+        for (index, child) in position.children.iter().enumerate() {
+            collect(child, format!("{path}/{index}"), counts, found);
+        }
+    }
+    let mut counts = HashMap::new();
+    count(&outline.roots, &mut counts);
+    let mut found = HashSet::new();
+    for (index, root) in outline.roots.iter().enumerate() {
+        collect(root, index.to_string(), &counts, &mut found);
+    }
+    found
 }
 
 /// Registers cub's own tree-sitter grammars with the editor. cub and the
@@ -1062,6 +1118,18 @@ mod tests {
         assert_eq!(language_for(&o, &PositionId("0/0".into())), "rust");
         assert_eq!(canonical_language(".TS"), Some("typescript"));
         assert_eq!(language_directive("  @language  go  \nx"), Some("go"));
+    }
+
+    #[::core::prelude::v1::test]
+    fn clones_are_marked_at_every_occurrence() {
+        let mut o = outline();
+        // c appears again under a
+        o.roots[0].children.push(leaf("c"));
+        let found = find_clone_paths(&o);
+        let mut found: Vec<_> = found.into_iter().collect();
+        found.sort();
+        assert_eq!(found, ["0/1", "1"]);
+        assert!(find_clone_paths(&outline()).is_empty());
     }
 
     #[::core::prelude::v1::test]
