@@ -628,6 +628,24 @@ impl GuiApp {
         window.focus(&handle, cx);
     }
 
+    /// Expands or collapses the row at `path` (chevron click).
+    fn toggle_row(&mut self, path: &str, cx: &mut Context<Self>) {
+        let Some(node) = self
+            .document
+            .outline
+            .position(&PositionId(path.to_owned()))
+            .map(|position| position.node.clone())
+        else {
+            return;
+        };
+        if !self.expanded.remove(&node) {
+            self.expanded.insert(node);
+        }
+        let keep = self.selected.clone();
+        self.refresh_tree(keep, cx);
+        cx.notify();
+    }
+
     fn save(&mut self, _: &Save, _: &mut Window, cx: &mut Context<Self>) {
         match save_document(
             &self.document,
@@ -683,6 +701,8 @@ impl Render for GuiApp {
         );
 
         let clone_paths = self.clone_paths.clone();
+        let app = cx.entity().downgrade();
+        let tree_state = self.tree.clone();
         let accent = theme.primary;
         let sidebar = div()
             .size_full()
@@ -700,15 +720,25 @@ impl Render for GuiApp {
                 &self.tree,
                 move |ix, entry, selected, _, _| {
                     let item = entry.item();
+                    let path = item.id.to_string();
                     let chevron = if entry.is_folder() {
                         let name = if entry.is_expanded() {
                             IconName::ChevronDown
                         } else {
                             IconName::ChevronRight
                         };
-                        Icon::new(name)
-                            .size_3()
-                            .text_color(muted)
+                        // Only the chevron toggles; a click elsewhere on the row
+                        // just selects it (the tree widget would do both).
+                        let app = app.clone();
+                        let path = path.clone();
+                        div()
+                            .id(("chevron", ix))
+                            .p_0p5()
+                            .on_click(move |_, _, cx| {
+                                cx.stop_propagation();
+                                app.update(cx, |this, cx| this.toggle_row(&path, cx)).ok();
+                            })
+                            .child(Icon::new(name).size_3().text_color(muted))
                             .into_any_element()
                     } else {
                         div().w(px(12.)).into_any_element()
@@ -723,8 +753,25 @@ impl Render for GuiApp {
                         IconName::File
                     };
                     let is_clone = clone_paths.contains(item.id.as_ref());
+                    let tree_state = tree_state.clone();
+                    let row_app = app.clone();
+                    let row_path = path.clone();
+                    let folder = entry.is_folder();
                     ListItem::new(ix)
                         .selected(selected)
+                        .on_click(move |event, window, cx| {
+                            cx.stop_propagation();
+                            tree_state.update(cx, |state, cx| {
+                                state.set_selected_index(Some(ix), cx);
+                                state.focus(window, cx);
+                            });
+                            // Double-click a folder to expand or collapse it.
+                            if folder && event.click_count() >= 2 {
+                                row_app
+                                    .update(cx, |this, cx| this.toggle_row(&row_path, cx))
+                                    .ok();
+                            }
+                        })
                         .rounded_md()
                         .py_0p5()
                         .pl(px(6. + 14. * entry.depth() as f32))
