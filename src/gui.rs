@@ -49,6 +49,16 @@ actions!(
         FocusTree,
         MinimizeWindow,
         OpenFile,
+        OpenRecent0,
+        OpenRecent1,
+        OpenRecent2,
+        OpenRecent3,
+        OpenRecent4,
+        OpenRecent5,
+        OpenRecent6,
+        OpenRecent7,
+        OpenRecent8,
+        OpenRecent9,
         ZoomWindow,
     ]
 );
@@ -78,6 +88,10 @@ struct GuiApp {
     needs_tree_focus: bool,
     /// Whether to load derived (`@file`, `@auto`, ...) files when opening.
     load_derived: bool,
+    /// Recently opened outlines, newest first (persisted between runs).
+    recent: Vec<PathBuf>,
+    /// Started without a file: show the Open dialog on the first frame.
+    open_on_start: bool,
     /// Set by the insert commands: once the new node is selected, start
     /// the inline headline edit on it (with its text selected).
     rename_after_select: bool,
@@ -136,6 +150,7 @@ impl GuiApp {
     fn new(
         loaded: Loaded,
         load_derived: bool,
+        recent: Vec<PathBuf>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -147,6 +162,7 @@ impl GuiApp {
             derived_nodes,
             status,
         } = loaded;
+        let open_on_start = loaded_is_untitled(&path);
         let expanded = HashSet::new();
         let items = build_items(&document.outline, &expanded);
         let clone_paths = Rc::new(find_clone_paths(&document.outline));
@@ -259,6 +275,8 @@ impl GuiApp {
             row_edit: None,
             needs_tree_focus: true,
             load_derived,
+            recent,
+            open_on_start,
             rename_after_select: false,
             tree,
             headline,
@@ -800,10 +818,7 @@ impl GuiApp {
     /// File > Open: pick an outline with the native dialog and load it into
     /// this window. Warns once first if there are unsaved changes.
     fn open_file(&mut self, _: &OpenFile, window: &mut Window, cx: &mut Context<Self>) {
-        if self.dirty && !self.quit_armed {
-            self.quit_armed = true;
-            self.status = "unsaved changes -- Cmd-S to save, Cmd-O again to discard".into();
-            cx.notify();
+        if !self.confirm_discard("Cmd-O", cx) {
             return;
         }
         let receiver = cx.prompt_for_paths(PathPromptOptions {
@@ -823,12 +838,37 @@ impl GuiApp {
         .detach();
     }
 
+    /// With unsaved changes, warns on the first call and returns false; the
+    /// repeat (`again`) discards them and returns true.
+    fn confirm_discard(&mut self, again: &str, cx: &mut Context<Self>) -> bool {
+        if self.dirty && !self.quit_armed {
+            self.quit_armed = true;
+            self.status = format!("unsaved changes -- Cmd-S to save, {again} again to discard");
+            cx.notify();
+            return false;
+        }
+        true
+    }
+
+    /// File > Open Recent > N.
+    fn open_recent(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self.recent.get(index).cloned() else {
+            return;
+        };
+        if self.confirm_discard("the same menu item", cx) {
+            self.open_path(path, window, cx);
+        }
+    }
+
     /// Replaces the document with the outline at `path`.
     fn open_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
         match load_document(&path, self.load_derived) {
             Ok(loaded) => {
                 self.document = loaded.document;
                 self.path = loaded.path;
+                push_recent(&mut self.recent, &self.path);
+                save_recent(&self.recent);
+                set_menus(cx, &self.recent);
                 self.writable_external = loaded.writable_external;
                 self.original_external = loaded.original_external;
                 self.derived_nodes = loaded.derived_nodes;
@@ -888,6 +928,9 @@ impl GuiApp {
     }
 
     fn save(&mut self, _: &Save, _: &mut Window, cx: &mut Context<Self>) {
+        if loaded_is_untitled(&self.path) {
+            return self.refuse("no file open -- use File > Open… (Cmd-O)", cx);
+        }
         match save_document(
             &self.document,
             &self.path,
@@ -917,6 +960,10 @@ impl GuiApp {
 
 impl Render for GuiApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.open_on_start {
+            self.open_on_start = false;
+            self.open_file(&OpenFile, window, cx);
+        }
         if self.needs_tree_focus {
             self.needs_tree_focus = false;
             self.tree.update(cx, |state, cx| state.focus(window, cx));
@@ -931,7 +978,7 @@ impl Render for GuiApp {
             .path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
+            .unwrap_or_else(|| "Untitled".to_owned());
 
         let title_bar = TitleBar::new().child(
             div()
@@ -1150,6 +1197,16 @@ impl Render for GuiApp {
             .on_action(cx.listener(Self::focus_tree))
             .on_action(cx.listener(Self::minimize_window))
             .on_action(cx.listener(Self::open_file))
+            .on_action(cx.listener(|this, _: &OpenRecent0, w, cx| this.open_recent(0, w, cx)))
+            .on_action(cx.listener(|this, _: &OpenRecent1, w, cx| this.open_recent(1, w, cx)))
+            .on_action(cx.listener(|this, _: &OpenRecent2, w, cx| this.open_recent(2, w, cx)))
+            .on_action(cx.listener(|this, _: &OpenRecent3, w, cx| this.open_recent(3, w, cx)))
+            .on_action(cx.listener(|this, _: &OpenRecent4, w, cx| this.open_recent(4, w, cx)))
+            .on_action(cx.listener(|this, _: &OpenRecent5, w, cx| this.open_recent(5, w, cx)))
+            .on_action(cx.listener(|this, _: &OpenRecent6, w, cx| this.open_recent(6, w, cx)))
+            .on_action(cx.listener(|this, _: &OpenRecent7, w, cx| this.open_recent(7, w, cx)))
+            .on_action(cx.listener(|this, _: &OpenRecent8, w, cx| this.open_recent(8, w, cx)))
+            .on_action(cx.listener(|this, _: &OpenRecent9, w, cx| this.open_recent(9, w, cx)))
             .on_action(cx.listener(Self::zoom_window))
             .on_action(cx.listener(Self::move_up))
             .on_action(cx.listener(Self::move_down))
@@ -1200,9 +1257,91 @@ fn find_clone_paths(outline: &Outline) -> HashSet<String> {
     found
 }
 
+const MAX_RECENT: usize = 10;
+
+/// True for the placeholder path of a window started without a file.
+fn loaded_is_untitled(path: &Path) -> bool {
+    path.as_os_str().is_empty()
+}
+
+/// Where the recent-files list lives (`~/.config/leo-cub/recent.txt`).
+fn recent_file() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    Some(PathBuf::from(home).join(".config/leo-cub/recent.txt"))
+}
+
+/// Parses the recent-files list: one path per line, blanks and missing
+/// files dropped, newest first, at most [`MAX_RECENT`].
+fn parse_recent(text: &str, exists: impl Fn(&Path) -> bool) -> Vec<PathBuf> {
+    let mut seen = HashSet::new();
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(PathBuf::from)
+        .filter(|path| exists(path) && seen.insert(path.clone()))
+        .take(MAX_RECENT)
+        .collect()
+}
+
+fn load_recent() -> Vec<PathBuf> {
+    recent_file()
+        .and_then(|file| std::fs::read_to_string(file).ok())
+        .map(|text| parse_recent(&text, Path::exists))
+        .unwrap_or_default()
+}
+
+/// Moves `path` to the front of `recent` (absolute, de-duplicated, capped).
+fn push_recent(recent: &mut Vec<PathBuf>, path: &Path) {
+    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    recent.retain(|existing| *existing != path);
+    recent.insert(0, path);
+    recent.truncate(MAX_RECENT);
+}
+
+fn save_recent(recent: &[PathBuf]) {
+    let Some(file) = recent_file() else { return };
+    if let Some(dir) = file.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let text: String = recent
+        .iter()
+        .map(|path| format!("{}\n", path.display()))
+        .collect();
+    let _ = std::fs::write(file, text);
+}
+
+/// One "Open Recent" item per remembered file, labelled with its name.
+fn recent_menu_items(recent: &[PathBuf]) -> Vec<MenuItem> {
+    fn item(index: usize, label: String) -> MenuItem {
+        match index {
+            0 => MenuItem::action(label, OpenRecent0),
+            1 => MenuItem::action(label, OpenRecent1),
+            2 => MenuItem::action(label, OpenRecent2),
+            3 => MenuItem::action(label, OpenRecent3),
+            4 => MenuItem::action(label, OpenRecent4),
+            5 => MenuItem::action(label, OpenRecent5),
+            6 => MenuItem::action(label, OpenRecent6),
+            7 => MenuItem::action(label, OpenRecent7),
+            8 => MenuItem::action(label, OpenRecent8),
+            _ => MenuItem::action(label, OpenRecent9),
+        }
+    }
+    recent
+        .iter()
+        .enumerate()
+        .map(|(index, path)| {
+            let name = path.file_name().map_or_else(
+                || path.display().to_string(),
+                |name| name.to_string_lossy().into_owned(),
+            );
+            item(index, name)
+        })
+        .collect()
+}
+
 /// The macOS menu bar. Every item is an action the window already handles,
 /// so the menu and the keyboard shortcuts stay in step.
-fn set_menus(cx: &mut App) {
+fn set_menus(cx: &mut App, recent: &[PathBuf]) {
     cx.set_menus(vec![
         Menu {
             name: "Leo Cub".into(),
@@ -1217,6 +1356,11 @@ fn set_menus(cx: &mut App) {
             name: "File".into(),
             items: vec![
                 MenuItem::action("Open…", OpenFile),
+                MenuItem::submenu(Menu {
+                    name: "Open Recent".into(),
+                    items: recent_menu_items(recent),
+                    disabled: recent.is_empty(),
+                }),
                 MenuItem::separator(),
                 MenuItem::action("Save", Save),
             ],
@@ -1415,9 +1559,30 @@ fn load_document(path: &Path, load_derived: bool) -> Result<Loaded> {
     })
 }
 
-pub fn run(path: PathBuf, load_derived: bool) -> Result<()> {
-    let loaded = load_document(&path, load_derived)?;
-    let mut seed = Some((loaded, load_derived));
+/// The placeholder state of a window started without a file.
+fn untitled() -> Loaded {
+    Loaded {
+        document: LeoDocument::empty(),
+        path: PathBuf::new(),
+        writable_external: HashMap::new(),
+        original_external: OriginalExternalState::default(),
+        derived_nodes: HashSet::new(),
+        status: "no file open -- File > Open… (Cmd-O)".to_owned(),
+    }
+}
+
+pub fn run(path: Option<PathBuf>, load_derived: bool) -> Result<()> {
+    let loaded = match &path {
+        Some(path) => load_document(path, load_derived)?,
+        None => untitled(),
+    };
+    let mut recent = load_recent();
+    if let Some(path) = &path {
+        push_recent(&mut recent, path);
+        save_recent(&recent);
+    }
+    let mut seed = Some((loaded, load_derived, recent.clone()));
+    let menu_recent = recent.clone();
     gpui_kit::application()
         .with_assets(gpui_kit::assets::Assets)
         .run(move |cx| {
@@ -1457,14 +1622,14 @@ pub fn run(path: PathBuf, load_derived: bool) -> Result<()> {
                 KeyBinding::new("cmd-shift-v", PasteTree, None),
                 KeyBinding::new("cmd-alt-shift-v", PasteClone, None),
             ]);
-            let (loaded, load_derived) = seed.take().expect("run once");
+            let (loaded, load_derived, recent) = seed.take().expect("run once");
             gpui_kit::open_window(TitleBar::window_options(), cx, move |window, cx| {
                 Theme::sync_system_appearance(Some(window), cx);
-                cx.new(|cx| GuiApp::new(loaded, load_derived, window, cx))
+                cx.new(|cx| GuiApp::new(loaded, load_derived, recent, window, cx))
             })
             .expect("failed to open window");
             // After the key bindings, so the menus can show their shortcuts.
-            set_menus(cx);
+            set_menus(cx, &menu_recent);
             cx.activate(true);
         });
     Ok(())
@@ -1572,6 +1737,34 @@ mod tests {
         found.sort();
         assert_eq!(found, ["0/1", "1"]);
         assert!(find_clone_paths(&outline()).is_empty());
+    }
+
+    #[::core::prelude::v1::test]
+    fn recent_list_parses_dedupes_and_caps() {
+        let text = "/a.leo\n\n  /b.leo  \n/a.leo\n/gone.leo\n";
+        let kept = parse_recent(text, |p| p != Path::new("/gone.leo"));
+        assert_eq!(kept, [PathBuf::from("/a.leo"), PathBuf::from("/b.leo")]);
+
+        let many: String = (0..30).map(|i| format!("/f{i}.leo\n")).collect();
+        assert_eq!(parse_recent(&many, |_| true).len(), MAX_RECENT);
+    }
+
+    #[::core::prelude::v1::test]
+    fn pushing_a_recent_file_moves_it_to_the_front() {
+        let mut recent = vec![PathBuf::from("/x.leo"), PathBuf::from("/y.leo")];
+        push_recent(&mut recent, Path::new("/y.leo"));
+        assert_eq!(recent, [PathBuf::from("/y.leo"), PathBuf::from("/x.leo")]);
+        for i in 0..20 {
+            push_recent(&mut recent, Path::new(&format!("/n{i}.leo")));
+        }
+        assert_eq!(recent.len(), MAX_RECENT);
+        assert_eq!(recent[0], PathBuf::from("/n19.leo"));
+    }
+
+    #[::core::prelude::v1::test]
+    fn an_empty_path_means_untitled() {
+        assert!(loaded_is_untitled(Path::new("")));
+        assert!(!loaded_is_untitled(Path::new("a.leo")));
     }
 
     #[::core::prelude::v1::test]

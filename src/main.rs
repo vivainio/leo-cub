@@ -137,7 +137,8 @@ enum Command {
     /// Edit an outline in a native desktop window (GPUI).
     #[cfg(feature = "gui")]
     Gui {
-        file: PathBuf,
+        /// Outline to open; without one the Open dialog is shown.
+        file: Option<PathBuf>,
         /// Show only the hierarchy stored directly in the .leo XML.
         #[arg(long)]
         no_derived: bool,
