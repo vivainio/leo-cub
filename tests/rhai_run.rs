@@ -867,6 +867,7 @@ fn cub_run_set_headline_resolves_an_ancestor_at_path_directive() {
 }
 
 #[test]
+#[cfg(unix)] // relies on `pwd` and Unix path formatting
 fn cub_run_sh_defaults_to_cubs_cwd_and_honors_an_explicit_cwd_option() {
     // The global `sh(cmd)` needs no open `Doc` -- unlike `Doc::sh`, which
     // this replaced, it runs relative to `cub`'s own working directory
