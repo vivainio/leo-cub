@@ -168,7 +168,8 @@ impl GuiApp {
         let clone_paths = Rc::new(find_clone_paths(&document.outline));
         let tree = cx.new(|cx| TreeState::new(cx).items(items));
         let headline = cx.new(|cx| InputState::new(window, cx).placeholder("Headline"));
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Find (Cmd-F)"));
+        let search =
+            cx.new(|cx| InputState::new(window, cx).placeholder(format!("Find ({}-F)", mod_key())));
         let body = cx.new(|cx| EditorState::new(window, cx).language("text"));
 
         // Closing the window must not silently drop unsaved edits: the first
@@ -178,7 +179,10 @@ impl GuiApp {
             weak.update(cx, |this, cx| {
                 if this.dirty && !this.quit_armed {
                     this.quit_armed = true;
-                    this.status = "unsaved changes -- Cmd-S to save, close again to discard".into();
+                    this.status = format!(
+                        "unsaved changes -- {}-S to save, close again to discard",
+                        mod_key()
+                    );
                     cx.notify();
                     false
                 } else {
@@ -493,7 +497,10 @@ impl GuiApp {
         };
         self.clipboard = Some(self.document.outline.copy_subtrees(&[selected]));
         self.refuse(
-            "tree copied; Cmd-Shift-V pastes a copy, Cmd-Alt-Shift-V a clone",
+            &format!(
+                "tree copied; {m}-Shift-V pastes a copy, {m}-Alt-Shift-V a clone",
+                m = mod_key()
+            ),
             cx,
         );
     }
@@ -505,11 +512,17 @@ impl GuiApp {
         if self.readonly(&node) {
             return self.refuse("@auto subtrees cannot be cut", cx);
         }
-        self.clipboard = Some(self.document.outline.copy_subtrees(&[selected.clone()]));
+        self.clipboard = Some(
+            self.document
+                .outline
+                .copy_subtrees(std::slice::from_ref(&selected)),
+        );
         self.document.outline.remove_subtrees(&[selected]);
         self.structure_changed(None, cx);
-        self.status =
-            "tree cut; Cmd-Shift-V pastes copies, Cmd-Alt-Shift-V retains identities".into();
+        self.status = format!(
+            "tree cut; {m}-Shift-V pastes copies, {m}-Alt-Shift-V retains identities",
+            m = mod_key()
+        );
     }
 
     fn paste_tree(&mut self, as_clone: bool, cx: &mut Context<Self>) {
@@ -818,7 +831,7 @@ impl GuiApp {
     /// File > Open: pick an outline with the native dialog and load it into
     /// this window. Warns once first if there are unsaved changes.
     fn open_file(&mut self, _: &OpenFile, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.confirm_discard("Cmd-O", cx) {
+        if !self.confirm_discard(&format!("{}-O", mod_key()), cx) {
             return;
         }
         let receiver = cx.prompt_for_paths(PathPromptOptions {
@@ -843,7 +856,10 @@ impl GuiApp {
     fn confirm_discard(&mut self, again: &str, cx: &mut Context<Self>) -> bool {
         if self.dirty && !self.quit_armed {
             self.quit_armed = true;
-            self.status = format!("unsaved changes -- Cmd-S to save, {again} again to discard");
+            self.status = format!(
+                "unsaved changes -- {}-S to save, {again} again to discard",
+                mod_key()
+            );
             cx.notify();
             return false;
         }
@@ -929,7 +945,10 @@ impl GuiApp {
 
     fn save(&mut self, _: &Save, _: &mut Window, cx: &mut Context<Self>) {
         if loaded_is_untitled(&self.path) {
-            return self.refuse("no file open -- use File > Open… (Cmd-O)", cx);
+            return self.refuse(
+                &format!("no file open -- use File > Open… ({}-O)", mod_key()),
+                cx,
+            );
         }
         match save_document(
             &self.document,
@@ -949,7 +968,10 @@ impl GuiApp {
 
     fn quit(&mut self, _: &Quit, _: &mut Window, cx: &mut Context<Self>) {
         if self.dirty && !self.quit_armed {
-            self.status = "unsaved changes -- Cmd-S to save, Cmd-Q again to discard".into();
+            self.status = format!(
+                "unsaved changes -- {m}-S to save, {m}-Q again to discard",
+                m = mod_key()
+            );
             self.quit_armed = true;
             cx.notify();
         } else {
@@ -1259,15 +1281,30 @@ fn find_clone_paths(outline: &Outline) -> HashSet<String> {
 
 const MAX_RECENT: usize = 10;
 
+/// The shortcut modifier as the user sees it: Cmd on macOS, Ctrl elsewhere
+/// (the bindings use `secondary-`, which GPUI maps the same way).
+fn mod_key() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Cmd"
+    } else {
+        "Ctrl"
+    }
+}
+
 /// True for the placeholder path of a window started without a file.
 fn loaded_is_untitled(path: &Path) -> bool {
     path.as_os_str().is_empty()
 }
 
-/// Where the recent-files list lives (`~/.config/leo-cub/recent.txt`).
+/// Where the recent-files list lives: `~/.config/leo-cub/recent.txt`, or
+/// `%APPDATA%\\leo-cub\\recent.txt` on Windows.
 fn recent_file() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    Some(PathBuf::from(home).join(".config/leo-cub/recent.txt"))
+    let base = if cfg!(windows) {
+        std::env::var_os("APPDATA").map(PathBuf::from)?
+    } else {
+        PathBuf::from(std::env::var_os("HOME")?).join(".config")
+    };
+    Some(base.join("leo-cub").join("recent.txt"))
 }
 
 /// Parses the recent-files list: one path per line, blanks and missing
@@ -1567,7 +1604,7 @@ fn untitled() -> Loaded {
         writable_external: HashMap::new(),
         original_external: OriginalExternalState::default(),
         derived_nodes: HashSet::new(),
-        status: "no file open -- File > Open… (Cmd-O)".to_owned(),
+        status: format!("no file open -- File > Open… ({}-O)", mod_key()),
     }
 }
 
@@ -1596,14 +1633,14 @@ pub fn run(path: Option<PathBuf>, load_derived: bool) -> Result<()> {
             })
             .detach();
             cx.bind_keys([
-                KeyBinding::new("cmd-s", Save, None),
-                KeyBinding::new("cmd-o", OpenFile, None),
-                KeyBinding::new("cmd-m", MinimizeWindow, None),
-                KeyBinding::new("cmd-q", Quit, None),
-                KeyBinding::new("cmd-i", InsertSibling, None),
-                KeyBinding::new("cmd-shift-i", InsertChild, None),
-                KeyBinding::new("cmd-backspace", DeleteNode, None),
-                KeyBinding::new("cmd-f", FindFocus, None),
+                KeyBinding::new("secondary-s", Save, None),
+                KeyBinding::new("secondary-o", OpenFile, None),
+                KeyBinding::new("secondary-m", MinimizeWindow, None),
+                KeyBinding::new("secondary-q", Quit, None),
+                KeyBinding::new("secondary-i", InsertSibling, None),
+                KeyBinding::new("secondary-shift-i", InsertChild, None),
+                KeyBinding::new("secondary-backspace", DeleteNode, None),
+                KeyBinding::new("secondary-f", FindFocus, None),
                 KeyBinding::new("f2", RenameInline, None),
                 KeyBinding::new("h", RenameInline, Some("Tree")),
                 // The inline edit input lives inside the tree, so the bare
@@ -1613,14 +1650,14 @@ pub fn run(path: Option<PathBuf>, load_derived: bool) -> Result<()> {
                 KeyBinding::new("right", TreeRight, Some("Tree")),
                 KeyBinding::new("escape", FocusTree, Some("SearchBox > Input")),
                 KeyBinding::new("escape", CancelRowEdit, Some("TreeRowEdit > Input")),
-                KeyBinding::new("cmd-alt-up", MoveUp, None),
-                KeyBinding::new("cmd-alt-down", MoveDown, None),
-                KeyBinding::new("cmd-alt-left", MoveLeft, None),
-                KeyBinding::new("cmd-alt-right", MoveRight, None),
-                KeyBinding::new("cmd-shift-c", CopyTree, None),
-                KeyBinding::new("cmd-shift-x", CutTree, None),
-                KeyBinding::new("cmd-shift-v", PasteTree, None),
-                KeyBinding::new("cmd-alt-shift-v", PasteClone, None),
+                KeyBinding::new("secondary-alt-up", MoveUp, None),
+                KeyBinding::new("secondary-alt-down", MoveDown, None),
+                KeyBinding::new("secondary-alt-left", MoveLeft, None),
+                KeyBinding::new("secondary-alt-right", MoveRight, None),
+                KeyBinding::new("secondary-shift-c", CopyTree, None),
+                KeyBinding::new("secondary-shift-x", CutTree, None),
+                KeyBinding::new("secondary-shift-v", PasteTree, None),
+                KeyBinding::new("secondary-alt-shift-v", PasteClone, None),
             ]);
             let (loaded, load_derived, recent) = seed.take().expect("run once");
             gpui_kit::open_window(TitleBar::window_options(), cx, move |window, cx| {

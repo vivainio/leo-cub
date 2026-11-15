@@ -43,10 +43,62 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Run Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Run tests
-        run: cargo test --all-features --locked
+        run: cargo test --locked
 
       - name: Build release binary
         run: cargo build --release --locked
+
+  # The native GPUI frontend (`cub gui`). Kept out of the job above because
+  # GPUI needs platform graphics libraries, and so the macOS and Windows
+  # builds are checked on their own runners.
+  gui:
+    name: GUI (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.experimental || false }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+        include:
+          # Linux needs system libraries; allowed to fail until the list
+          # below is confirmed on a real runner.
+          - os: ubuntu-latest
+            experimental: true
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Install Linux libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev \
+            libwayland-dev libvulkan-dev libfontconfig-dev libfreetype-dev \
+            libasound2-dev libx11-xcb-dev libxcb1-dev libssl-dev libdbus-1-dev
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-gui-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-gui-cargo-
+
+      - name: Run Clippy
+        run: cargo clippy --no-default-features --features gui --all-targets --locked -- -D warnings
+
+      - name: Run tests
+        run: cargo test --no-default-features --features gui --locked

@@ -13,6 +13,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[cfg(feature = "gui")]
+mod gui;
 mod install;
 #[cfg(feature = "rhai")]
 mod rhai_run;
@@ -20,8 +22,6 @@ mod rhai_run;
 mod syntax;
 #[cfg(feature = "tui")]
 mod tui;
-#[cfg(feature = "gui")]
-mod gui;
 
 #[derive(Parser)]
 #[command(name = "cub", version, about, args_conflicts_with_subcommands = true)]
