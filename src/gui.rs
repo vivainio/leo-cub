@@ -644,6 +644,9 @@ impl GuiApp {
 
     /// `h` / F2: edit the selected node's headline in place, in its tree row.
     fn rename_inline(&mut self, _: &RenameInline, window: &mut Window, cx: &mut Context<Self>) {
+        if self.row_edit.is_some() {
+            return;
+        }
         let (Some(selected), Some(node_id)) = (self.selected.clone(), self.selected_node()) else {
             return;
         };
@@ -1189,6 +1192,9 @@ pub fn run(path: PathBuf, load_derived: bool) -> Result<()> {
                 KeyBinding::new("cmd-f", FindFocus, Some("LeoGui")),
                 KeyBinding::new("f2", RenameInline, Some("LeoGui")),
                 KeyBinding::new("h", RenameInline, Some("Tree")),
+                // The inline edit input lives inside the tree, so the bare
+                // `h` shortcut would otherwise swallow the letter there.
+                KeyBinding::new("h", NoAction, Some("TreeRowEdit > Input")),
                 KeyBinding::new("escape", CancelRowEdit, Some("TreeRowEdit > Input")),
                 KeyBinding::new("cmd-alt-up", MoveUp, Some("LeoGui")),
                 KeyBinding::new("cmd-alt-down", MoveDown, Some("LeoGui")),
