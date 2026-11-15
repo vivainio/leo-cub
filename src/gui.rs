@@ -75,6 +75,9 @@ struct GuiApp {
     /// Give the tree keyboard focus on the first frame, so the arrow keys
     /// work straight after launch.
     needs_tree_focus: bool,
+    /// Set by the insert commands: once the new node is selected, start
+    /// the inline headline edit on it (with its text selected).
+    rename_after_select: bool,
     tree: Entity<TreeState>,
     headline: Entity<InputState>,
     search: Entity<InputState>,
@@ -248,6 +251,7 @@ impl GuiApp {
             selected: None,
             row_edit: None,
             needs_tree_focus: true,
+            rename_after_select: false,
             tree,
             headline,
             search,
@@ -291,6 +295,9 @@ impl GuiApp {
             state.set_line_number(language != "text", window, cx);
             state.set_value(body, window, cx);
         });
+        if std::mem::take(&mut self.rename_after_select) {
+            self.rename_inline(&RenameInline, window, cx);
+        }
         cx.notify();
     }
 
@@ -544,7 +551,7 @@ impl GuiApp {
         }
     }
 
-    fn insert_sibling(&mut self, _: &InsertSibling, window: &mut Window, cx: &mut Context<Self>) {
+    fn insert_sibling(&mut self, _: &InsertSibling, _window: &mut Window, cx: &mut Context<Self>) {
         if let Some(current) = self.selected_node()
             && self.readonly(&current)
         {
@@ -578,11 +585,11 @@ impl GuiApp {
             Some(select),
             cx,
         ) {
-            self.focus_headline(window, cx);
+            self.rename_after_select = true;
         }
     }
 
-    fn insert_child(&mut self, _: &InsertChild, window: &mut Window, cx: &mut Context<Self>) {
+    fn insert_child(&mut self, _: &InsertChild, _window: &mut Window, cx: &mut Context<Self>) {
         let (Some(selected), Some(parent)) = (self.selected.clone(), self.selected_node()) else {
             return;
         };
@@ -602,7 +609,7 @@ impl GuiApp {
             node: Self::new_node(),
         };
         if self.apply_op(op, Some(select), cx) {
-            self.focus_headline(window, cx);
+            self.rename_after_select = true;
         }
     }
 
@@ -733,11 +740,6 @@ impl GuiApp {
         }
         self.tree.update(cx, |state, cx| state.focus(window, cx));
         cx.notify();
-    }
-
-    fn focus_headline(&self, window: &mut Window, cx: &mut Context<Self>) {
-        let handle = self.headline.read(cx).focus_handle(cx);
-        window.focus(&handle, cx);
     }
 
     fn select_row(&mut self, id: &PositionId, cx: &mut Context<Self>) {
