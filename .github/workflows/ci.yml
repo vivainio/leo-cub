@@ -111,5 +111,5 @@ jobs:
         if: runner.os == 'macOS'
         uses: actions/upload-artifact@v4
         with:
-          name: leo-cub-macos
-          path: target/bundle/leo-cub-macos.zip
+          name: cub-macos
+          path: target/bundle/cub-macos.zip
