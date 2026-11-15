@@ -102,3 +102,14 @@ jobs:
 
       - name: Run tests
         run: cargo test --no-default-features --features gui --locked
+
+      - name: Bundle macOS app
+        if: runner.os == 'macOS'
+        run: scripts/bundle-macos.sh
+
+      - name: Upload macOS app
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: leo-cub-macos
+          path: target/bundle/leo-cub-macos.zip
