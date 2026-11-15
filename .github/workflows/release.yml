@@ -4,12 +4,20 @@ on:
   push:
     tags:
       - "v*.*.*"
+  # Release without pushing a tag by hand: the publish job creates it.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release, e.g. 0.1.0"
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 env:
   CARGO_TERM_COLOR: always
+  VERSION: ${{ inputs.version || github.ref_name }}
 
 jobs:
   build:
@@ -62,7 +70,7 @@ jobs:
         shell: bash
         run: |
           cargo install cargo-edit --locked
-          cargo set-version "${GITHUB_REF_NAME#v}"
+          cargo set-version "${VERSION#v}"
 
       - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }} --locked
@@ -85,9 +93,27 @@ jobs:
           path: ${{ matrix.archive }}
           if-no-files-found: error
 
+  build-app:
+    name: Build macOS app
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Set version
+        run: |
+          cargo install cargo-edit --locked
+          cargo set-version "${VERSION#v}"
+      - name: Bundle
+        run: scripts/bundle-macos.sh
+      - uses: actions/upload-artifact@v6
+        with:
+          name: cub-macos-app
+          path: target/bundle/cub-macos.zip
+          if-no-files-found: error
+
   publish:
     name: Publish GitHub release
-    needs: build
+    needs: [build, build-app]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -100,9 +126,15 @@ jobs:
           pattern: cub-*
           merge-multiple: true
 
+      - name: Compute tag
+        id: tag
+        run: echo "name=v${VERSION#v}" >> "$GITHUB_OUTPUT"
+
       - name: Publish release artifacts
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.tag.outputs.name }}
+          target_commitish: ${{ github.sha }}
           files: artifacts/*
           fail_on_unmatched_files: true
           generate_release_notes: true
@@ -145,7 +177,7 @@ jobs:
         shell: bash
         run: |
           cargo install cargo-edit --locked
-          cargo set-version "${GITHUB_REF_NAME#v}"
+          cargo set-version "${VERSION#v}"
 
       - name: Build wheel
         uses: PyO3/maturin-action@v1
