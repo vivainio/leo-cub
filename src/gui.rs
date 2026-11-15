@@ -81,7 +81,13 @@ fn build_items(outline: &Outline, expanded: &HashSet<NodeId>) -> Vec<TreeItem> {
             .enumerate()
             .map(|(index, child)| build(outline, child, format!("{path}/{index}"), expanded))
             .collect::<Vec<_>>();
-        TreeItem::new(path.clone(), headline.to_owned())
+        // An empty headline would render as an invisible, hard-to-click row.
+        let label = if headline.trim().is_empty() {
+            "(empty)"
+        } else {
+            headline
+        };
+        TreeItem::new(path.clone(), label.to_owned())
             .expanded(expanded.contains(&position.node))
             .children(children)
     }
@@ -967,6 +973,14 @@ mod tests {
         assert!(items[0].is_expanded());
         assert!(!items[1].is_expanded());
         assert_eq!(items[0].children[0].id.as_ref(), "0/0");
+    }
+
+    #[::core::prelude::v1::test]
+    fn empty_headlines_get_a_visible_label() {
+        let mut o = outline();
+        o.nodes.get_mut(&NodeId("c".into())).unwrap().headline = "  ".into();
+        let items = build_items(&o, &HashSet::new());
+        assert_eq!(items[1].label.as_ref(), "(empty)");
     }
 
     #[::core::prelude::v1::test]
