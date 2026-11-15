@@ -14,13 +14,28 @@ use gpui_kit::component::list::ListItem;
 use gpui_kit::component::tree::{TreeItem, TreeState, tree};
 use gpui_kit::*;
 use leo::{
-    LeoDocument, Node, NodeId, Operation, OperationBatch, OriginalExternalState, Outline, Position,
-    PositionId, WritableExternalFile, load_derived_files, save_document,
+    LeoDocument, MoveDirection, Node, NodeId, Operation, OperationBatch, OriginalExternalState,
+    Outline, Position, PositionId, Subtree, WritableExternalFile, derived_filename,
+    load_derived_files, save_document,
 };
 
 actions!(
     leo_gui,
-    [Save, Quit, InsertSibling, InsertChild, DeleteNode]
+    [
+        Save,
+        Quit,
+        InsertSibling,
+        InsertChild,
+        DeleteNode,
+        MoveUp,
+        MoveDown,
+        MoveLeft,
+        MoveRight,
+        CopyTree,
+        CutTree,
+        PasteTree,
+        PasteClone,
+    ]
 );
 
 struct GuiApp {
@@ -28,6 +43,9 @@ struct GuiApp {
     path: PathBuf,
     writable_external: HashMap<NodeId, WritableExternalFile>,
     original_external: OriginalExternalState,
+    /// Nodes produced by loading derived files (`@auto`, `@file`, ...).
+    derived_nodes: HashSet<NodeId>,
+    clipboard: Option<Subtree>,
     dirty: bool,
     status: String,
     quit_armed: bool,
@@ -77,6 +95,7 @@ impl GuiApp {
         path: PathBuf,
         writable_external: HashMap<NodeId, WritableExternalFile>,
         original_external: OriginalExternalState,
+        derived_nodes: HashSet<NodeId>,
         status: String,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -134,6 +153,8 @@ impl GuiApp {
             path,
             writable_external,
             original_external,
+            derived_nodes,
+            clipboard: None,
             dirty: false,
             quit_armed: false,
             status,
@@ -188,6 +209,9 @@ impl GuiApp {
         else {
             return false;
         };
+        if self.readonly(&node_id) {
+            return false;
+        }
         let Some(node) = self.document.outline.nodes.get_mut(&node_id) else {
             return false;
         };
@@ -233,10 +257,7 @@ impl GuiApp {
         };
         match self.document.outline.apply(&batch) {
             Ok(_) => {
-                self.dirty = true;
-                self.quit_armed = false;
-                self.refresh_tree(select, cx);
-                cx.notify();
+                self.structure_changed(select, cx);
                 true
             }
             Err(error) => {
@@ -245,6 +266,158 @@ impl GuiApp {
                 false
             }
         }
+    }
+
+    fn structure_changed(&mut self, select: Option<PositionId>, cx: &mut Context<Self>) {
+        self.dirty = true;
+        self.quit_armed = false;
+        self.refresh_tree(select, cx);
+        cx.notify();
+    }
+
+    /// A node loaded from a derived file that isn't writable back.
+    fn readonly(&self, node: &NodeId) -> bool {
+        self.derived_nodes.contains(node)
+            && !self
+                .writable_external
+                .values()
+                .any(|file| file.original.nodes.contains_key(node))
+    }
+
+    /// Read-only derived nodes, `@auto`-family roots (regenerated on every
+    /// load) and `@edit` roots (flat bodies) can't take new children.
+    fn refuses_children(&self, node: &NodeId) -> bool {
+        self.readonly(node)
+            || self
+                .document
+                .outline
+                .nodes
+                .get(node)
+                .and_then(|n| derived_filename(&n.headline))
+                .is_some_and(|(auto, directive, _)| auto || directive == "@edit")
+    }
+
+    fn refuse(&mut self, message: &str, cx: &mut Context<Self>) {
+        self.status = message.into();
+        cx.notify();
+    }
+
+    fn move_selected(&mut self, direction: MoveDirection, cx: &mut Context<Self>) {
+        let (Some(selected), Some(node)) = (self.selected.clone(), self.selected_node()) else {
+            return;
+        };
+        if self.readonly(&node) {
+            return self.refuse("@auto subtrees cannot be moved", cx);
+        }
+        let refuses: HashSet<NodeId> = self
+            .document
+            .outline
+            .nodes
+            .keys()
+            .filter(|id| self.refuses_children(id))
+            .cloned()
+            .collect();
+        match self
+            .document
+            .outline
+            .move_position(&selected, direction, &|id| refuses.contains(id))
+        {
+            Ok(target) => {
+                if direction == MoveDirection::Right
+                    && let Some((parent, _)) = target.0.rsplit_once('/')
+                    && let Some(parent) = self.document.outline.position(&PositionId(parent.into()))
+                {
+                    self.expanded.insert(parent.node.clone());
+                }
+                self.structure_changed(Some(target), cx);
+                self.status = "node moved".into();
+            }
+            Err(error) => self.refuse(&error.to_string(), cx),
+        }
+    }
+
+    fn move_up(&mut self, _: &MoveUp, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_selected(MoveDirection::Up, cx);
+    }
+    fn move_down(&mut self, _: &MoveDown, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_selected(MoveDirection::Down, cx);
+    }
+    fn move_left(&mut self, _: &MoveLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_selected(MoveDirection::Left, cx);
+    }
+    fn move_right(&mut self, _: &MoveRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_selected(MoveDirection::Right, cx);
+    }
+
+    fn copy_tree(&mut self, _: &CopyTree, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(selected) = self.selected.clone() else {
+            return;
+        };
+        self.clipboard = Some(self.document.outline.copy_subtrees(&[selected]));
+        self.refuse(
+            "tree copied; Cmd-Shift-V pastes a copy, Cmd-Alt-Shift-V a clone",
+            cx,
+        );
+    }
+
+    fn cut_tree(&mut self, _: &CutTree, _: &mut Window, cx: &mut Context<Self>) {
+        let (Some(selected), Some(node)) = (self.selected.clone(), self.selected_node()) else {
+            return;
+        };
+        if self.readonly(&node) {
+            return self.refuse("@auto subtrees cannot be cut", cx);
+        }
+        self.clipboard = Some(self.document.outline.copy_subtrees(&[selected.clone()]));
+        self.document.outline.remove_subtrees(&[selected]);
+        self.structure_changed(None, cx);
+        self.status =
+            "tree cut; Cmd-Shift-V pastes copies, Cmd-Alt-Shift-V retains identities".into();
+    }
+
+    fn paste_tree(&mut self, as_clone: bool, cx: &mut Context<Self>) {
+        let Some(subtree) = self.clipboard.clone() else {
+            return self.refuse("tree clipboard is empty", cx);
+        };
+        if as_clone && subtree.roots.iter().any(|root| self.readonly(&root.node)) {
+            return self.refuse(
+                "cannot clone @auto derived content; only its root can be cloned",
+                cx,
+            );
+        }
+        let (parent, index) = match (&self.selected, self.selected_node()) {
+            (Some(selected), Some(node)) => {
+                if self.readonly(&node) {
+                    return self.refuse("cannot paste beside an @auto subtree", cx);
+                }
+                let Some((parent, index)) = split_path(selected) else {
+                    return;
+                };
+                (parent, index + 1)
+            }
+            _ => (None, 0),
+        };
+        match self
+            .document
+            .outline
+            .paste_subtree(parent.as_ref(), index, &subtree, as_clone)
+        {
+            Ok(target) => {
+                self.structure_changed(Some(target), cx);
+                self.status = if as_clone {
+                    "pasted clones".into()
+                } else {
+                    "pasted independent copies".into()
+                };
+            }
+            Err(error) => self.refuse(&error.to_string(), cx),
+        }
+    }
+
+    fn paste_copy(&mut self, _: &PasteTree, _: &mut Window, cx: &mut Context<Self>) {
+        self.paste_tree(false, cx);
+    }
+    fn paste_clone(&mut self, _: &PasteClone, _: &mut Window, cx: &mut Context<Self>) {
+        self.paste_tree(true, cx);
     }
 
     fn selected_node(&self) -> Option<NodeId> {
@@ -267,6 +440,11 @@ impl GuiApp {
     }
 
     fn insert_sibling(&mut self, _: &InsertSibling, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(current) = self.selected_node()
+            && self.readonly(&current)
+        {
+            return self.refuse("cannot insert beside an @auto descendant", cx);
+        }
         let node = Self::new_node();
         let (parent, index, select) = match &self.selected {
             Some(selected) => {
@@ -303,6 +481,9 @@ impl GuiApp {
         let (Some(selected), Some(parent)) = (self.selected.clone(), self.selected_node()) else {
             return;
         };
+        if self.refuses_children(&parent) {
+            return self.refuse("this node cannot take new children", cx);
+        }
         let count = self
             .document
             .outline
@@ -324,6 +505,12 @@ impl GuiApp {
         let Some(selected) = self.selected.clone() else {
             return;
         };
+        if self
+            .selected_node()
+            .is_some_and(|node| self.readonly(&node))
+        {
+            return self.refuse("@auto subtrees cannot be deleted", cx);
+        }
         let headline = self
             .selected_node()
             .and_then(|id| self.document.outline.nodes.get(&id))
@@ -369,6 +556,9 @@ impl GuiApp {
 
 impl Render for GuiApp {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let read_only = self
+            .selected_node()
+            .is_some_and(|node| self.readonly(&node));
         let theme = cx.theme();
         let title = format!(
             "{}{}",
@@ -385,6 +575,14 @@ impl Render for GuiApp {
             .on_action(cx.listener(Self::insert_sibling))
             .on_action(cx.listener(Self::insert_child))
             .on_action(cx.listener(Self::delete_node))
+            .on_action(cx.listener(Self::move_up))
+            .on_action(cx.listener(Self::move_down))
+            .on_action(cx.listener(Self::move_left))
+            .on_action(cx.listener(Self::move_right))
+            .on_action(cx.listener(Self::copy_tree))
+            .on_action(cx.listener(Self::cut_tree))
+            .on_action(cx.listener(Self::paste_copy))
+            .on_action(cx.listener(Self::paste_clone))
             .size_full()
             .flex()
             .flex_col()
@@ -427,8 +625,16 @@ impl Render for GuiApp {
                             .flex_col()
                             .gap_2()
                             .p_2()
-                            .child(gpui_kit::component::input::Input::new(&self.headline))
-                            .child(div().flex_1().min_h_0().child(Textarea::new(&self.body))),
+                            .child(
+                                gpui_kit::component::input::Input::new(&self.headline)
+                                    .readonly(read_only),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_h_0()
+                                    .child(Textarea::new(&self.body).readonly(read_only)),
+                            ),
                     ),
             )
             .child(
@@ -447,7 +653,7 @@ impl Render for GuiApp {
 
 pub fn run(path: PathBuf, load_derived: bool) -> Result<()> {
     let mut document = LeoDocument::open(&path)?;
-    let (status, writable_external, original_external) = if load_derived {
+    let (status, writable_external, original_external, derived_nodes) = if load_derived {
         let report = load_derived_files(&mut document.outline, &path);
         let status = if report.errors.is_empty() {
             format!("loaded {} derived file(s)", report.loaded)
@@ -467,16 +673,25 @@ pub fn run(path: PathBuf, load_derived: bool) -> Result<()> {
                 bodies: report.original_bodies,
                 nodes: report.original_nodes,
             },
+            report.derived_nodes,
         )
     } else {
         (
             "derived files disabled".to_owned(),
             HashMap::new(),
             OriginalExternalState::default(),
+            HashSet::new(),
         )
     };
 
-    let mut seed = Some((document, path, writable_external, original_external, status));
+    let mut seed = Some((
+        document,
+        path,
+        writable_external,
+        original_external,
+        derived_nodes,
+        status,
+    ));
     gpui_kit::application().run(move |cx| {
         gpui_kit::init(cx);
         cx.bind_keys([
@@ -485,10 +700,22 @@ pub fn run(path: PathBuf, load_derived: bool) -> Result<()> {
             KeyBinding::new("cmd-i", InsertSibling, Some("LeoGui")),
             KeyBinding::new("cmd-shift-i", InsertChild, Some("LeoGui")),
             KeyBinding::new("cmd-backspace", DeleteNode, Some("LeoGui")),
+            KeyBinding::new("cmd-alt-up", MoveUp, Some("LeoGui")),
+            KeyBinding::new("cmd-alt-down", MoveDown, Some("LeoGui")),
+            KeyBinding::new("cmd-alt-left", MoveLeft, Some("LeoGui")),
+            KeyBinding::new("cmd-alt-right", MoveRight, Some("LeoGui")),
+            KeyBinding::new("cmd-shift-c", CopyTree, Some("LeoGui")),
+            KeyBinding::new("cmd-shift-x", CutTree, Some("LeoGui")),
+            KeyBinding::new("cmd-shift-v", PasteTree, Some("LeoGui")),
+            KeyBinding::new("cmd-alt-shift-v", PasteClone, Some("LeoGui")),
         ]);
-        let (document, path, writable, original, status) = seed.take().expect("run once");
+        let (document, path, writable, original, derived, status) = seed.take().expect("run once");
         gpui_kit::open_window(WindowOptions::default(), cx, move |window, cx| {
-            cx.new(|cx| GuiApp::new(document, path, writable, original, status, window, cx))
+            cx.new(|cx| {
+                GuiApp::new(
+                    document, path, writable, original, derived, status, window, cx,
+                )
+            })
         })
         .expect("failed to open window");
         cx.activate(true);

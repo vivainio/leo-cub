@@ -5,6 +5,7 @@ mod auto_dir;
 mod clean;
 mod derive_load;
 mod derived;
+mod edit;
 mod import;
 mod inspect;
 mod model;
@@ -21,6 +22,7 @@ pub use derive_load::{
     load_derived_files, load_derived_jobs, path_directive,
 };
 pub use derived::{DerivedFile, SentinelError};
+pub use edit::{EditError, MoveDirection, Subtree};
 pub use import::{ImportError, ImportItem, ImportMode, ImportOptions, ImportReport, import_files};
 pub use inspect::{
     ExternalFilter, InspectError, InspectSelector, JsonTree, JsonTreeNode, SearchExcerpt,
