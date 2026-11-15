@@ -9,14 +9,15 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use gpui_kit::component::ActiveTheme as _;
-use gpui_kit::component::input::{InputEvent, InputState, Textarea, TextareaState};
+use gpui_kit::component::highlighter::{LanguageConfig, LanguageRegistry};
+use gpui_kit::component::input::{Editor, EditorState, InputEvent, InputState};
 use gpui_kit::component::list::ListItem;
 use gpui_kit::component::tree::{TreeItem, TreeState, tree};
 use gpui_kit::*;
 use leo::{
     LeoDocument, MoveDirection, Node, NodeId, Operation, OperationBatch, OriginalExternalState,
     Outline, Position, PositionId, Subtree, WritableExternalFile, derived_filename,
-    load_derived_files, save_document,
+    external_filename, load_derived_files, save_document,
 };
 
 actions!(
@@ -59,7 +60,7 @@ struct GuiApp {
     search: Entity<InputState>,
     search_matches: Vec<PositionId>,
     search_cursor: usize,
-    body: Entity<TextareaState>,
+    body: Entity<EditorState>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -115,7 +116,7 @@ impl GuiApp {
         let tree = cx.new(|cx| TreeState::new(cx).items(items));
         let headline = cx.new(|cx| InputState::new(window, cx));
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Find (Cmd-F)"));
-        let body = cx.new(|cx| TextareaState::new(window, cx));
+        let body = cx.new(|cx| EditorState::new(window, cx).language("text"));
 
         let mut subscriptions = Vec::new();
         // The tree has no selection event; observe it and diff the index.
@@ -221,13 +222,19 @@ impl GuiApp {
         let node = id
             .and_then(|id| self.document.outline.position(&id).map(|p| p.node.clone()))
             .and_then(|node_id| self.document.outline.nodes.get(&node_id).cloned());
+        let language = self
+            .selected
+            .as_ref()
+            .map_or("text", |id| language_for(&self.document.outline, id));
         let (headline, body) = node
             .map(|node| (node.headline, node.body))
             .unwrap_or_default();
         self.headline
             .update(cx, |state, cx| state.set_value(headline, window, cx));
-        self.body
-            .update(cx, |state, cx| state.set_value(body, window, cx));
+        self.body.update(cx, |state, cx| {
+            state.set_highlighter(language, cx);
+            state.set_value(body, window, cx);
+        });
         cx.notify();
     }
 
@@ -723,13 +730,9 @@ impl Render for GuiApp {
                                 gpui_kit::component::input::Input::new(&self.headline)
                                     .readonly(read_only),
                             )
-                            .child(
-                                div().flex_1().min_h_0().child(
-                                    Textarea::new(&self.body)
-                                        .h(relative(1.))
-                                        .readonly(read_only),
-                                ),
-                            ),
+                            .child(div().flex_1().min_h_0().child(
+                                Editor::new(&self.body).h(relative(1.)).readonly(read_only),
+                            )),
                     ),
             )
             .child(
@@ -744,6 +747,108 @@ impl Render for GuiApp {
                     .child(format!("{title}  —  {}", self.status)),
             )
     }
+}
+
+/// Registers cub's own tree-sitter grammars with the editor. cub and the
+/// editor share one tree-sitter runtime, so a grammar crate's `LANGUAGE`
+/// converts straight into the editor's `Language`.
+fn register_languages() {
+    let registry = LanguageRegistry::singleton();
+    let add = |name: &str, language: tree_sitter::Language, highlights: &str| {
+        registry.register(
+            name,
+            &LanguageConfig::new(name, language, vec![], highlights, "", ""),
+        );
+    };
+    add(
+        "rust",
+        tree_sitter_rust::LANGUAGE.into(),
+        tree_sitter_rust::HIGHLIGHTS_QUERY,
+    );
+    add(
+        "python",
+        tree_sitter_python::LANGUAGE.into(),
+        tree_sitter_python::HIGHLIGHTS_QUERY,
+    );
+    add(
+        "javascript",
+        tree_sitter_javascript::LANGUAGE.into(),
+        tree_sitter_javascript::HIGHLIGHT_QUERY,
+    );
+    add(
+        "go",
+        tree_sitter_go::LANGUAGE.into(),
+        tree_sitter_go::HIGHLIGHTS_QUERY,
+    );
+    add(
+        "typescript",
+        tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+        tree_sitter_typescript::HIGHLIGHTS_QUERY,
+    );
+    add(
+        "tsx",
+        tree_sitter_typescript::LANGUAGE_TSX.into(),
+        tree_sitter_typescript::HIGHLIGHTS_QUERY,
+    );
+    add(
+        "markdown",
+        tree_sitter_md::LANGUAGE.into(),
+        tree_sitter_md::HIGHLIGHT_QUERY_BLOCK,
+    );
+}
+
+/// Maps a `@language` name or file extension to a registered grammar name.
+fn canonical_language(name: &str) -> Option<&'static str> {
+    Some(
+        match name.trim().trim_start_matches('.').to_lowercase().as_str() {
+            "rust" | "rs" => "rust",
+            "python" | "py" => "python",
+            "javascript" | "js" | "jsx" | "mjs" => "javascript",
+            "typescript" | "ts" => "typescript",
+            "tsx" => "tsx",
+            "go" => "go",
+            "markdown" | "md" | "rmd" => "markdown",
+            _ => return None,
+        },
+    )
+}
+
+/// The `@language NAME` directive in `body`, if any.
+fn language_directive(body: &str) -> Option<&str> {
+    body.lines().find_map(|line| {
+        let rest = line.trim_start().strip_prefix("@language")?;
+        rest.split_whitespace().next()
+    })
+}
+
+/// Which grammar to highlight the node at `position` with: the nearest
+/// ancestor-or-self `@language` directive, else the extension of the
+/// nearest `@file`-style headline's filename; `"text"` when neither maps to
+/// a grammar cub ships. Same precedence as the TUI.
+fn language_for(outline: &Outline, position: &PositionId) -> &'static str {
+    let mut found: Option<&'static str> = None;
+    let mut prefix = String::new();
+    for component in position.0.split('/') {
+        if !prefix.is_empty() {
+            prefix.push('/');
+        }
+        prefix.push_str(component);
+        let Some(node) = outline
+            .position(&PositionId(prefix.clone()))
+            .and_then(|p| outline.nodes.get(&p.node))
+        else {
+            break;
+        };
+        if let Some(filename) = external_filename(&node.headline)
+            && let Some(ext) = filename.rsplit_once('.').map(|(_, ext)| ext)
+        {
+            found = canonical_language(ext).or(found);
+        }
+        if let Some(name) = language_directive(&node.body) {
+            found = canonical_language(name).or(found);
+        }
+    }
+    found.unwrap_or("text")
 }
 
 pub fn run(path: PathBuf, load_derived: bool) -> Result<()> {
@@ -789,6 +894,7 @@ pub fn run(path: PathBuf, load_derived: bool) -> Result<()> {
     ));
     gpui_kit::application().run(move |cx| {
         gpui_kit::init(cx);
+        register_languages();
         cx.bind_keys([
             KeyBinding::new("cmd-s", Save, Some("LeoGui")),
             KeyBinding::new("cmd-q", Quit, Some("LeoGui")),
@@ -893,6 +999,23 @@ fn join_path(parent: Option<&PositionId>, index: usize) -> PositionId {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[::core::prelude::v1::test]
+    fn language_follows_directive_then_file_extension_down_the_tree() {
+        let mut o = outline();
+        // a (child b), c
+        o.nodes.get_mut(&NodeId("a".into())).unwrap().headline = "@file src/lib.rs".into();
+        assert_eq!(language_for(&o, &PositionId("0/0".into())), "rust");
+        assert_eq!(language_for(&o, &PositionId("1".into())), "text");
+        // a closer @language directive wins over the inherited extension
+        o.nodes.get_mut(&NodeId("b".into())).unwrap().body = "@language python\nx = 1".into();
+        assert_eq!(language_for(&o, &PositionId("0/0".into())), "python");
+        // an unknown language leaves the inherited one in place
+        o.nodes.get_mut(&NodeId("b".into())).unwrap().body = "@language cobol".into();
+        assert_eq!(language_for(&o, &PositionId("0/0".into())), "rust");
+        assert_eq!(canonical_language(".TS"), Some("typescript"));
+        assert_eq!(language_directive("  @language  go  \nx"), Some("go"));
+    }
 
     #[::core::prelude::v1::test]
     fn paths_split_and_join() {
