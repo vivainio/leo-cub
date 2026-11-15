@@ -805,6 +805,13 @@ fn handle_key(
     if key.kind != KeyEventKind::Press {
         return KeyOutcome::Continue;
     }
+    // On macOS, Cmd is the natural chord key: treat Super (reported by
+    // kitty-protocol terminals such as Ghostty) exactly like Ctrl.
+    let mut key = key;
+    if key.modifiers.contains(KeyModifiers::SUPER) {
+        key.modifiers.remove(KeyModifiers::SUPER);
+        key.modifiers.insert(KeyModifiers::CONTROL);
+    }
     app.debug(format!("key: {:?} mods={:?}", key.code, key.modifiers));
     if app.input.is_some() {
         handle_headline_input(app, key);
