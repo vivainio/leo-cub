@@ -47,6 +47,8 @@ actions!(
         TreeLeft,
         TreeRight,
         FocusTree,
+        MinimizeWindow,
+        ZoomWindow,
     ]
 );
 
@@ -142,6 +144,23 @@ impl GuiApp {
         let headline = cx.new(|cx| InputState::new(window, cx).placeholder("Headline"));
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Find (Cmd-F)"));
         let body = cx.new(|cx| EditorState::new(window, cx).language("text"));
+
+        // Closing the window must not silently drop unsaved edits: the first
+        // close warns, a second close discards (same as Cmd-Q).
+        let weak = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |_, cx| {
+            weak.update(cx, |this, cx| {
+                if this.dirty && !this.quit_armed {
+                    this.quit_armed = true;
+                    this.status = "unsaved changes -- Cmd-S to save, close again to discard".into();
+                    cx.notify();
+                    false
+                } else {
+                    true
+                }
+            })
+            .unwrap_or(true)
+        });
 
         let mut subscriptions = Vec::new();
         // The tree has no selection event; observe it and diff the index.
@@ -768,6 +787,14 @@ impl GuiApp {
         }
     }
 
+    fn minimize_window(&mut self, _: &MinimizeWindow, window: &mut Window, _: &mut Context<Self>) {
+        window.minimize_window();
+    }
+
+    fn zoom_window(&mut self, _: &ZoomWindow, window: &mut Window, _: &mut Context<Self>) {
+        window.zoom_window();
+    }
+
     fn focus_tree(&mut self, _: &FocusTree, window: &mut Window, cx: &mut Context<Self>) {
         self.tree.update(cx, |state, cx| state.focus(window, cx));
     }
@@ -1051,6 +1078,8 @@ impl Render for GuiApp {
             .on_action(cx.listener(Self::tree_left))
             .on_action(cx.listener(Self::tree_right))
             .on_action(cx.listener(Self::focus_tree))
+            .on_action(cx.listener(Self::minimize_window))
+            .on_action(cx.listener(Self::zoom_window))
             .on_action(cx.listener(Self::move_up))
             .on_action(cx.listener(Self::move_down))
             .on_action(cx.listener(Self::move_left))
@@ -1098,6 +1127,62 @@ fn find_clone_paths(outline: &Outline) -> HashSet<String> {
         collect(root, index.to_string(), &counts, &mut found);
     }
     found
+}
+
+/// The macOS menu bar. Every item is an action the window already handles,
+/// so the menu and the keyboard shortcuts stay in step.
+fn set_menus(cx: &mut App) {
+    cx.set_menus(vec![
+        Menu {
+            name: "Leo Cub".into(),
+            items: vec![
+                MenuItem::os_submenu("Services", SystemMenuType::Services),
+                MenuItem::separator(),
+                MenuItem::action("Quit Leo Cub", Quit),
+            ],
+            disabled: false,
+        },
+        Menu {
+            name: "File".into(),
+            items: vec![MenuItem::action("Save", Save)],
+            disabled: false,
+        },
+        Menu {
+            name: "Edit".into(),
+            items: vec![
+                MenuItem::action("New Sibling", InsertSibling),
+                MenuItem::action("New Child", InsertChild),
+                MenuItem::action("Rename", RenameInline),
+                MenuItem::action("Delete", DeleteNode),
+                MenuItem::separator(),
+                MenuItem::action("Copy Subtree", CopyTree),
+                MenuItem::action("Cut Subtree", CutTree),
+                MenuItem::action("Paste Subtree", PasteTree),
+                MenuItem::action("Paste as Clone", PasteClone),
+            ],
+            disabled: false,
+        },
+        Menu {
+            name: "Outline".into(),
+            items: vec![
+                MenuItem::action("Move Up", MoveUp),
+                MenuItem::action("Move Down", MoveDown),
+                MenuItem::action("Promote (Move Left)", MoveLeft),
+                MenuItem::action("Demote (Move Right)", MoveRight),
+                MenuItem::separator(),
+                MenuItem::action("Find", FindFocus),
+            ],
+            disabled: false,
+        },
+        Menu {
+            name: "Window".into(),
+            items: vec![
+                MenuItem::action("Minimize", MinimizeWindow),
+                MenuItem::action("Zoom", ZoomWindow),
+            ],
+            disabled: false,
+        },
+    ]);
 }
 
 /// Registers cub's own tree-sitter grammars with the editor. cub and the
@@ -1248,14 +1333,22 @@ pub fn run(path: PathBuf, load_derived: bool) -> Result<()> {
         .run(move |cx| {
             gpui_kit::init(cx);
             register_languages();
+            // A single-window app: closing the window quits.
+            cx.on_window_closed(|cx, _| {
+                if cx.windows().is_empty() {
+                    cx.quit();
+                }
+            })
+            .detach();
             cx.bind_keys([
-                KeyBinding::new("cmd-s", Save, Some("LeoGui")),
-                KeyBinding::new("cmd-q", Quit, Some("LeoGui")),
-                KeyBinding::new("cmd-i", InsertSibling, Some("LeoGui")),
-                KeyBinding::new("cmd-shift-i", InsertChild, Some("LeoGui")),
-                KeyBinding::new("cmd-backspace", DeleteNode, Some("LeoGui")),
-                KeyBinding::new("cmd-f", FindFocus, Some("LeoGui")),
-                KeyBinding::new("f2", RenameInline, Some("LeoGui")),
+                KeyBinding::new("cmd-s", Save, None),
+                KeyBinding::new("cmd-m", MinimizeWindow, None),
+                KeyBinding::new("cmd-q", Quit, None),
+                KeyBinding::new("cmd-i", InsertSibling, None),
+                KeyBinding::new("cmd-shift-i", InsertChild, None),
+                KeyBinding::new("cmd-backspace", DeleteNode, None),
+                KeyBinding::new("cmd-f", FindFocus, None),
+                KeyBinding::new("f2", RenameInline, None),
                 KeyBinding::new("h", RenameInline, Some("Tree")),
                 // The inline edit input lives inside the tree, so the bare
                 // `h` shortcut would otherwise swallow the letter there.
@@ -1264,14 +1357,14 @@ pub fn run(path: PathBuf, load_derived: bool) -> Result<()> {
                 KeyBinding::new("right", TreeRight, Some("Tree")),
                 KeyBinding::new("escape", FocusTree, Some("SearchBox > Input")),
                 KeyBinding::new("escape", CancelRowEdit, Some("TreeRowEdit > Input")),
-                KeyBinding::new("cmd-alt-up", MoveUp, Some("LeoGui")),
-                KeyBinding::new("cmd-alt-down", MoveDown, Some("LeoGui")),
-                KeyBinding::new("cmd-alt-left", MoveLeft, Some("LeoGui")),
-                KeyBinding::new("cmd-alt-right", MoveRight, Some("LeoGui")),
-                KeyBinding::new("cmd-shift-c", CopyTree, Some("LeoGui")),
-                KeyBinding::new("cmd-shift-x", CutTree, Some("LeoGui")),
-                KeyBinding::new("cmd-shift-v", PasteTree, Some("LeoGui")),
-                KeyBinding::new("cmd-alt-shift-v", PasteClone, Some("LeoGui")),
+                KeyBinding::new("cmd-alt-up", MoveUp, None),
+                KeyBinding::new("cmd-alt-down", MoveDown, None),
+                KeyBinding::new("cmd-alt-left", MoveLeft, None),
+                KeyBinding::new("cmd-alt-right", MoveRight, None),
+                KeyBinding::new("cmd-shift-c", CopyTree, None),
+                KeyBinding::new("cmd-shift-x", CutTree, None),
+                KeyBinding::new("cmd-shift-v", PasteTree, None),
+                KeyBinding::new("cmd-alt-shift-v", PasteClone, None),
             ]);
             let (document, path, writable, original, derived, status) =
                 seed.take().expect("run once");
@@ -1284,6 +1377,8 @@ pub fn run(path: PathBuf, load_derived: bool) -> Result<()> {
                 })
             })
             .expect("failed to open window");
+            // After the key bindings, so the menus can show their shortcuts.
+            set_menus(cx);
             cx.activate(true);
         });
     Ok(())
