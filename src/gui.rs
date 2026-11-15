@@ -1291,6 +1291,32 @@ fn mod_key() -> &'static str {
     }
 }
 
+/// A key binding using the platform's shortcut modifier (Cmd on macOS, Ctrl
+/// elsewhere). GPUI has no `secondary-` alias -- a raw `secondary-s` is an
+/// invalid keystroke that panics when the bindings are registered.
+macro_rules! secondary {
+    ($keys:literal) => {
+        if cfg!(target_os = "macos") {
+            concat!("cmd-", $keys)
+        } else {
+            concat!("ctrl-", $keys)
+        }
+    };
+}
+
+#[cfg(test)]
+mod shortcut_tests {
+    #[test]
+    fn expands_the_platform_modifier() {
+        let expected = if cfg!(target_os = "macos") {
+            "cmd-alt-shift-v"
+        } else {
+            "ctrl-alt-shift-v"
+        };
+        assert_eq!(secondary!("alt-shift-v"), expected);
+    }
+}
+
 /// True for the placeholder path of a window started without a file.
 fn loaded_is_untitled(path: &Path) -> bool {
     path.as_os_str().is_empty()
@@ -1633,14 +1659,14 @@ pub fn run(path: Option<PathBuf>, load_derived: bool) -> Result<()> {
             })
             .detach();
             cx.bind_keys([
-                KeyBinding::new("secondary-s", Save, None),
-                KeyBinding::new("secondary-o", OpenFile, None),
-                KeyBinding::new("secondary-m", MinimizeWindow, None),
-                KeyBinding::new("secondary-q", Quit, None),
-                KeyBinding::new("secondary-i", InsertSibling, None),
-                KeyBinding::new("secondary-shift-i", InsertChild, None),
-                KeyBinding::new("secondary-backspace", DeleteNode, None),
-                KeyBinding::new("secondary-f", FindFocus, None),
+                KeyBinding::new(secondary!("s"), Save, None),
+                KeyBinding::new(secondary!("o"), OpenFile, None),
+                KeyBinding::new(secondary!("m"), MinimizeWindow, None),
+                KeyBinding::new(secondary!("q"), Quit, None),
+                KeyBinding::new(secondary!("i"), InsertSibling, None),
+                KeyBinding::new(secondary!("shift-i"), InsertChild, None),
+                KeyBinding::new(secondary!("backspace"), DeleteNode, None),
+                KeyBinding::new(secondary!("f"), FindFocus, None),
                 KeyBinding::new("f2", RenameInline, None),
                 KeyBinding::new("h", RenameInline, Some("Tree")),
                 // The inline edit input lives inside the tree, so the bare
@@ -1650,14 +1676,14 @@ pub fn run(path: Option<PathBuf>, load_derived: bool) -> Result<()> {
                 KeyBinding::new("right", TreeRight, Some("Tree")),
                 KeyBinding::new("escape", FocusTree, Some("SearchBox > Input")),
                 KeyBinding::new("escape", CancelRowEdit, Some("TreeRowEdit > Input")),
-                KeyBinding::new("secondary-alt-up", MoveUp, None),
-                KeyBinding::new("secondary-alt-down", MoveDown, None),
-                KeyBinding::new("secondary-alt-left", MoveLeft, None),
-                KeyBinding::new("secondary-alt-right", MoveRight, None),
-                KeyBinding::new("secondary-shift-c", CopyTree, None),
-                KeyBinding::new("secondary-shift-x", CutTree, None),
-                KeyBinding::new("secondary-shift-v", PasteTree, None),
-                KeyBinding::new("secondary-alt-shift-v", PasteClone, None),
+                KeyBinding::new(secondary!("alt-up"), MoveUp, None),
+                KeyBinding::new(secondary!("alt-down"), MoveDown, None),
+                KeyBinding::new(secondary!("alt-left"), MoveLeft, None),
+                KeyBinding::new(secondary!("alt-right"), MoveRight, None),
+                KeyBinding::new(secondary!("shift-c"), CopyTree, None),
+                KeyBinding::new(secondary!("shift-x"), CutTree, None),
+                KeyBinding::new(secondary!("shift-v"), PasteTree, None),
+                KeyBinding::new(secondary!("alt-shift-v"), PasteClone, None),
             ]);
             let (loaded, load_derived, recent) = seed.take().expect("run once");
             gpui_kit::open_window(TitleBar::window_options(), cx, move |window, cx| {

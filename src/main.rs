@@ -338,7 +338,22 @@ EXAMPLE:
     },
 }
 
+/// True when launched by Finder from inside a macOS `.app` bundle: the
+/// binary is `Cub.app/Contents/MacOS/cub` and gets no real arguments (old
+/// systems pass a `-psn_` process serial number). Then the GUI is the default.
+#[cfg(all(feature = "gui", target_os = "macos"))]
+fn launched_from_app_bundle() -> bool {
+    let in_bundle = std::env::current_exe()
+        .map(|exe| exe.to_string_lossy().contains(".app/Contents/MacOS/"))
+        .unwrap_or(false);
+    in_bundle && std::env::args().skip(1).all(|arg| arg.starts_with("-psn_"))
+}
+
 fn main() -> Result<()> {
+    #[cfg(all(feature = "gui", target_os = "macos"))]
+    if launched_from_app_bundle() {
+        return gui::run(None, true);
+    }
     let cli = Cli::parse();
     #[cfg(feature = "tui")]
     let command = match (cli.command, cli.file) {

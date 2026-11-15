@@ -9,14 +9,9 @@ APP="target/bundle/Cub.app"
 VERSION=$(cargo pkgid | sed 's/.*[#@]//')
 rm -rf target/bundle
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp target/release/cub "$APP/Contents/Resources/cub"
-
-# Finder launches the bundle executable with no arguments; start the GUI.
-cat > "$APP/Contents/MacOS/cub" <<'LAUNCH'
-#!/bin/sh
-exec "$(dirname "$0")/../Resources/cub" gui "$@"
-LAUNCH
-chmod +x "$APP/Contents/MacOS/cub"
+# The real binary is the bundle executable (macOS ties the process to the
+# bundle by its path); it starts the GUI itself when launched from Finder.
+cp target/release/cub "$APP/Contents/MacOS/cub"
 
 # App icon: assets/icon.png (1024x1024, transparent) -> Cub.icns
 ICONSET=target/bundle/Cub.iconset
