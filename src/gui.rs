@@ -44,6 +44,9 @@ actions!(
         FindFocus,
         RenameInline,
         CancelRowEdit,
+        TreeLeft,
+        TreeRight,
+        FocusTree,
     ]
 );
 
@@ -67,6 +70,9 @@ struct GuiApp {
     selected: Option<PositionId>,
     /// Inline headline edit in the tree row (`h` / F2).
     row_edit: Option<RowEdit>,
+    /// Give the tree keyboard focus on the first frame, so the arrow keys
+    /// work straight after launch.
+    needs_tree_focus: bool,
     tree: Entity<TreeState>,
     headline: Entity<InputState>,
     search: Entity<InputState>,
@@ -222,6 +228,7 @@ impl GuiApp {
             clone_paths,
             selected: None,
             row_edit: None,
+            needs_tree_focus: true,
             tree,
             headline,
             search,
@@ -714,6 +721,57 @@ impl GuiApp {
         window.focus(&handle, cx);
     }
 
+    fn select_row(&mut self, id: &PositionId, cx: &mut Context<Self>) {
+        self.tree.update(cx, |state, cx| {
+            let id: SharedString = id.0.clone().into();
+            if let Some(ix) = state.index_of(&id) {
+                state.set_selected_index(Some(ix), cx);
+                state.scroll_to_item(ix, ScrollStrategy::Nearest);
+            }
+        });
+    }
+
+    /// Left: collapse an expanded folder, otherwise jump to the parent.
+    fn tree_left(&mut self, _: &TreeLeft, _: &mut Window, cx: &mut Context<Self>) {
+        let (Some(selected), Some(node)) = (self.selected.clone(), self.selected_node()) else {
+            return;
+        };
+        let has_children = self
+            .document
+            .outline
+            .position(&selected)
+            .is_some_and(|p| !p.children.is_empty());
+        if has_children && self.expanded.contains(&node) {
+            self.toggle_row(&selected.0, cx);
+        } else if let Some(parent) = self.document.outline.parent_position(&selected) {
+            self.select_row(&parent, cx);
+        }
+    }
+
+    /// Right: expand a collapsed folder, otherwise jump to its first child.
+    fn tree_right(&mut self, _: &TreeRight, _: &mut Window, cx: &mut Context<Self>) {
+        let (Some(selected), Some(node)) = (self.selected.clone(), self.selected_node()) else {
+            return;
+        };
+        let has_children = self
+            .document
+            .outline
+            .position(&selected)
+            .is_some_and(|p| !p.children.is_empty());
+        if !has_children {
+            return;
+        }
+        if self.expanded.contains(&node) {
+            self.select_row(&join_path(Some(&selected), 0), cx);
+        } else {
+            self.toggle_row(&selected.0, cx);
+        }
+    }
+
+    fn focus_tree(&mut self, _: &FocusTree, window: &mut Window, cx: &mut Context<Self>) {
+        self.tree.update(cx, |state, cx| state.focus(window, cx));
+    }
+
     /// Expands or collapses the row at `path` (chevron click).
     fn toggle_row(&mut self, path: &str, cx: &mut Context<Self>) {
         let Some(node) = self
@@ -761,7 +819,11 @@ impl GuiApp {
 }
 
 impl Render for GuiApp {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.needs_tree_focus {
+            self.needs_tree_focus = false;
+            self.tree.update(cx, |state, cx| state.focus(window, cx));
+        }
         let read_only = self
             .selected_node()
             .is_some_and(|node| self.readonly(&node));
@@ -801,7 +863,7 @@ impl Render for GuiApp {
             .flex_col()
             .bg(sidebar_bg)
             .child(
-                div().p_2().child(
+                div().key_context("SearchBox").p_2().child(
                     gpui_kit::component::input::Input::new(&self.search)
                         .prefix(Icon::new(IconName::Search).size_4().text_color(muted))
                         .cleanable(true),
@@ -986,6 +1048,9 @@ impl Render for GuiApp {
             .on_action(cx.listener(Self::find_focus))
             .on_action(cx.listener(Self::rename_inline))
             .on_action(cx.listener(Self::cancel_row_edit))
+            .on_action(cx.listener(Self::tree_left))
+            .on_action(cx.listener(Self::tree_right))
+            .on_action(cx.listener(Self::focus_tree))
             .on_action(cx.listener(Self::move_up))
             .on_action(cx.listener(Self::move_down))
             .on_action(cx.listener(Self::move_left))
@@ -1195,6 +1260,9 @@ pub fn run(path: PathBuf, load_derived: bool) -> Result<()> {
                 // The inline edit input lives inside the tree, so the bare
                 // `h` shortcut would otherwise swallow the letter there.
                 KeyBinding::new("h", NoAction, Some("TreeRowEdit > Input")),
+                KeyBinding::new("left", TreeLeft, Some("Tree")),
+                KeyBinding::new("right", TreeRight, Some("Tree")),
+                KeyBinding::new("escape", FocusTree, Some("SearchBox > Input")),
                 KeyBinding::new("escape", CancelRowEdit, Some("TreeRowEdit > Input")),
                 KeyBinding::new("cmd-alt-up", MoveUp, Some("LeoGui")),
                 KeyBinding::new("cmd-alt-down", MoveDown, Some("LeoGui")),
