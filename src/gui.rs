@@ -42,6 +42,8 @@ actions!(
         PasteTree,
         PasteClone,
         FindFocus,
+        RenameInline,
+        CancelRowEdit,
     ]
 );
 
@@ -63,6 +65,8 @@ struct GuiApp {
     /// row renderer needn't walk the outline on every frame.
     clone_paths: Rc<HashSet<String>>,
     selected: Option<PositionId>,
+    /// Inline headline edit in the tree row (`h` / F2).
+    row_edit: Option<RowEdit>,
     tree: Entity<TreeState>,
     headline: Entity<InputState>,
     search: Entity<InputState>,
@@ -70,6 +74,12 @@ struct GuiApp {
     search_cursor: usize,
     body: Entity<EditorState>,
     _subscriptions: Vec<Subscription>,
+}
+
+struct RowEdit {
+    path: String,
+    input: Entity<InputState>,
+    _subscription: Subscription,
 }
 
 fn build_items(outline: &Outline, expanded: &HashSet<NodeId>) -> Vec<TreeItem> {
@@ -123,7 +133,7 @@ impl GuiApp {
         let items = build_items(&document.outline, &expanded);
         let clone_paths = Rc::new(find_clone_paths(&document.outline));
         let tree = cx.new(|cx| TreeState::new(cx).items(items));
-        let headline = cx.new(|cx| InputState::new(window, cx));
+        let headline = cx.new(|cx| InputState::new(window, cx).placeholder("Headline"));
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Find (Cmd-F)"));
         let body = cx.new(|cx| EditorState::new(window, cx).language("text"));
 
@@ -151,17 +161,25 @@ impl GuiApp {
                 }
             }
         }));
-        subscriptions.push(
-            cx.subscribe(&headline, |this, state, event: &InputEvent, cx| {
-                if matches!(event, InputEvent::Change) {
+        subscriptions.push(cx.subscribe_in(
+            &headline,
+            window,
+            |this, state, event: &InputEvent, window, cx| match event {
+                InputEvent::Change => {
                     let value = state.read(cx).value().to_string();
                     if this.edit_selected(cx, |node| &mut node.headline, value) {
                         let keep = this.selected.clone();
                         this.refresh_tree(keep, cx);
                     }
                 }
-            }),
-        );
+                // Enter accepts the headline and moves on to the body.
+                InputEvent::PressEnter { .. } => {
+                    let handle = this.body.read(cx).focus_handle(cx);
+                    window.focus(&handle, cx);
+                }
+                _ => {}
+            },
+        ));
         subscriptions.push(cx.subscribe(
             &search,
             |this, state, event: &InputEvent, cx| match event {
@@ -203,6 +221,7 @@ impl GuiApp {
             expanded,
             clone_paths,
             selected: None,
+            row_edit: None,
             tree,
             headline,
             search,
@@ -623,6 +642,70 @@ impl GuiApp {
         window.focus(&handle, cx);
     }
 
+    /// `h` / F2: edit the selected node's headline in place, in its tree row.
+    fn rename_inline(&mut self, _: &RenameInline, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(selected), Some(node_id)) = (self.selected.clone(), self.selected_node()) else {
+            return;
+        };
+        if self.readonly(&node_id) {
+            return self.refuse("@auto descendants are read-only", cx);
+        }
+        let text = self
+            .document
+            .outline
+            .nodes
+            .get(&node_id)
+            .map(|node| node.headline.clone())
+            .unwrap_or_default();
+        let input = cx.new(|cx| InputState::new(window, cx));
+        input.update(cx, |state, cx| state.set_value(text, window, cx));
+        let subscription = cx.subscribe_in(
+            &input,
+            window,
+            |this, _, event: &InputEvent, window, cx| match event {
+                InputEvent::PressEnter { .. } | InputEvent::Blur => {
+                    this.finish_row_edit(true, window, cx);
+                }
+                _ => {}
+            },
+        );
+        let handle = input.read(cx).focus_handle(cx);
+        self.row_edit = Some(RowEdit {
+            path: selected.0,
+            input,
+            _subscription: subscription,
+        });
+        window.focus(&handle, cx);
+        if let Some(edit) = &self.row_edit {
+            edit.input
+                .update(cx, |state, cx| state.select_all(window, cx));
+        }
+        cx.notify();
+    }
+
+    fn cancel_row_edit(&mut self, _: &CancelRowEdit, window: &mut Window, cx: &mut Context<Self>) {
+        self.finish_row_edit(false, window, cx);
+    }
+
+    /// Ends the inline edit, keeping the new text when `commit`, and hands
+    /// focus back to the tree.
+    fn finish_row_edit(&mut self, commit: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(edit) = self.row_edit.take() else {
+            return;
+        };
+        if commit && self.selected.as_ref().is_some_and(|id| id.0 == edit.path) {
+            let value = edit.input.read(cx).value().to_string();
+            if self.edit_selected(cx, |node| &mut node.headline, value.clone()) {
+                self.headline
+                    .update(cx, |state, cx| state.set_value(value, window, cx));
+                let keep = self.selected.clone();
+                self.refresh_tree(keep, cx);
+            }
+        }
+        self.tree.update(cx, |state, cx| state.focus(window, cx));
+        cx.notify();
+    }
+
     fn focus_headline(&self, window: &mut Window, cx: &mut Context<Self>) {
         let handle = self.headline.read(cx).focus_handle(cx);
         window.focus(&handle, cx);
@@ -700,6 +783,11 @@ impl Render for GuiApp {
                 }),
         );
 
+        let hover = theme.muted.opacity(0.35);
+        let row_edit = self
+            .row_edit
+            .as_ref()
+            .map(|edit| (edit.path.clone(), edit.input.clone()));
         let clone_paths = self.clone_paths.clone();
         let app = cx.entity().downgrade();
         let tree_state = self.tree.clone();
@@ -753,6 +841,19 @@ impl Render for GuiApp {
                         IconName::File
                     };
                     let is_clone = clone_paths.contains(item.id.as_ref());
+                    let editing = row_edit
+                        .as_ref()
+                        .filter(|(edit_path, _)| *edit_path == path);
+                    let label = match editing {
+                        Some((_, input)) => div()
+                            .key_context("TreeRowEdit")
+                            .flex_1()
+                            .min_w_0()
+                            .child(gpui_kit::component::input::Input::new(input).small())
+                            .into_any_element(),
+                        None => div().child(item.label.clone()).into_any_element(),
+                    };
+                    let is_editing = editing.is_some();
                     let tree_state = tree_state.clone();
                     let row_app = app.clone();
                     let row_path = path.clone();
@@ -761,6 +862,9 @@ impl Render for GuiApp {
                         .selected(selected)
                         .on_click(move |event, window, cx| {
                             cx.stop_propagation();
+                            if is_editing {
+                                return;
+                            }
                             tree_state.update(cx, |state, cx| {
                                 state.set_selected_index(Some(ix), cx);
                                 state.focus(window, cx);
@@ -783,7 +887,7 @@ impl Render for GuiApp {
                                 .text_sm()
                                 .child(chevron)
                                 .child(Icon::new(kind).size_4().text_color(muted))
-                                .child(item.label.clone())
+                                .child(label)
                                 .when(is_clone, |row| {
                                     row.child(Icon::new(IconName::Copy).size_3().text_color(accent))
                                 }),
@@ -804,15 +908,20 @@ impl Render for GuiApp {
                     .items_center()
                     .gap_3()
                     .child(
-                        div().flex_1().min_w_0().child(
-                            gpui_kit::component::input::Input::new(&self.headline)
-                                .large()
-                                .appearance(false)
-                                .bordered(false)
-                                .text_2xl()
-                                .font_semibold()
-                                .readonly(read_only),
-                        ),
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .rounded_md()
+                            .hover(|style| style.bg(hover))
+                            .child(
+                                gpui_kit::component::input::Input::new(&self.headline)
+                                    .large()
+                                    .appearance(false)
+                                    .bordered(false)
+                                    .text_2xl()
+                                    .font_semibold()
+                                    .readonly(read_only),
+                            ),
                     )
                     .when(read_only, |header| {
                         header.child(
@@ -872,6 +981,8 @@ impl Render for GuiApp {
             .on_action(cx.listener(Self::insert_child))
             .on_action(cx.listener(Self::delete_node))
             .on_action(cx.listener(Self::find_focus))
+            .on_action(cx.listener(Self::rename_inline))
+            .on_action(cx.listener(Self::cancel_row_edit))
             .on_action(cx.listener(Self::move_up))
             .on_action(cx.listener(Self::move_down))
             .on_action(cx.listener(Self::move_left))
@@ -1076,6 +1187,9 @@ pub fn run(path: PathBuf, load_derived: bool) -> Result<()> {
                 KeyBinding::new("cmd-shift-i", InsertChild, Some("LeoGui")),
                 KeyBinding::new("cmd-backspace", DeleteNode, Some("LeoGui")),
                 KeyBinding::new("cmd-f", FindFocus, Some("LeoGui")),
+                KeyBinding::new("f2", RenameInline, Some("LeoGui")),
+                KeyBinding::new("h", RenameInline, Some("Tree")),
+                KeyBinding::new("escape", CancelRowEdit, Some("TreeRowEdit > Input")),
                 KeyBinding::new("cmd-alt-up", MoveUp, Some("LeoGui")),
                 KeyBinding::new("cmd-alt-down", MoveDown, Some("LeoGui")),
                 KeyBinding::new("cmd-alt-left", MoveLeft, Some("LeoGui")),
