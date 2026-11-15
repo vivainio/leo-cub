@@ -35,6 +35,7 @@ actions!(
         CutTree,
         PasteTree,
         PasteClone,
+        FindFocus,
     ]
 );
 
@@ -55,6 +56,9 @@ struct GuiApp {
     selected: Option<PositionId>,
     tree: Entity<TreeState>,
     headline: Entity<InputState>,
+    search: Entity<InputState>,
+    search_matches: Vec<PositionId>,
+    search_cursor: usize,
     body: Entity<TextareaState>,
     _subscriptions: Vec<Subscription>,
 }
@@ -104,6 +108,7 @@ impl GuiApp {
         let items = build_items(&document.outline, &expanded);
         let tree = cx.new(|cx| TreeState::new(cx).items(items));
         let headline = cx.new(|cx| InputState::new(window, cx));
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Find (Cmd-F)"));
         let body = cx.new(|cx| TextareaState::new(window, cx));
 
         let mut subscriptions = Vec::new();
@@ -141,6 +146,27 @@ impl GuiApp {
                 }
             }),
         );
+        subscriptions.push(cx.subscribe(
+            &search,
+            |this, state, event: &InputEvent, cx| match event {
+                InputEvent::Change => {
+                    let query = state.read(cx).value().to_string();
+                    this.search_matches = find_positions(&this.document.outline, &query);
+                    this.search_cursor = 0;
+                    this.status = if query.is_empty() {
+                        String::new()
+                    } else {
+                        format!("{} match(es)", this.search_matches.len())
+                    };
+                    cx.notify();
+                }
+                InputEvent::PressEnter { shift, .. } => {
+                    let delta = if *shift { -1 } else { 1 };
+                    this.step_search(delta, cx);
+                }
+                _ => {}
+            },
+        ));
         subscriptions.push(cx.subscribe(&body, |this, state, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 let value = state.read(cx).value().to_string();
@@ -162,6 +188,9 @@ impl GuiApp {
             selected: None,
             tree,
             headline,
+            search,
+            search_matches: Vec::new(),
+            search_cursor: 0,
             body,
             _subscriptions: subscriptions,
         }
@@ -521,6 +550,48 @@ impl GuiApp {
         }
     }
 
+    /// Jumps to the next (`delta` 1) or previous (-1) search match,
+    /// expanding its ancestors so the row is visible.
+    fn step_search(&mut self, delta: isize, cx: &mut Context<Self>) {
+        // Matches were computed against the outline as it was; recompute so
+        // edits between searches can't leave stale positions behind.
+        let query = self.search.read(cx).value().to_string();
+        self.search_matches = find_positions(&self.document.outline, &query);
+        let count = self.search_matches.len();
+        if count == 0 {
+            return self.refuse("no matches", cx);
+        }
+        let next = next_match(&self.search_matches, self.selected.as_ref(), delta);
+        self.search_cursor = next;
+        let target = self.search_matches[next].clone();
+        // Expand every ancestor of the target.
+        let mut path = String::new();
+        let parts: Vec<&str> = target.0.split('/').collect();
+        for part in &parts[..parts.len() - 1] {
+            if !path.is_empty() {
+                path.push('/');
+            }
+            path.push_str(part);
+            if let Some(position) = self.document.outline.position(&PositionId(path.clone())) {
+                self.expanded.insert(position.node.clone());
+            }
+        }
+        self.refresh_tree(Some(target.clone()), cx);
+        self.tree.update(cx, |state, _| {
+            let id: SharedString = target.0.into();
+            if let Some(ix) = state.index_of(&id) {
+                state.scroll_to_item(ix, ScrollStrategy::Center);
+            }
+        });
+        self.status = format!("match {} of {count}", next + 1);
+        cx.notify();
+    }
+
+    fn find_focus(&mut self, _: &FindFocus, window: &mut Window, cx: &mut Context<Self>) {
+        let handle = self.search.read(cx).focus_handle(cx);
+        window.focus(&handle, cx);
+    }
+
     fn focus_headline(&self, window: &mut Window, cx: &mut Context<Self>) {
         let handle = self.headline.read(cx).focus_handle(cx);
         window.focus(&handle, cx);
@@ -575,6 +646,7 @@ impl Render for GuiApp {
             .on_action(cx.listener(Self::insert_sibling))
             .on_action(cx.listener(Self::insert_child))
             .on_action(cx.listener(Self::delete_node))
+            .on_action(cx.listener(Self::find_focus))
             .on_action(cx.listener(Self::move_up))
             .on_action(cx.listener(Self::move_down))
             .on_action(cx.listener(Self::move_left))
@@ -598,23 +670,33 @@ impl Render for GuiApp {
                         div()
                             .w(px(340.))
                             .h_full()
+                            .flex()
+                            .flex_col()
                             .border_r_1()
                             .border_color(theme.border)
-                            .child(tree(&self.tree, |ix, entry, selected, _, _| {
-                                let item = entry.item();
-                                ListItem::new(ix)
-                                    .selected(selected)
-                                    .pl(px(8. + 16. * entry.depth() as f32))
-                                    .child(format!(
-                                        "{} {}",
-                                        if entry.is_folder() {
-                                            if entry.is_expanded() { "▾" } else { "▸" }
-                                        } else {
-                                            "·"
-                                        },
-                                        item.label
-                                    ))
-                            })),
+                            .child(
+                                div()
+                                    .p_1()
+                                    .child(gpui_kit::component::input::Input::new(&self.search)),
+                            )
+                            .child(div().flex_1().min_h_0().child(tree(
+                                &self.tree,
+                                |ix, entry, selected, _, _| {
+                                    let item = entry.item();
+                                    ListItem::new(ix)
+                                        .selected(selected)
+                                        .pl(px(8. + 16. * entry.depth() as f32))
+                                        .child(format!(
+                                            "{} {}",
+                                            if entry.is_folder() {
+                                                if entry.is_expanded() { "▾" } else { "▸" }
+                                            } else {
+                                                "·"
+                                            },
+                                            item.label
+                                        ))
+                                },
+                            ))),
                     )
                     .child(
                         div()
@@ -700,6 +782,7 @@ pub fn run(path: PathBuf, load_derived: bool) -> Result<()> {
             KeyBinding::new("cmd-i", InsertSibling, Some("LeoGui")),
             KeyBinding::new("cmd-shift-i", InsertChild, Some("LeoGui")),
             KeyBinding::new("cmd-backspace", DeleteNode, Some("LeoGui")),
+            KeyBinding::new("cmd-f", FindFocus, Some("LeoGui")),
             KeyBinding::new("cmd-alt-up", MoveUp, Some("LeoGui")),
             KeyBinding::new("cmd-alt-down", MoveDown, Some("LeoGui")),
             KeyBinding::new("cmd-alt-left", MoveLeft, Some("LeoGui")),
@@ -721,6 +804,62 @@ pub fn run(path: PathBuf, load_derived: bool) -> Result<()> {
         cx.activate(true);
     });
     Ok(())
+}
+
+/// Every position whose headline or body contains `query`
+/// (case-insensitive), in outline order.
+fn find_positions(outline: &Outline, query: &str) -> Vec<PositionId> {
+    let query = query.to_lowercase();
+    let mut found = Vec::new();
+    if query.is_empty() {
+        return found;
+    }
+    fn visit(
+        outline: &Outline,
+        position: &Position,
+        path: String,
+        query: &str,
+        found: &mut Vec<PositionId>,
+    ) {
+        if let Some(node) = outline.nodes.get(&position.node)
+            && (node.headline.to_lowercase().contains(query)
+                || node.body.to_lowercase().contains(query))
+        {
+            found.push(PositionId(path.clone()));
+        }
+        for (index, child) in position.children.iter().enumerate() {
+            visit(outline, child, format!("{path}/{index}"), query, found);
+        }
+    }
+    for (index, root) in outline.roots.iter().enumerate() {
+        visit(outline, root, index.to_string(), &query, &mut found);
+    }
+    found
+}
+
+fn path_key(id: &PositionId) -> Vec<usize> {
+    id.0.split('/').filter_map(|p| p.parse().ok()).collect()
+}
+
+/// Index into `matches` (in outline order) to jump to from `selected`:
+/// the neighbouring match in direction `delta` (wrapping), or -- when the
+/// selection isn't on a match -- the nearest match after (forward) or
+/// before (backward) it.
+fn next_match(matches: &[PositionId], selected: Option<&PositionId>, delta: isize) -> usize {
+    let count = matches.len();
+    let Some(selected) = selected else {
+        return if delta >= 0 { 0 } else { count - 1 };
+    };
+    let key = path_key(selected);
+    let keys: Vec<Vec<usize>> = matches.iter().map(path_key).collect();
+    if let Some(ix) = keys.iter().position(|k| *k == key) {
+        return (ix as isize + delta).rem_euclid(count as isize) as usize;
+    }
+    if delta >= 0 {
+        keys.iter().position(|k| *k > key).unwrap_or(0)
+    } else {
+        keys.iter().rposition(|k| *k < key).unwrap_or(count - 1)
+    }
 }
 
 /// Splits `a/b/c` into (`Some(a/b)`, 2); a root `3` into (`None`, 3).
@@ -784,6 +923,34 @@ mod tests {
             leaf("c"),
         ];
         outline
+    }
+
+    #[::core::prelude::v1::test]
+    fn find_matches_headlines_and_bodies_case_insensitively_in_order() {
+        let mut o = outline();
+        o.nodes.get_mut(&NodeId("c".into())).unwrap().body = "Needle here".into();
+        o.nodes.get_mut(&NodeId("b".into())).unwrap().headline = "has NEEDLE".into();
+        assert_eq!(
+            find_positions(&o, "needle"),
+            [PositionId("0/0".into()), PositionId("1".into())]
+        );
+        assert!(find_positions(&o, "").is_empty());
+        assert!(find_positions(&o, "absent").is_empty());
+    }
+
+    #[::core::prelude::v1::test]
+    fn next_match_walks_outline_order_not_string_order() {
+        let m = |s: &str| PositionId(s.into());
+        let matches = [m("1"), m("2"), m("10")];
+        assert_eq!(next_match(&matches, None, 1), 0);
+        assert_eq!(next_match(&matches, None, -1), 2);
+        assert_eq!(next_match(&matches, Some(&m("2")), 1), 2);
+        assert_eq!(next_match(&matches, Some(&m("10")), 1), 0);
+        assert_eq!(next_match(&matches, Some(&m("1")), -1), 2);
+        // off a match: nearest in the requested direction, numerically
+        assert_eq!(next_match(&matches, Some(&m("3")), 1), 2);
+        assert_eq!(next_match(&matches, Some(&m("3")), -1), 1);
+        assert_eq!(next_match(&matches, Some(&m("1/4")), 1), 1);
     }
 
     #[::core::prelude::v1::test]
