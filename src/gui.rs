@@ -5,7 +5,7 @@
 //! MVP scope: outline tree, headline + body editing, save.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use anyhow::Result;
@@ -48,6 +48,7 @@ actions!(
         TreeRight,
         FocusTree,
         MinimizeWindow,
+        OpenFile,
         ZoomWindow,
     ]
 );
@@ -75,6 +76,8 @@ struct GuiApp {
     /// Give the tree keyboard focus on the first frame, so the arrow keys
     /// work straight after launch.
     needs_tree_focus: bool,
+    /// Whether to load derived (`@file`, `@auto`, ...) files when opening.
+    load_derived: bool,
     /// Set by the insert commands: once the new node is selected, start
     /// the inline headline edit on it (with its text selected).
     rename_after_select: bool,
@@ -131,15 +134,19 @@ fn build_items(outline: &Outline, expanded: &HashSet<NodeId>) -> Vec<TreeItem> {
 
 impl GuiApp {
     fn new(
-        document: LeoDocument,
-        path: PathBuf,
-        writable_external: HashMap<NodeId, WritableExternalFile>,
-        original_external: OriginalExternalState,
-        derived_nodes: HashSet<NodeId>,
-        status: String,
+        loaded: Loaded,
+        load_derived: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let Loaded {
+            document,
+            path,
+            writable_external,
+            original_external,
+            derived_nodes,
+            status,
+        } = loaded;
         let expanded = HashSet::new();
         let items = build_items(&document.outline, &expanded);
         let clone_paths = Rc::new(find_clone_paths(&document.outline));
@@ -251,6 +258,7 @@ impl GuiApp {
             selected: None,
             row_edit: None,
             needs_tree_focus: true,
+            load_derived,
             rename_after_select: false,
             tree,
             headline,
@@ -789,6 +797,66 @@ impl GuiApp {
         }
     }
 
+    /// File > Open: pick an outline with the native dialog and load it into
+    /// this window. Warns once first if there are unsaved changes.
+    fn open_file(&mut self, _: &OpenFile, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dirty && !self.quit_armed {
+            self.quit_armed = true;
+            self.status = "unsaved changes -- Cmd-S to save, Cmd-O again to discard".into();
+            cx.notify();
+            return;
+        }
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Open".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = receiver.await
+                && let Some(path) = paths.into_iter().next()
+            {
+                this.update_in(cx, |this, window, cx| this.open_path(path, window, cx))
+                    .ok();
+            }
+        })
+        .detach();
+    }
+
+    /// Replaces the document with the outline at `path`.
+    fn open_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+        match load_document(&path, self.load_derived) {
+            Ok(loaded) => {
+                self.document = loaded.document;
+                self.path = loaded.path;
+                self.writable_external = loaded.writable_external;
+                self.original_external = loaded.original_external;
+                self.derived_nodes = loaded.derived_nodes;
+                self.status = loaded.status;
+                self.dirty = false;
+                self.quit_armed = false;
+                self.row_edit = None;
+                self.clipboard = None;
+                self.expanded.clear();
+                self.selected = None;
+                self.search_matches.clear();
+                let first =
+                    (!self.document.outline.roots.is_empty()).then(|| PositionId("0".to_owned()));
+                if first.is_none() {
+                    // Nothing to select, so the selection observer won't clear these.
+                    self.headline
+                        .update(cx, |state, cx| state.set_value("", window, cx));
+                    self.body
+                        .update(cx, |state, cx| state.set_value("", window, cx));
+                }
+                self.refresh_tree(first, cx);
+                self.tree.update(cx, |state, cx| state.focus(window, cx));
+            }
+            Err(error) => self.status = format!("open failed: {error}"),
+        }
+        cx.notify();
+    }
+
     fn minimize_window(&mut self, _: &MinimizeWindow, window: &mut Window, _: &mut Context<Self>) {
         window.minimize_window();
     }
@@ -1081,6 +1149,7 @@ impl Render for GuiApp {
             .on_action(cx.listener(Self::tree_right))
             .on_action(cx.listener(Self::focus_tree))
             .on_action(cx.listener(Self::minimize_window))
+            .on_action(cx.listener(Self::open_file))
             .on_action(cx.listener(Self::zoom_window))
             .on_action(cx.listener(Self::move_up))
             .on_action(cx.listener(Self::move_down))
@@ -1146,7 +1215,11 @@ fn set_menus(cx: &mut App) {
         },
         Menu {
             name: "File".into(),
-            items: vec![MenuItem::action("Save", Save)],
+            items: vec![
+                MenuItem::action("Open…", OpenFile),
+                MenuItem::separator(),
+                MenuItem::action("Save", Save),
+            ],
             disabled: false,
         },
         Menu {
@@ -1289,10 +1362,21 @@ fn language_for(outline: &Outline, position: &PositionId) -> &'static str {
     found.unwrap_or("text")
 }
 
-pub fn run(path: PathBuf, load_derived: bool) -> Result<()> {
-    let mut document = LeoDocument::open(&path)?;
+/// Everything needed to show one outline.
+struct Loaded {
+    document: LeoDocument,
+    path: PathBuf,
+    writable_external: HashMap<NodeId, WritableExternalFile>,
+    original_external: OriginalExternalState,
+    derived_nodes: HashSet<NodeId>,
+    status: String,
+}
+
+/// Opens `path` and, unless `load_derived` is off, loads its derived files.
+fn load_document(path: &Path, load_derived: bool) -> Result<Loaded> {
+    let mut document = LeoDocument::open(path)?;
     let (status, writable_external, original_external, derived_nodes) = if load_derived {
-        let report = load_derived_files(&mut document.outline, &path);
+        let report = load_derived_files(&mut document.outline, path);
         let status = if report.errors.is_empty() {
             format!("loaded {} derived file(s)", report.loaded)
         } else {
@@ -1321,15 +1405,19 @@ pub fn run(path: PathBuf, load_derived: bool) -> Result<()> {
             HashSet::new(),
         )
     };
-
-    let mut seed = Some((
+    Ok(Loaded {
         document,
-        path,
+        path: path.to_path_buf(),
         writable_external,
         original_external,
         derived_nodes,
         status,
-    ));
+    })
+}
+
+pub fn run(path: PathBuf, load_derived: bool) -> Result<()> {
+    let loaded = load_document(&path, load_derived)?;
+    let mut seed = Some((loaded, load_derived));
     gpui_kit::application()
         .with_assets(gpui_kit::assets::Assets)
         .run(move |cx| {
@@ -1344,6 +1432,7 @@ pub fn run(path: PathBuf, load_derived: bool) -> Result<()> {
             .detach();
             cx.bind_keys([
                 KeyBinding::new("cmd-s", Save, None),
+                KeyBinding::new("cmd-o", OpenFile, None),
                 KeyBinding::new("cmd-m", MinimizeWindow, None),
                 KeyBinding::new("cmd-q", Quit, None),
                 KeyBinding::new("cmd-i", InsertSibling, None),
@@ -1368,15 +1457,10 @@ pub fn run(path: PathBuf, load_derived: bool) -> Result<()> {
                 KeyBinding::new("cmd-shift-v", PasteTree, None),
                 KeyBinding::new("cmd-alt-shift-v", PasteClone, None),
             ]);
-            let (document, path, writable, original, derived, status) =
-                seed.take().expect("run once");
+            let (loaded, load_derived) = seed.take().expect("run once");
             gpui_kit::open_window(TitleBar::window_options(), cx, move |window, cx| {
                 Theme::sync_system_appearance(Some(window), cx);
-                cx.new(|cx| {
-                    GuiApp::new(
-                        document, path, writable, original, derived, status, window, cx,
-                    )
-                })
+                cx.new(|cx| GuiApp::new(loaded, load_derived, window, cx))
             })
             .expect("failed to open window");
             // After the key bindings, so the menus can show their shortcuts.
