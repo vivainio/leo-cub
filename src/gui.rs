@@ -8,11 +8,12 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use anyhow::Result;
-use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::highlighter::{LanguageConfig, LanguageRegistry};
 use gpui_kit::component::input::{Editor, EditorState, InputEvent, InputState};
 use gpui_kit::component::list::ListItem;
 use gpui_kit::component::tree::{TreeItem, TreeState, tree};
+use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, Theme, TitleBar};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use leo::{
     LeoDocument, MoveDirection, Node, NodeId, Operation, OperationBatch, OriginalExternalState,
@@ -650,14 +651,112 @@ impl Render for GuiApp {
             .selected_node()
             .is_some_and(|node| self.readonly(&node));
         let theme = cx.theme();
-        let title = format!(
-            "{}{}",
-            self.path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default(),
-            if self.dirty { " *" } else { "" }
+        let (muted, border, sidebar_bg) =
+            (theme.muted_foreground, theme.sidebar_border, theme.sidebar);
+        let file_name = self
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+
+        let title_bar = TitleBar::new().child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .text_sm()
+                .child(file_name)
+                .when(self.dirty, |title| {
+                    title.child(div().size(px(7.)).rounded_full().bg(theme.primary))
+                }),
         );
+
+        let sidebar = div()
+            .w(px(300.))
+            .h_full()
+            .flex()
+            .flex_col()
+            .bg(sidebar_bg)
+            .border_r_1()
+            .border_color(border)
+            .child(
+                div().p_2().child(
+                    gpui_kit::component::input::Input::new(&self.search)
+                        .prefix(Icon::new(IconName::Search).size_4().text_color(muted))
+                        .cleanable(true),
+                ),
+            )
+            .child(div().flex_1().min_h_0().px_1().child(tree(
+                &self.tree,
+                move |ix, entry, selected, _, _| {
+                    let chevron = if entry.is_folder() {
+                        let name = if entry.is_expanded() {
+                            IconName::ChevronDown
+                        } else {
+                            IconName::ChevronRight
+                        };
+                        Icon::new(name)
+                            .size_3()
+                            .text_color(muted)
+                            .into_any_element()
+                    } else {
+                        div().w(px(12.)).into_any_element()
+                    };
+                    ListItem::new(ix)
+                        .selected(selected)
+                        .rounded_md()
+                        .py_0p5()
+                        .pl(px(6. + 14. * entry.depth() as f32))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_1p5()
+                                .text_sm()
+                                .child(chevron)
+                                .child(entry.item().label.clone()),
+                        )
+                },
+            )));
+
+        let main = div()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .flex()
+            .flex_col()
+            .child(
+                div().px_6().pt_4().pb_2().child(
+                    gpui_kit::component::input::Input::new(&self.headline)
+                        .large()
+                        .appearance(false)
+                        .bordered(false)
+                        .readonly(read_only),
+                ),
+            )
+            .child(div().mx_6().h(px(1.)).bg(border))
+            .child(
+                div().flex_1().min_h_0().px_4().py_2().child(
+                    Editor::new(&self.body)
+                        .h(relative(1.))
+                        .appearance(false)
+                        .bordered(false)
+                        .readonly(read_only),
+                ),
+            );
+
+        let status_bar = div()
+            .h(px(26.))
+            .px_3()
+            .flex()
+            .items_center()
+            .bg(sidebar_bg)
+            .border_t_1()
+            .border_color(border)
+            .text_xs()
+            .text_color(muted)
+            .child(self.status.clone());
+
         div()
             .key_context("LeoGui")
             .on_action(cx.listener(Self::save))
@@ -679,73 +778,17 @@ impl Render for GuiApp {
             .flex_col()
             .bg(theme.background)
             .text_color(theme.foreground)
+            .child(title_bar)
             .child(
                 div()
                     .flex()
                     .flex_row()
                     .flex_1()
                     .min_h_0()
-                    .child(
-                        div()
-                            .w(px(340.))
-                            .h_full()
-                            .flex()
-                            .flex_col()
-                            .border_r_1()
-                            .border_color(theme.border)
-                            .child(
-                                div()
-                                    .p_1()
-                                    .child(gpui_kit::component::input::Input::new(&self.search)),
-                            )
-                            .child(div().flex_1().min_h_0().child(tree(
-                                &self.tree,
-                                |ix, entry, selected, _, _| {
-                                    let item = entry.item();
-                                    ListItem::new(ix)
-                                        .selected(selected)
-                                        .pl(px(8. + 16. * entry.depth() as f32))
-                                        .child(format!(
-                                            "{} {}",
-                                            if entry.is_folder() {
-                                                if entry.is_expanded() { "▾" } else { "▸" }
-                                            } else {
-                                                "·"
-                                            },
-                                            item.label
-                                        ))
-                                },
-                            ))),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .h_full()
-                            .flex()
-                            .flex_col()
-                            .gap_2()
-                            .p_2()
-                            .child(
-                                gpui_kit::component::input::Input::new(&self.headline)
-                                    .readonly(read_only),
-                            )
-                            .child(div().flex_1().min_h_0().child(
-                                Editor::new(&self.body).h(relative(1.)).readonly(read_only),
-                            )),
-                    ),
+                    .child(sidebar)
+                    .child(main),
             )
-            .child(
-                div()
-                    .h(px(24.))
-                    .px_2()
-                    .flex()
-                    .items_center()
-                    .border_t_1()
-                    .border_color(theme.border)
-                    .text_sm()
-                    .child(format!("{title}  —  {}", self.status)),
-            )
+            .child(status_bar)
     }
 }
 
@@ -892,36 +935,40 @@ pub fn run(path: PathBuf, load_derived: bool) -> Result<()> {
         derived_nodes,
         status,
     ));
-    gpui_kit::application().run(move |cx| {
-        gpui_kit::init(cx);
-        register_languages();
-        cx.bind_keys([
-            KeyBinding::new("cmd-s", Save, Some("LeoGui")),
-            KeyBinding::new("cmd-q", Quit, Some("LeoGui")),
-            KeyBinding::new("cmd-i", InsertSibling, Some("LeoGui")),
-            KeyBinding::new("cmd-shift-i", InsertChild, Some("LeoGui")),
-            KeyBinding::new("cmd-backspace", DeleteNode, Some("LeoGui")),
-            KeyBinding::new("cmd-f", FindFocus, Some("LeoGui")),
-            KeyBinding::new("cmd-alt-up", MoveUp, Some("LeoGui")),
-            KeyBinding::new("cmd-alt-down", MoveDown, Some("LeoGui")),
-            KeyBinding::new("cmd-alt-left", MoveLeft, Some("LeoGui")),
-            KeyBinding::new("cmd-alt-right", MoveRight, Some("LeoGui")),
-            KeyBinding::new("cmd-shift-c", CopyTree, Some("LeoGui")),
-            KeyBinding::new("cmd-shift-x", CutTree, Some("LeoGui")),
-            KeyBinding::new("cmd-shift-v", PasteTree, Some("LeoGui")),
-            KeyBinding::new("cmd-alt-shift-v", PasteClone, Some("LeoGui")),
-        ]);
-        let (document, path, writable, original, derived, status) = seed.take().expect("run once");
-        gpui_kit::open_window(WindowOptions::default(), cx, move |window, cx| {
-            cx.new(|cx| {
-                GuiApp::new(
-                    document, path, writable, original, derived, status, window, cx,
-                )
+    gpui_kit::application()
+        .with_assets(gpui_kit::assets::Assets)
+        .run(move |cx| {
+            gpui_kit::init(cx);
+            register_languages();
+            cx.bind_keys([
+                KeyBinding::new("cmd-s", Save, Some("LeoGui")),
+                KeyBinding::new("cmd-q", Quit, Some("LeoGui")),
+                KeyBinding::new("cmd-i", InsertSibling, Some("LeoGui")),
+                KeyBinding::new("cmd-shift-i", InsertChild, Some("LeoGui")),
+                KeyBinding::new("cmd-backspace", DeleteNode, Some("LeoGui")),
+                KeyBinding::new("cmd-f", FindFocus, Some("LeoGui")),
+                KeyBinding::new("cmd-alt-up", MoveUp, Some("LeoGui")),
+                KeyBinding::new("cmd-alt-down", MoveDown, Some("LeoGui")),
+                KeyBinding::new("cmd-alt-left", MoveLeft, Some("LeoGui")),
+                KeyBinding::new("cmd-alt-right", MoveRight, Some("LeoGui")),
+                KeyBinding::new("cmd-shift-c", CopyTree, Some("LeoGui")),
+                KeyBinding::new("cmd-shift-x", CutTree, Some("LeoGui")),
+                KeyBinding::new("cmd-shift-v", PasteTree, Some("LeoGui")),
+                KeyBinding::new("cmd-alt-shift-v", PasteClone, Some("LeoGui")),
+            ]);
+            let (document, path, writable, original, derived, status) =
+                seed.take().expect("run once");
+            gpui_kit::open_window(TitleBar::window_options(), cx, move |window, cx| {
+                Theme::sync_system_appearance(Some(window), cx);
+                cx.new(|cx| {
+                    GuiApp::new(
+                        document, path, writable, original, derived, status, window, cx,
+                    )
+                })
             })
-        })
-        .expect("failed to open window");
-        cx.activate(true);
-    });
+            .expect("failed to open window");
+            cx.activate(true);
+        });
     Ok(())
 }
 
