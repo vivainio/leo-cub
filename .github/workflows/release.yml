@@ -29,6 +29,7 @@ jobs:
             target: x86_64-pc-windows-msvc
             archive: cub-windows-x86_64.zip
             binary: cub.exe
+            build_args: --features gui
           - os: macos-latest
             target: x86_64-apple-darwin
             archive: cub-macos-x86_64.tar.gz
@@ -67,7 +68,7 @@ jobs:
           cargo set-version "${VERSION#v}"
 
       - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }} --locked
+        run: cargo build --release --target ${{ matrix.target }} --locked ${{ matrix.build_args }}
 
       - name: Create archive
         shell: bash

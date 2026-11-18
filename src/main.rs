@@ -350,6 +350,10 @@ fn launched_from_app_bundle() -> bool {
 }
 
 fn main() -> Result<()> {
+    #[cfg(all(feature = "gui", target_os = "windows"))]
+    if std::env::args_os().len() == 1 {
+        return gui::run(None, true);
+    }
     #[cfg(all(feature = "gui", target_os = "macos"))]
     if launched_from_app_bundle() {
         return gui::run(None, true);

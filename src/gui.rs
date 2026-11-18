@@ -1635,6 +1635,7 @@ fn untitled() -> Loaded {
 }
 
 pub fn run(path: Option<PathBuf>, load_derived: bool) -> Result<()> {
+    let prompt_on_startup = path.is_none();
     let loaded = match &path {
         Some(path) => load_document(path, load_derived)?,
         None => untitled(),
@@ -1688,7 +1689,14 @@ pub fn run(path: Option<PathBuf>, load_derived: bool) -> Result<()> {
             let (loaded, load_derived, recent) = seed.take().expect("run once");
             gpui_kit::open_window(TitleBar::window_options(), cx, move |window, cx| {
                 Theme::sync_system_appearance(Some(window), cx);
-                cx.new(|cx| GuiApp::new(loaded, load_derived, recent, window, cx))
+                let app = cx.new(|cx| GuiApp::new(loaded, load_derived, recent, window, cx));
+                if prompt_on_startup {
+                    let app = app.downgrade();
+                    window.defer(cx, move |window, cx| {
+                        let _ = app.update(cx, |app, cx| app.open_file(&OpenFile, window, cx));
+                    });
+                }
+                app
             })
             .expect("failed to open window");
             // After the key bindings, so the menus can show their shortcuts.
